@@ -1,0 +1,8 @@
+# build artifact
+/kcpos
+
+# runtime session data (when running kcpos inside its own repo)
+/.kcpos/
+
+# macOS
+.DS_Store
