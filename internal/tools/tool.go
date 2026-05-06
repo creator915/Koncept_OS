@@ -39,6 +39,7 @@ func Builtins() map[string]Tool {
 		"graph_preflight":        graphPreflightTool(),
 		"graph_render":           graphRenderTool(),
 		"session_create":         sessionCreateTool(),
+		"session_start":          sessionStartTool(),
 		"session_show":           sessionShowTool(),
 		"session_list":           sessionListTool(),
 		"session_status":         sessionStatusTool(),

@@ -12,7 +12,7 @@ import (
 )
 
 // DefaultDir is the conventional location for session JSONs, relative to the
-// project root (cwd when kcpos runs). Matches CLAUDE.md §2.
+// project root (cwd when kcpos runs).
 const DefaultDir = "K/sessions"
 
 // Path returns the JSON file path for a session id under dir.

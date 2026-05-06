@@ -12,10 +12,10 @@ import (
 	"github.com/creator915/Koncept_OS/internal/session"
 )
 
-// Session tools manage KonceptOS work-sessions stored under K/sessions/.
-// These are distinct from the chat transcript — they track units of design /
+// Session tools manage work-sessions stored under K/sessions/. These are
+// distinct from the chat transcript — they track units of design /
 // implementation work over the hypergraph (lifecycle, parent/child tree,
-// future graphDiff). Per CLAUDE.md §5.
+// graphDiff for rollback).
 
 func sessionCreateTool() Tool {
 	return Tool{
@@ -79,6 +79,63 @@ func sessionCreateTool() Tool {
 				parentInfo = " (child of " + s.Parent + ")"
 			}
 			return fmt.Sprintf("created session %s%s · status=waiting", s.ID, parentInfo), nil
+		},
+	}
+}
+
+func sessionStartTool() Tool {
+	return Tool{
+		Spec: chat.ToolSpec{
+			Type: "function",
+			Function: chat.ToolFunction{
+				Name:        "session_start",
+				Description: "Atomically create + activate + focus a new KonceptOS work-session. Equivalent to session_create → session_status active → session_focus, but inseparable so any graph mutations you make next get correctly recorded to this session's graphDiff. **Use this instead of the three-step combo whenever you're starting fresh work** — it eliminates the common bug where a session is created but graph operations happen before focus, leaving graphDiff empty.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":     map[string]interface{}{"type": "string", "description": "Session id (s_ auto-prepended if missing)."},
+						"parent": map[string]interface{}{"type": "string", "description": "Parent session id, or empty for a root session."},
+						"task":   map[string]interface{}{"type": "string", "description": "Brief task description."},
+						"signatures": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "Optional. Graph object IDs this session will work on.",
+						},
+						"context": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "Optional. Graph attribute IDs in scope.",
+						},
+					},
+					"required": []string{"id", "task"},
+				},
+			},
+		},
+		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			rawID, _ := args["id"].(string)
+			id, err := session.NormalizeID(rawID)
+			if err != nil {
+				return "", err
+			}
+			parent, _ := args["parent"].(string)
+			parent = strings.TrimSpace(parent)
+			task, _ := args["task"].(string)
+			if task == "" {
+				return "", fmt.Errorf("task required")
+			}
+			input := session.Input{
+				Signatures: stringList(args["signatures"]),
+				Context:    stringList(args["context"]),
+			}
+			s, err := session.Start(session.DefaultDir, id, parent, task, input)
+			if err != nil {
+				return "", err
+			}
+			parentInfo := ""
+			if s.Parent != "" {
+				parentInfo = " · parent=" + s.Parent
+			}
+			return fmt.Sprintf("started %s · status=active · focused%s", s.ID, parentInfo), nil
 		},
 	}
 }
@@ -205,7 +262,7 @@ func sessionDeleteTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "session_delete",
-				Description: "Roll back a session: depth-first roll back all children (reverse-applying their graphDiff to K/graph.json), then reverse-apply this session's graphDiff, then delete the session JSON. Per CLAUDE.md §5.3. Use when a session fails or is abandoned. If the rolled-back session was the focused one, focus is cleared.",
+				Description: "Roll back a session: depth-first roll back all children (reverse-applying their graphDiff to K/graph.json), then reverse-apply this session's graphDiff, then delete the session JSON. Also deletes def/impl files this session created. Use when a session fails or is abandoned. If the rolled-back session was the focused one, focus is cleared.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -287,7 +344,7 @@ func sessionAggregateTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "session_aggregate",
-				Description: "Walk a session and all its descendants, dedupe-merging their output.{implementations, newSignatures, newAttributes, tests} into the named session. Use this on the root session before final gate-check (CLAUDE.md §5.5 R1). graphDiff is intentionally NOT merged — each session keeps its own for rollback purposes.",
+				Description: "Walk a session and all its descendants, dedupe-merging their output.{implementations, newSignatures, newAttributes, tests} into the named session. Use this on the root session before final gate-check. graphDiff is intentionally NOT merged — each session keeps its own for rollback purposes.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -320,7 +377,7 @@ func sessionGateCheckTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "session_gate_check",
-				Description: "Verify a session is ready to be finished, per CLAUDE.md §5.1.1 + §5.5 R5. Checks: all children finished or deleted; every object in graphDiff.added is confirmed with impl file on disk (non-empty); session has aggregated outputs if it has children; checkpoint (if any) is frozen with FinalVerdict=PASS. Returns a PASS/FAIL report listing each violation. NOTE: skips gameplayProof check (§5.1.1#7) per the convergent variant.",
+				Description: "Verify a session is ready to be finished. Checks: all children finished or deleted; every object in graphDiff.added is confirmed with impl file on disk (non-empty); session has aggregated outputs if it has children; checkpoint (if any) is frozen with FinalVerdict=PASS. For root sessions, additionally walks the entire graph and requires every object to be confirmed with a real impl file. Returns a PASS/FAIL report listing each violation. Mechanical verification only — no UI/runtime simulation.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{

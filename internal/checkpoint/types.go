@@ -1,8 +1,9 @@
-// Package checkpoint implements the KonceptOS verification checklist
-// (CLAUDE.md §0 + §5.5). The convergent variant: drops gameplayProof
-// (which would require simulating user interaction) and keeps only
-// codeProof — the file:line + symbol that demonstrates each requirement
-// is implemented. Mechanical agent verification only.
+// Package checkpoint implements the project verification checklist:
+// each requirement is added as an item, the list is frozen, then each
+// must-item is filled with a codeProof (file:line + symbol) before the
+// project is considered done. Mechanical verification only — no
+// gameplayProof / UI / runtime-simulation requirements (those can't be
+// reliably checked by an agent).
 //
 // Storage: K/checkpoint.json — one per project.
 //
@@ -96,7 +97,7 @@ func New() *Checkpoint {
 	}
 }
 
-// idPattern: CHK- followed by digits or alphanumerics. Permissive (CLAUDE.md
+// idPattern: CHK- followed by digits or alphanumerics. Permissive (the spec
 // uses "CHK-001"-style; we accept "CHK-XXX" or any non-empty token after
 // the prefix). Mostly to keep ids regular and easy to grep.
 var idPattern = regexp.MustCompile(`^CHK-[A-Za-z0-9_]+$`)

@@ -87,7 +87,7 @@ func runGraphCreate(args []string) int {
 	fs := flag.NewFlagSet("kcpos graph create "+kind, flag.ExitOnError)
 	id := fs.String("id", "", "node id")
 	intent := fs.String("intent", "", "design intent")
-	def := fs.String("def", "", "definition file path (default defs/<id>.ts)")
+	def := fs.String("def", "", "definition file path (default defs/<id>.ts per TS-first spec)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}

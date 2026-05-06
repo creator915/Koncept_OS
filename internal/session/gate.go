@@ -9,7 +9,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/graph"
 )
 
-// GateReport summarizes the result of a §5.1.1 / §5.5 R5 gate check.
+// GateReport summarizes the result of a session-finish gate check.
 type GateReport struct {
 	SessionID string   `json:"sessionId"`
 	Status    string   `json:"status"` // "PASS" or "FAIL"
@@ -17,9 +17,9 @@ type GateReport struct {
 }
 
 // CheckGate verifies the conditions a session must meet before it can be
-// marked finished. Per CLAUDE.md §5.1.1 (apply broadly) plus §5.5 R5 (root
-// session only). The convergent variant skips gameplayProof requirements
-// (CLAUDE.md §5.1.1#7) since they cannot be mechanically verified.
+// marked finished. Mechanical verification only: skips any
+// gameplayProof / runtime-simulation requirements since those cannot be
+// reliably checked by an agent.
 //
 // Args:
 //   - sessionDir: K/sessions/
@@ -33,57 +33,86 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 		return nil, err
 	}
 
-	// §5.1.1#4 — every child finished or deleted
+	// children-finished — every child finished or deleted
 	for _, childID := range s.Children {
 		if !Exists(sessionDir, childID) {
 			continue // deleted = resolved
 		}
 		child, err := Load(sessionDir, childID)
 		if err != nil {
-			r.Issues = append(r.Issues, fmt.Sprintf("§5.1.1#4: failed to load child %s: %v", childID, err))
+			r.Issues = append(r.Issues, fmt.Sprintf("[children-finished] failed to load child %s: %v", childID, err))
 			continue
 		}
 		if child.Status != StatusFinished {
-			r.Issues = append(r.Issues, fmt.Sprintf("§5.1.1#4: child %s is %s (must be finished or deleted)", childID, child.Status))
+			r.Issues = append(r.Issues, fmt.Sprintf("[children-finished] child %s is %s (must be finished or deleted)", childID, child.Status))
 		}
 	}
 
-	// §5.1.1#1+2 — every object created/modified by this session is confirmed + has impl on disk
+	// session-objects-confirmed — every object created/modified by this session is confirmed + has impl on disk
 	g, err := graph.LoadOrInit(graphPath)
 	if err == nil {
 		cwd, _ := os.Getwd()
 		for objID := range s.Output.GraphDiff.Added.Objects {
 			obj, present := g.Objects[objID]
 			if !present {
-				r.Issues = append(r.Issues, fmt.Sprintf("§5.1.1#1: object %s in graphDiff.added.objects but not in current graph", objID))
+				r.Issues = append(r.Issues, fmt.Sprintf("[session-objects-confirmed] object %s in graphDiff.added.objects but not in current graph", objID))
 				continue
 			}
 			if obj.Status != graph.StatusConfirmed {
-				r.Issues = append(r.Issues, fmt.Sprintf("§5.1.1#1: object %s status=%s (must be confirmed)", objID, obj.Status))
+				r.Issues = append(r.Issues, fmt.Sprintf("[session-objects-confirmed] object %s status=%s (must be confirmed)", objID, obj.Status))
 			}
 			if obj.Impl == nil || *obj.Impl == "" {
-				r.Issues = append(r.Issues, fmt.Sprintf("§5.1.1#1: object %s has no impl set", objID))
+				r.Issues = append(r.Issues, fmt.Sprintf("[session-objects-confirmed] object %s has no impl set", objID))
 			} else if !implFileOK(*obj.Impl, cwd) {
-				r.Issues = append(r.Issues, fmt.Sprintf("§5.1.1#2: object %s impl %q missing or empty on disk", objID, *obj.Impl))
+				r.Issues = append(r.Issues, fmt.Sprintf("[impl-on-disk] object %s impl %q missing or empty on disk", objID, *obj.Impl))
 			}
 		}
 	}
 
-	// §5.1.1#8 — sessions with children should aggregate outputs (non-empty
+	// outputs-aggregated — sessions with children should aggregate outputs (non-empty
 	// implementations list). Defensive: this is a soft signal that the agent
 	// forgot to call Aggregate before finishing.
 	if len(s.Children) > 0 && len(s.Output.Implementations) == 0 {
-		r.Issues = append(r.Issues, "§5.1.1#8: session has children but output.implementations is empty — call session_aggregate before finishing")
+		r.Issues = append(r.Issues, "[outputs-aggregated] session has children but output.implementations is empty — call session_aggregate before finishing")
 	}
 
-	// §5.1.1#6 — checkpoint final verdict (only meaningful when frozen)
+	// root-deliver — root sessions deliver a fully-implemented graph. Even
+	// if individual sessions' graphDiff captures were missed (e.g. focus
+	// was set late), the root cannot finish until every object on the graph
+	// is confirmed, has an impl path set, and that file exists & is non-empty.
+	// This rule does NOT depend on graphDiff capture; it inspects the graph
+	// state directly. Non-root sessions skip this check.
+	if s.Parent == "" && err == nil {
+		cwd, _ := os.Getwd()
+		// Check every object the graph contains, regardless of which session created it.
+		for objID, obj := range g.Objects {
+			if obj.Status != graph.StatusConfirmed {
+				r.Issues = append(r.Issues, fmt.Sprintf("[root-deliver] object %s status=%s (root finish requires every graph object to be confirmed)", objID, obj.Status))
+				continue
+			}
+			if obj.Impl == nil || *obj.Impl == "" {
+				r.Issues = append(r.Issues, fmt.Sprintf("[root-deliver] object %s confirmed but no impl path set", objID))
+				continue
+			}
+			if !implFileOK(*obj.Impl, cwd) {
+				r.Issues = append(r.Issues, fmt.Sprintf("[root-deliver] object %s impl %q missing or empty on disk", objID, *obj.Impl))
+			}
+		}
+		// Also surface attribute orphans-of-truth: an attribute that was
+		// declared but never advanced is fine on a non-root, but on root
+		// it suggests the type was named and forgotten. Warn (not error).
+		// Currently we only error on objects since attributes don't have
+		// impl semantics in the same way.
+	}
+
+	// checkpoint-pass — checkpoint final verdict (only meaningful when frozen)
 	if checkpointPath != "" {
 		if c, err := checkpoint.LoadOrInit(checkpointPath); err == nil {
 			c.RecomputeSummary()
 			if !c.Frozen {
-				r.Issues = append(r.Issues, "§5.1.1#6: checkpoint not frozen yet — freeze and fill before gate-check")
+				r.Issues = append(r.Issues, "[checkpoint-pass] checkpoint not frozen yet — freeze and fill before gate-check")
 			} else if c.Summary.FinalVerdict != checkpoint.VerdictPass {
-				r.Issues = append(r.Issues, fmt.Sprintf("§5.1.1#6: checkpoint verdict is %s (need PASS)", c.Summary.FinalVerdict))
+				r.Issues = append(r.Issues, fmt.Sprintf("[checkpoint-pass] checkpoint verdict is %s (need PASS)", c.Summary.FinalVerdict))
 			}
 		}
 	}

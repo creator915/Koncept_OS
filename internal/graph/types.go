@@ -7,8 +7,7 @@ const (
 )
 
 // Graph is the hypergraph: attributes are nodes, objects are hyperedges
-// connecting consumed and produced attributes. The schema mirrors KonceptOS
-// AGENT.md §3.
+// connecting consumed and produced attributes.
 type Graph struct {
 	Attributes map[string]*Attribute `json:"attributes"`
 	Objects    map[string]*Object    `json:"objects"`

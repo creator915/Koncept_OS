@@ -86,7 +86,7 @@ func (r *ValidationReport) String() string {
 // Validate runs all checker rules against g. cwd is used for filesystem-
 // touching rules (impl-existence); pass "" to skip those.
 //
-// Rules implemented (CLAUDE.md §8.2):
+// Rules implemented:
 //
 //	ERROR  1 produce-consume-balance
 //	ERROR  2 refines-dag (no cycles)
@@ -114,6 +114,7 @@ func (g *Graph) Validate(cwd string) *ValidationReport {
 	checkMetadataCompleteness(g, r)
 	if cwd != "" {
 		checkImplExistence(g, r, cwd)
+		checkDefExistence(g, r, cwd)
 	}
 
 	return r
@@ -339,6 +340,36 @@ func checkOrphanAttributes(g *Graph, r *ValidationReport) {
 		if produced[id] && !consumed[id] {
 			r.Issues = append(r.Issues, Issue{Warn, rule, id, "produced but never consumed (terminal output, or dead)"})
 		}
+	}
+}
+
+// --- def-existence: WARN when def points at a path that does not exist on disk ---
+//
+// Writing the def file is the first work-step in the workflow (the
+// "L0 / signature" stage). A node whose def points at a phantom file
+// means that work-step was skipped (or the def was misnamed). This check
+// is independent of impl status: a confirmed object can have its impl
+// file present but its def file still missing.
+
+func checkDefExistence(g *Graph, r *ValidationReport, cwd string) {
+	const rule = "def-existence"
+	check := func(kind, id, def string) {
+		if def == "" {
+			return // empty def is a separate metadata-completeness warning
+		}
+		path := def
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, path)
+		}
+		if _, err := os.Stat(path); err != nil {
+			r.Issues = append(r.Issues, Issue{Warn, rule, id, fmt.Sprintf("%s def %q does not exist on disk (signature file not yet written)", kind, def)})
+		}
+	}
+	for id, a := range g.Attributes {
+		check("attribute", id, a.Def)
+	}
+	for id, o := range g.Objects {
+		check("object", id, o.Def)
 	}
 }
 

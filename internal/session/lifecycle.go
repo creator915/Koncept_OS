@@ -41,8 +41,8 @@ func Create(dir, id, parent, task string, input Input) (*Session, error) {
 }
 
 // SetStatus loads, transitions, and persists. Enforces the parent-child
-// invariant from CLAUDE.md §5.4 path B step 10: a session may only finish
-// when every child is either finished or already deleted.
+// invariant: a session may only finish when every child is either
+// finished or already deleted.
 func SetStatus(dir, id string, to Status) (*Session, error) {
 	s, err := Load(dir, id)
 	if err != nil {

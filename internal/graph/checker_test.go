@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -220,6 +221,48 @@ func TestValidate_MetadataMissing(t *testing.T) {
 	}
 	if got != 2 {
 		t.Errorf("expected 2 metadata-completeness warns for 'x', got %d; report:\n%s", got, r.String())
+	}
+}
+
+func TestValidate_DefMissing(t *testing.T) {
+	// def points at a phantom file path → def-existence WARN.
+	g := NewGraph()
+	g.AddAttribute("a", NewAttribute("defs/phantom_attr.ts", "intent"))
+	g.AddObject("Op", NewObject("defs/PhantomOp.ts", "intent"))
+	r := g.Validate(t.TempDir()) // empty dir, defs don't exist
+	gotAttr, gotObj := false, false
+	for _, i := range r.Issues {
+		if i.Rule == "def-existence" && i.Severity == Warn {
+			if i.Where == "a" {
+				gotAttr = true
+			}
+			if i.Where == "Op" {
+				gotObj = true
+			}
+		}
+	}
+	if !gotAttr || !gotObj {
+		t.Errorf("expected def-existence WARN for both attribute and object; report:\n%s", r.String())
+	}
+}
+
+func TestValidate_DefPresent_NoWarn(t *testing.T) {
+	dir := t.TempDir()
+	defPath := dir + "/defs/a.ts"
+	if err := os.MkdirAll(dir+"/defs", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(defPath, []byte("export type A = number\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := NewGraph()
+	g.AddAttribute("a", NewAttribute("defs/a.ts", "intent"))
+	r := g.Validate(dir)
+	for _, i := range r.Issues {
+		if i.Rule == "def-existence" && i.Where == "a" {
+			t.Errorf("def-existence should not warn when file exists: %s", i.Message)
+		}
 	}
 }
 

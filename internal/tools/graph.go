@@ -75,13 +75,13 @@ func graphCreateAttributeTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "graph_create_attribute",
-				Description: "Add a new attribute (data type / hypergraph node) to K/graph.json. Errors if id already exists. Status starts as 'declared'.",
+				Description: "Add a new attribute (data type / hypergraph node) to K/graph.json. Errors if id already exists. Status starts as 'declared'.\n\nDefault `def` is `defs/<id>.ts` (TypeScript-first convention). For non-TS projects (Go / Python / single-file HTML), pass `def` explicitly to point at the actual file where this type's signature lives — otherwise the def-existence check will warn. After creation, you (or a child) are responsible for creating that file with the type definition.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":     map[string]interface{}{"type": "string", "description": "snake_case identifier, e.g. 'weather_data'."},
 						"intent": map[string]interface{}{"type": "string", "description": "Design intent — what this attribute represents. Be descriptive; redundancy beats omission."},
-						"def":    map[string]interface{}{"type": "string", "description": "Path to TypeScript/Go definition file, e.g. 'defs/weather_data.ts'. Optional; defaults to 'defs/<id>.ts'."},
+						"def":    map[string]interface{}{"type": "string", "description": "Path to the type-definition file. Defaults to 'defs/<id>.ts' (TS-first spec). Override for non-TS projects."},
 					},
 					"required": []string{"id", "intent"},
 				},
@@ -116,13 +116,13 @@ func graphCreateObjectTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "graph_create_object",
-				Description: "Add a new object (function type / hyperedge) to K/graph.json. Errors if id already exists. Status starts as 'declared'.",
+				Description: "Add a new object (function type / hyperedge) to K/graph.json. Errors if id already exists. Status starts as 'declared'.\n\nDefault `def` is `defs/<id>.ts` (TypeScript-first convention). For non-TS projects, pass `def` explicitly. After creation you must (a) create the def file with the function signature and (b) once implemented, call `graph_merge_object --patch '{\"impl\":\"<actual file>\",\"status\":\"confirmed\"}'` to mark the work done — otherwise the §root-deliver gate will block session finish.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":     map[string]interface{}{"type": "string", "description": "PascalCase identifier, e.g. 'NormalizeWeather'."},
 						"intent": map[string]interface{}{"type": "string", "description": "Design intent — what this object computes."},
-						"def":    map[string]interface{}{"type": "string", "description": "Path to definition file. Optional; defaults to 'defs/<id>.ts'."},
+						"def":    map[string]interface{}{"type": "string", "description": "Path to the signature file. Defaults to 'defs/<id>.ts' (TS-first spec). Override for non-TS projects."},
 					},
 					"required": []string{"id", "intent"},
 				},
@@ -475,7 +475,7 @@ func graphPreflightTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "graph_preflight",
-				Description: "Analyze a batch of object ids for parallel-execution safety per CLAUDE.md §5.4 path B step 5. Builds a dependency graph from consumes/produces edges (with subtype substitution) and partitions into topologically sorted waves. Returns SAFE with the wave plan, or UNSAFE if a dependency cycle is detected (the cycle path is reported). Also flags potential value-dependencies — multiple objects in the same wave consuming the same attribute, which may need serial execution if their value-space assumptions diverge. Call this BEFORE dispatching parallel sub-sessions.",
+				Description: "Analyze a batch of object ids for parallel-execution safety. Builds a dependency graph from consumes/produces edges (with subtype substitution) and partitions into topologically sorted waves. Returns SAFE with the wave plan, or UNSAFE if a dependency cycle is detected (the cycle path is reported). Also flags potential value-dependencies — multiple objects in the same wave consuming the same attribute, which may need serial execution if their value-space assumptions diverge. Call this BEFORE dispatching parallel sub-sessions.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{

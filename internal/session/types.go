@@ -1,11 +1,11 @@
-// Package session models KonceptOS work-sessions: tracked units of design /
+// Package session models work-sessions: tracked units of design /
 // implementation work over the hypergraph. A session has lifecycle states
-// (waiting → active → finished), parent/child relations forming a tree, and a
-// graphDiff field reserved for tracking the structural changes the session
-// made (used for rollback in a later slice).
+// (waiting → active → finished), parent/child relations forming a tree, and
+// a graphDiff field tracking the structural changes the session made
+// (used for rollback).
 //
 // This is distinct from internal/transcript, which persists the user-agent
-// chat conversation. Per CLAUDE.md §5.
+// chat conversation.
 package session
 
 import (
@@ -52,7 +52,7 @@ type Output struct {
 
 // GraphDiff tracks the changes a session made to K/graph.json. Populated
 // implicitly or explicitly during the session's active phase; used to
-// reverse-apply on rollback. Schema mirrors CLAUDE.md §5.2 graphDiff format.
+// reverse-apply on rollback.
 //
 // In the current slice this field is created empty and not auto-captured —
 // future work will hook the graph_* tools to record diffs. The shape is
@@ -105,7 +105,7 @@ func emptyGraphDiff() GraphDiff {
 }
 
 // idPattern enforces session-id convention: "s_" + lowercase letter, then
-// alphanumerics and underscores. Per CLAUDE.md §4.1.
+// alphanumerics and underscores.
 var idPattern = regexp.MustCompile(`^s_[a-z][a-z0-9_]*$`)
 
 // ValidateID returns nil if id meets the s_<name> convention, error otherwise.
@@ -160,10 +160,9 @@ func New(id, parent, task string, input Input) *Session {
 	}
 }
 
-// validTransitions defines the allowed status moves. Per CLAUDE.md §5.1
-// sessions go strictly waiting → active → finished. Anything else (delete,
-// rollback) is handled by removing the session entirely, not by status
-// changes.
+// validTransitions defines the allowed status moves: sessions go strictly
+// waiting → active → finished. Anything else (delete, rollback) is handled
+// by removing the session entirely, not by status changes.
 var validTransitions = map[Status]map[Status]bool{
 	StatusWaiting:  {StatusActive: true},
 	StatusActive:   {StatusFinished: true},

@@ -24,6 +24,8 @@ func runSession(args []string) int {
 		return runSessionShow(rest)
 	case "create":
 		return runSessionCreate(rest)
+	case "start":
+		return runSessionStart(rest)
 	case "status":
 		return runSessionStatus(rest)
 	case "focus":
@@ -49,6 +51,7 @@ Usage:
   kcpos session list [--status waiting|active|finished]
   kcpos session show <id>
   kcpos session create --id ID --task "..." [--parent ID]
+  kcpos session start  --id ID --task "..." [--parent ID]   # create+active+focus atomic
   kcpos session status --id ID --to active|finished
   kcpos session focus [--id ID | --clear]
   kcpos session delete --id ID                       # rolls back graphDiff
@@ -150,6 +153,30 @@ func runSessionCreate(args []string) int {
 		return printErr(err)
 	}
 	fmt.Printf("created %s · status=%s\n", s.ID, s.Status)
+	return 0
+}
+
+func runSessionStart(args []string) int {
+	fs := flag.NewFlagSet("kcpos session start", flag.ExitOnError)
+	id := fs.String("id", "", "session id")
+	parent := fs.String("parent", "", "parent session id (empty = root)")
+	task := fs.String("task", "", "task description")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *id == "" || *task == "" {
+		fmt.Fprintln(os.Stderr, "--id and --task required")
+		return 1
+	}
+	normID, err := session.NormalizeID(*id)
+	if err != nil {
+		return printErr(err)
+	}
+	s, err := session.Start(session.DefaultDir, normID, *parent, *task, session.Input{})
+	if err != nil {
+		return printErr(err)
+	}
+	fmt.Printf("started %s · status=%s · focused\n", s.ID, s.Status)
 	return 0
 }
 

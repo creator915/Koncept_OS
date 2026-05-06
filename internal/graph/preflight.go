@@ -6,8 +6,9 @@ import (
 	"strings"
 )
 
-// PreflightResult is the safety analysis for parallelizing a batch of objects
-// per CLAUDE.md §5.4 path B step 4-5.
+// PreflightResult is the safety analysis for parallelizing a batch of
+// objects: structural dependency map + topological waves + cycle detection
+// + heuristic value-dependency warnings.
 type PreflightResult struct {
 	Status   string     // "SAFE" or "UNSAFE"
 	Waves    [][]string // topologically sorted; each wave is parallel-safe

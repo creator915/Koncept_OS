@@ -11,9 +11,9 @@ import (
 )
 
 // Checkpoint tools maintain K/checkpoint.json — the project verification
-// ledger per CLAUDE.md §0 + §5.5 (convergent variant: codeProof only,
-// gameplayProof omitted because mechanical agent verification cannot
-// realistically simulate user interaction).
+// ledger. Mechanical verification only: codeProof (file:line + symbol);
+// no gameplayProof / UI / runtime-simulation requirements, because those
+// can't be reliably checked by an agent.
 
 func checkpointAddItemTool() Tool {
 	return Tool{

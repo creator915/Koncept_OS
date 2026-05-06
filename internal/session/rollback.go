@@ -3,13 +3,15 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/creator915/Koncept_OS/internal/graph"
 )
 
 // Rollback recursively rolls back a session: depth-first roll back children
 // first (reversing each child's diff), then reverse-apply this session's
-// diff to graphPath, then delete the session JSON. Per CLAUDE.md §5.3.
+// diff to graphPath, then delete the session JSON.
 //
 // If id refers to a non-existent session, this is a no-op (returns nil).
 // Returns the list of session ids deleted in deletion order, plus any error.
@@ -45,19 +47,70 @@ func Rollback(sessionDir, graphPath, id string) ([]string, error) {
 		return deleted, err
 	}
 
-	// 3. Delete the session JSON (which detaches from parent's children list).
+	// 3. Delete impl + def files for entities this
+	// session created. We resolve paths relative to the cwd that session.go
+	// already trusts as "project root" (same convention as impl-existence
+	// check). Files outside the project (absolute paths or `..` traversals)
+	// are silently skipped to avoid arbitrary deletes from a misbehaving
+	// agent. Best-effort: stat/Remove errors are swallowed since the graph
+	// has already been reverted; leftover files are logged.
+	cwd, _ := os.Getwd()
+	filesDeleted := deleteAddedFiles(&s.Output.GraphDiff, cwd)
+	if len(filesDeleted) > 0 {
+		fmt.Fprintf(os.Stderr, "[rollback %s] deleted %d source file(s): %v\n", id, len(filesDeleted), filesDeleted)
+	}
+
+	// 4. Delete the session JSON (which detaches from parent's children list).
 	subDeleted, err := DeleteRecursive(sessionDir, id)
 	if err != nil {
 		return deleted, err
 	}
 	deleted = append(deleted, subDeleted...)
 
-	// 4. If this was the focused session, clear focus.
+	// 5. If this was the focused session, clear focus.
 	if err := ClearFocusIf(sessionDir, id); err != nil {
 		return deleted, fmt.Errorf("clear focus after rollback of %s: %w", id, err)
 	}
 
 	return deleted, nil
+}
+
+// deleteAddedFiles walks GraphDiff.Added and removes the def + impl files
+// for each newly-added entity. Returns the list of relative paths actually
+// removed. Path safety: absolute paths and any path with a `..` component
+// are skipped (filepath.IsLocal). Missing files are silently skipped.
+func deleteAddedFiles(d *GraphDiff, cwd string) []string {
+	if cwd == "" || d == nil {
+		return nil
+	}
+	var removed []string
+	tryRemove := func(rel string) {
+		if rel == "" || !filepath.IsLocal(rel) {
+			return
+		}
+		path := filepath.Join(cwd, rel)
+		if err := os.Remove(path); err == nil {
+			removed = append(removed, rel)
+		}
+	}
+	for _, raw := range d.Added.Attributes {
+		var attr graph.Attribute
+		if err := json.Unmarshal(raw, &attr); err != nil {
+			continue
+		}
+		tryRemove(attr.Def)
+	}
+	for _, raw := range d.Added.Objects {
+		var obj graph.Object
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			continue
+		}
+		tryRemove(obj.Def)
+		if obj.Impl != nil {
+			tryRemove(*obj.Impl)
+		}
+	}
+	return removed
 }
 
 // applyReverseDiff reverses a captured GraphDiff against g:

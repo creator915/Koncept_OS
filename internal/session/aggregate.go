@@ -6,7 +6,7 @@ import (
 
 // Aggregate walks a session and all its descendants, collecting their
 // output.{implementations, newSignatures, newAttributes, tests} fields into
-// a single deduplicated list on the named session. Per CLAUDE.md §5.5 R1.
+// a single deduplicated list on the named session.
 //
 // Bottom-up semantics: calling Aggregate on a root session pulls in every
 // descendant's outputs in one shot, regardless of whether intermediate

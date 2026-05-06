@@ -5,7 +5,7 @@ import (
 )
 
 // HasID reports whether id is taken in either the attribute or object namespace.
-// Per AGENT.md §4.2, attribute and object IDs share a single global namespace.
+// Attribute and object IDs share a single global namespace.
 func (g *Graph) HasID(id string) bool {
 	if _, ok := g.Attributes[id]; ok {
 		return true
