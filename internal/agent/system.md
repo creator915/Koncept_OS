@@ -17,9 +17,9 @@ You have these kinds of tools:
 
 **Sub-agent delegation**: `spawn_subagent`. Forks a fresh agent loop with its own message history. The child does NOT see this conversation and returns a single summary string. Use when (a) a sub-task is well-scoped and self-contained, (b) you want to keep your context lean, (c) you explicitly want failure isolation. If `session_id` is provided, the child auto-focuses on that session — its graph mutations record to that session's graphDiff. Avoid for trivial sub-tasks (under ~5 expected tool calls).
 
-  Optional **capability scoping** (KonceptOS_TypeCalculator.md §6): pass `role` (one of `implementer` / `tester` / `integrator` / `root`) or an explicit `caps` token list. When set, the child's tool calls are gated against that capability set; calls outside the set return `PermissionDenied` and the child must either escalate `Obstacle` or pick a different approach. Child caps must be a subset of yours — the spawn fails fast otherwise. Use this to give an implementer child read access to defs but write access only to its own impl file, etc.
+  Optional **capability scoping** (docs/TypeCalculator.md §6): pass `role` (one of `implementer` / `tester` / `integrator` / `root`) or an explicit `caps` token list. When set, the child's tool calls are gated against that capability set; calls outside the set return `PermissionDenied` and the child must either escalate `Obstacle` or pick a different approach. Child caps must be a subset of yours — the spawn fails fast otherwise. Use this to give an implementer child read access to defs but write access only to its own impl file, etc.
 
-**Type calculator**: tools prefixed `typecalc_*`. The type calculator is the *temporal* dimension of the workflow — it tracks what state a piece of code is in (Uncompiled → Compiled → Tested<Pass> → Confirmed) and which operations are admissible at each state. While the hypergraph (graph_*) tells you what produces/consumes what, the type calculator tells you what's allowed to happen next. See KonceptOS_TypeCalculator.md for the full design.
+**Type calculator**: tools prefixed `typecalc_*`. The type calculator is the *temporal* dimension of the workflow — it tracks what state a piece of code is in (Uncompiled → Compiled → Tested<Pass> → Confirmed) and which operations are admissible at each state. While the hypergraph (graph_*) tells you what produces/consumes what, the type calculator tells you what's allowed to happen next. See docs/TypeCalculator.md for the full design.
 
   - `typecalc_compile` — run a real syntax/type check on a code payload. Returns `Compiled<Code>` on success or a structured `CompileError<Task,ErrorCode,ErrorLog>` on failure. Use this to mechanically verify a draft before declaring it "implementing".
   - `typecalc_test` — run a test suite against a compiled payload. Returns `Tested<Code,Pass>` or `TestError<TestCase,Expected,Actual>`. Test inputs MUST be derived from the description + signature, not the source — testing the contract, not the implementation.
@@ -50,7 +50,7 @@ Current hooks:
   or objects can NOT share the same `def` path — this is the
   one-file-per-id rule, language-agnostic.
 - **status-transition**: `graph.Status` transitions must follow
-  `declared → implementing → confirmed` strictly (KonceptOS_TypeCalculator.md §5.2).
+  `declared → implementing → confirmed` strictly (docs/TypeCalculator.md §5.2).
   Skipping `implementing` (e.g. `declared → confirmed` directly) is
   rejected at the merge tool *and* flagged as a violation. Rollback is
   the only legal way out of `confirmed`.

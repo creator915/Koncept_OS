@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/creator915/Koncept_OS/internal/chat"
+	"github.com/creator915/Koncept_OS/internal/llm"
 )
 
 type Transcript struct {
 	ID       string
 	Dir      string
-	Messages []chat.Message
+	Messages []llm.Message
 }
 
 func dirIn(cwd string) string {
@@ -49,7 +49,7 @@ func Load(cwd, id string) (*Transcript, error) {
 	}
 	var parsed struct {
 		ID       string         `json:"id"`
-		Messages []chat.Message `json:"messages"`
+		Messages []llm.Message `json:"messages"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return nil, fmt.Errorf("parse transcript %s: %w", id, err)
@@ -83,7 +83,7 @@ func (t *Transcript) Save() error {
 	path := filepath.Join(t.Dir, t.ID+".json")
 	data, err := json.MarshalIndent(struct {
 		ID       string         `json:"id"`
-		Messages []chat.Message `json:"messages"`
+		Messages []llm.Message `json:"messages"`
 	}{t.ID, t.Messages}, "", "  ")
 	if err != nil {
 		return err

@@ -358,7 +358,7 @@ func (h *statusTransitionHook) After(toolName, argsJSON, _ string) string {
 	if to != expectedNext {
 		return fmt.Sprintf(
 			"[status-transition] entity %q tried %s → %s, but the only legal next step is %s. "+
-				"Status must follow declared → implementing → confirmed (KonceptOS_TypeCalculator.md §5.2). "+
+				"Status must follow declared → implementing → confirmed (docs/TypeCalculator.md §5.2). "+
 				"Required next turn: graph_merge_<kind> with patch '{\"status\":%q}' first, finish the implementation, then advance to %q.",
 			args.ID, from, to, expectedNext, expectedNext, to,
 		)

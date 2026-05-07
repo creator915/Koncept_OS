@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/creator915/Koncept_OS/internal/chat"
+	"github.com/creator915/Koncept_OS/internal/llm"
 )
 
 // SubAgentRunner is the contract a top-level agent injects so the
@@ -47,11 +47,11 @@ type SubAgentRequest struct {
 
 func subAgentTool(runner SubAgentRunner) Tool {
 	return Tool{
-		Spec: chat.ToolSpec{
+		Spec: llm.ToolSpec{
 			Type: "function",
-			Function: chat.ToolFunction{
+			Function: llm.ToolFunction{
 				Name: "spawn_subagent",
-				Description: "Spawn a child agent to handle a focused, self-contained sub-task. The child runs in its own conversation context — it does NOT see your messages — and returns a single summary string when done. The child shares K/* state with you (graph, sessions, checkpoint) but its tool-call detail and reasoning stay out of your context.\n\nUse this when:\n- a sub-task is well-scoped (one object's implementation; one type analysis; one file's refactor) — i.e. a child can succeed with the task description alone\n- your context is getting large and you want sub-task detail out\n- you explicitly want isolation: a child's failure won't contaminate your reasoning\n\nIf session_id is provided, the child auto-focuses on that KonceptOS session — its graph mutations record to that session's graphDiff. Focus is restored to your previous state on return.\n\nThe child has the same tool set as you, including (recursively, up to a depth cap) spawn_subagent.\n\nOptional capability scoping (§6 of KonceptOS_TypeCalculator.md): pass `role` to use a preset (implementer / tester / integrator / root) or `caps` for an explicit token list. If you pass either, every tool call in the child is gated against that set; tool calls outside the set return PermissionDenied. Child caps must be a subset of yours.",
+				Description: "Spawn a child agent to handle a focused, self-contained sub-task. The child runs in its own conversation context — it does NOT see your messages — and returns a single summary string when done. The child shares K/* state with you (graph, sessions, checkpoint) but its tool-call detail and reasoning stay out of your context.\n\nUse this when:\n- a sub-task is well-scoped (one object's implementation; one type analysis; one file's refactor) — i.e. a child can succeed with the task description alone\n- your context is getting large and you want sub-task detail out\n- you explicitly want isolation: a child's failure won't contaminate your reasoning\n\nIf session_id is provided, the child auto-focuses on that KonceptOS session — its graph mutations record to that session's graphDiff. Focus is restored to your previous state on return.\n\nThe child has the same tool set as you, including (recursively, up to a depth cap) spawn_subagent.\n\nOptional capability scoping (§6 of docs/TypeCalculator.md): pass `role` to use a preset (implementer / tester / integrator / root) or `caps` for an explicit token list. If you pass either, every tool call in the child is gated against that set; tool calls outside the set return PermissionDenied. Child caps must be a subset of yours.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{

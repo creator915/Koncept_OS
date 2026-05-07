@@ -187,7 +187,7 @@ func validStatusTransition(from, to string) error {
 		return fmt.Errorf("status %s is terminal — rollback the session that confirmed this entity instead of mutating it", from)
 	}
 	if to != expected {
-		return fmt.Errorf("illegal status transition %s → %s; the only legal next step is %s (KonceptOS_TypeCalculator.md §5.2)", from, to, expected)
+		return fmt.Errorf("illegal status transition %s → %s; the only legal next step is %s (docs/TypeCalculator.md §5.2)", from, to, expected)
 	}
 	return nil
 }

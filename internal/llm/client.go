@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/creator915/Koncept_OS/internal/chat"
 )
 
 type Config struct {
@@ -52,8 +51,8 @@ func NewClient(cfg Config) *Client {
 
 type chatRequest struct {
 	Model           string          `json:"model"`
-	Messages        []chat.Message  `json:"messages"`
-	Tools           []chat.ToolSpec `json:"tools,omitempty"`
+	Messages        []Message  `json:"messages"`
+	Tools           []ToolSpec `json:"tools,omitempty"`
 	Stream          bool            `json:"stream"`
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	Thinking        *thinking       `json:"thinking,omitempty"`
@@ -105,7 +104,7 @@ const (
 // transient failures (network errors, HTTP 5xx, HTTP 429) up to 3 attempts
 // with exponential backoff + jitter. Non-retryable errors (4xx other than
 // 429, malformed responses, mid-stream errors) bubble up immediately.
-func (c *Client) Chat(ctx context.Context, messages []chat.Message, tools []chat.ToolSpec, h StreamHandler) (*chat.Message, error) {
+func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolSpec, h StreamHandler) (*Message, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		msg, err := c.chatOnce(ctx, messages, tools, h)
@@ -141,7 +140,7 @@ func backoffDelay(attempt int) time.Duration {
 	return step + jitter
 }
 
-func (c *Client) chatOnce(ctx context.Context, messages []chat.Message, tools []chat.ToolSpec, h StreamHandler) (*chat.Message, error) {
+func (c *Client) chatOnce(ctx context.Context, messages []Message, tools []ToolSpec, h StreamHandler) (*Message, error) {
 	reqBody := chatRequest{
 		Model:    c.cfg.Model,
 		Messages: messages,
@@ -185,7 +184,7 @@ func (c *Client) chatOnce(ctx context.Context, messages []chat.Message, tools []
 
 	// From here on we may emit deltas to the handler — do NOT retry on errors
 	// past this point.
-	msg := &chat.Message{Role: "assistant"}
+	msg := &Message{Role: "assistant"}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -225,7 +224,7 @@ func (c *Client) chatOnce(ctx context.Context, messages []chat.Message, tools []
 		}
 		for _, tcd := range delta.ToolCalls {
 			for len(msg.ToolCalls) <= tcd.Index {
-				msg.ToolCalls = append(msg.ToolCalls, chat.ToolCall{Type: "function"})
+				msg.ToolCalls = append(msg.ToolCalls, ToolCall{Type: "function"})
 			}
 			tc := &msg.ToolCalls[tcd.Index]
 			if tcd.ID != "" {

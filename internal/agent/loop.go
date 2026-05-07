@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/creator915/Koncept_OS/internal/chat"
 	"github.com/creator915/Koncept_OS/internal/llm"
 	"github.com/creator915/Koncept_OS/internal/tools"
 	"github.com/creator915/Koncept_OS/internal/typecalc"
@@ -65,16 +64,16 @@ type RunOptions struct {
 // until the model produces a turn with no tool_calls (or the iteration cap
 // is reached). Uses defaults; for subagent calls or other customization see
 // RunTurnOpts.
-func RunTurn(ctx context.Context, client *llm.Client, messages *[]chat.Message, userPrompt string) error {
+func RunTurn(ctx context.Context, client *llm.Client, messages *[]llm.Message, userPrompt string) error {
 	return RunTurnOpts(ctx, client, messages, userPrompt, RunOptions{})
 }
 
 // RunTurnOpts is the workhorse. RunTurn is a thin wrapper.
-func RunTurnOpts(ctx context.Context, client *llm.Client, messages *[]chat.Message, userPrompt string, opts RunOptions) error {
+func RunTurnOpts(ctx context.Context, client *llm.Client, messages *[]llm.Message, userPrompt string, opts RunOptions) error {
 	if !opts.SkipSystem {
 		ensureSystem(messages)
 	}
-	*messages = append(*messages, chat.Message{Role: "user", Content: userPrompt})
+	*messages = append(*messages, llm.Message{Role: "user", Content: userPrompt})
 
 	builtins := opts.Tools
 	if builtins == nil {
@@ -156,7 +155,7 @@ func RunTurnOpts(ctx context.Context, client *llm.Client, messages *[]chat.Messa
 			} else {
 				result = tools.Execute(ctx, builtins, tc.Function.Name, tc.Function.Arguments)
 			}
-			*messages = append(*messages, chat.Message{
+			*messages = append(*messages, llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
 				Content:    result,
@@ -180,7 +179,7 @@ func RunTurnOpts(ctx context.Context, client *llm.Client, messages *[]chat.Messa
 				for _, v := range violations {
 					fmt.Fprintf(os.Stderr, "%s\x1b[33m⚠ %s\x1b[0m\n", opts.Indent, truncate(v, 160))
 				}
-				*messages = append(*messages, chat.Message{
+				*messages = append(*messages, llm.Message{
 					Role:    "user",
 					Content: FormatViolations(violations),
 				})
@@ -190,9 +189,9 @@ func RunTurnOpts(ctx context.Context, client *llm.Client, messages *[]chat.Messa
 	return fmt.Errorf("agent exceeded max iterations (%d)", maxIters)
 }
 
-func ensureSystem(messages *[]chat.Message) {
+func ensureSystem(messages *[]llm.Message) {
 	if len(*messages) == 0 || (*messages)[0].Role != "system" {
-		*messages = append([]chat.Message{{Role: "system", Content: SystemPrompt}}, (*messages)...)
+		*messages = append([]llm.Message{{Role: "system", Content: SystemPrompt}}, (*messages)...)
 	}
 }
 

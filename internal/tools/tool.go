@@ -1,3 +1,11 @@
+// Package tools is the aggregation point for the agent's tool registry.
+// Individual tools live in subpackages (fs, git, graph (graphtools),
+// session (sessiontools), checkpoint (checkpointtools), typecalc
+// (typecalctools)); this file just merges their Tools() maps and
+// provides Execute / Specs helpers used by the agent loop.
+//
+// `Tool` itself is defined in package llm (see internal/llm/tool.go) so
+// subpackages can return it without an import cycle on this package.
 package tools
 
 import (
@@ -5,71 +13,60 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/creator915/Koncept_OS/internal/chat"
+	"github.com/creator915/Koncept_OS/internal/llm"
+	checkpointtools "github.com/creator915/Koncept_OS/internal/tools/checkpoint"
+	"github.com/creator915/Koncept_OS/internal/tools/fs"
+	"github.com/creator915/Koncept_OS/internal/tools/git"
+	graphtools "github.com/creator915/Koncept_OS/internal/tools/graph"
+	sessiontools "github.com/creator915/Koncept_OS/internal/tools/session"
+	typecalctools "github.com/creator915/Koncept_OS/internal/tools/typecalc"
 )
 
-type Tool struct {
-	Spec chat.ToolSpec
-	Run  func(ctx context.Context, args map[string]interface{}) (string, error)
-}
+// Tool is re-exported from llm so existing callers (agent.RunTurnOpts,
+// SubAgentRunner, cmd/kcpos) can keep using `tools.Tool` as the
+// interchange type. New code may use `llm.Tool` directly.
+type Tool = llm.Tool
 
+// Builtins returns the full set of agent tools, aggregated from each
+// subpackage. The set is a fresh map every call (so callers can mutate
+// it — e.g. BuiltinsWithSubAgent injects spawn_subagent).
 func Builtins() map[string]Tool {
-	return map[string]Tool{
-		"read_file":              readFileTool(),
-		"write_file":             writeFileTool(),
-		"edit":                   editTool(),
-		"list_dir":               listDirTool(),
-		"bash":                   bashTool(),
-		"grep":                   grepTool(),
-		"glob":                   globTool(),
-		"git_status":             gitStatusTool(),
-		"graph_show":             graphShowTool(),
-		"graph_create_attribute": graphCreateAttributeTool(),
-		"graph_create_object":    graphCreateObjectTool(),
-		"graph_link_refine":      graphLinkRefineTool(),
-		"graph_link_consume":     graphLinkConsumeTool(),
-		"graph_link_produce":     graphLinkProduceTool(),
-		"graph_link_mutate":      graphLinkMutateTool(),
-		"graph_unlink_refine":    graphUnlinkRefineTool(),
-		"graph_unlink_consume":   graphUnlinkConsumeTool(),
-		"graph_unlink_produce":   graphUnlinkProduceTool(),
-		"graph_unlink_mutate":    graphUnlinkMutateTool(),
-		"graph_merge_attribute":  graphMergeAttributeTool(),
-		"graph_merge_object":     graphMergeObjectTool(),
-		"graph_autowire":         graphAutowireTool(),
-		"graph_validate":         graphValidateTool(),
-		"graph_preflight":        graphPreflightTool(),
-		"graph_render":           graphRenderTool(),
-		"session_create":         sessionCreateTool(),
-		"session_start":          sessionStartTool(),
-		"session_show":           sessionShowTool(),
-		"session_list":           sessionListTool(),
-		"session_status":         sessionStatusTool(),
-		"session_delete":         sessionDeleteTool(),
-		"session_focus":          sessionFocusTool(),
-		"session_aggregate":        sessionAggregateTool(),
-		"session_set_architecture": sessionSetArchitectureTool(),
-		"session_gate_check":       sessionGateCheckTool(),
-		"checkpoint_add_item":    checkpointAddItemTool(),
-		"checkpoint_freeze":      checkpointFreezeTool(),
-		"checkpoint_fill":        checkpointFillTool(),
-		"checkpoint_waive":       checkpointWaiveTool(),
-		"checkpoint_show":        checkpointShowTool(),
-		"typecalc_compile":       typecalcCompileTool(),
-		"typecalc_test":          typecalcTestTool(),
-		"typecalc_probe_plan":    typecalcProbePlanTool(),
-		"typecalc_apply_feedback": typecalcApplyFeedbackTool(),
+	out := map[string]Tool{}
+	for k, v := range fs.Tools() {
+		out[k] = v
 	}
+	for k, v := range git.Tools() {
+		out[k] = v
+	}
+	for k, v := range graphtools.Tools() {
+		out[k] = v
+	}
+	for k, v := range sessiontools.Tools() {
+		out[k] = v
+	}
+	for k, v := range checkpointtools.Tools() {
+		out[k] = v
+	}
+	for k, v := range typecalctools.Tools() {
+		out[k] = v
+	}
+	return out
 }
 
-func Specs(tools map[string]Tool) []chat.ToolSpec {
-	specs := make([]chat.ToolSpec, 0, len(tools))
+// Specs extracts the schema descriptions the LLM provider's chat API
+// expects in its `tools` field.
+func Specs(tools map[string]Tool) []llm.ToolSpec {
+	specs := make([]llm.ToolSpec, 0, len(tools))
 	for _, t := range tools {
 		specs = append(specs, t.Spec)
 	}
 	return specs
 }
 
+// Execute runs the named tool with JSON-encoded args, returning a
+// stringified result the agent loop posts back as a tool message.
+// Errors are surfaced as `error: ...` strings so the loop can still
+// continue (the agent is expected to react to the error).
 func Execute(ctx context.Context, tools map[string]Tool, name, argsJSON string) string {
 	t, ok := tools[name]
 	if !ok {

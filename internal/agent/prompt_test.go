@@ -9,7 +9,7 @@ import (
 // expectedSystemPromptHash pins the SHA256 of the embedded system.md content.
 // If you change system.md intentionally, update this constant. The test will
 // fail loudly on accidental drift, forcing prompt changes through review.
-const expectedSystemPromptHash = "da73779e45f97307132f8b7ed3820897e53b3a894c0e5862c6ba01535e95483e"
+const expectedSystemPromptHash = "bdf8ff122d51100eeccc67531f2e00cea1ec10d8d3018e6c95376e1e18cc71f2"
 
 func TestSystemPromptHash(t *testing.T) {
 	sum := sha256.Sum256([]byte(SystemPrompt))

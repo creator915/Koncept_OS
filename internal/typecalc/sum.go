@@ -65,23 +65,23 @@ func (s SumType) String() string {
 func ParseLLMOutput(raw string, expected SumType) (*TypedValue, error) {
 	lines := strings.SplitN(raw, "\n", 2)
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
-		return formatErr("empty LLM output"), nil
+		return FormatErr("empty LLM output"), nil
 	}
 	header := strings.TrimSpace(lines[0])
 	if !strings.HasPrefix(header, "TYPE:") {
-		return formatErr("first line must start with `TYPE:` — got %q", trim(header, 80)), nil
+		return FormatErr("first line must start with `TYPE:` — got %q", Trim(header, 80)), nil
 	}
 	label := strings.TrimSpace(strings.TrimPrefix(header, "TYPE:"))
 	if label == "" {
-		return formatErr("`TYPE:` header has empty label"), nil
+		return FormatErr("`TYPE:` header has empty label"), nil
 	}
 	kind := extractKind(label)
 	if kind == "" {
-		return formatErr("could not extract Kind from label %q", label), nil
+		return FormatErr("could not extract Kind from label %q", label), nil
 	}
 	tag, ok := expected.FindKind(kind)
 	if !ok {
-		return formatErr("kind %q not in expected sum %s", kind, expected.String()), nil
+		return FormatErr("kind %q not in expected sum %s", kind, expected.String()), nil
 	}
 	payload := ""
 	if len(lines) == 2 {
@@ -127,14 +127,14 @@ func extractKind(label string) Kind {
 	return Kind(last)
 }
 
-func formatErr(format string, args ...any) *TypedValue {
+func FormatErr(format string, args ...any) *TypedValue {
 	return &TypedValue{
 		Kind:    KindFormatError,
 		Payload: fmt.Sprintf(format, args...),
 	}
 }
 
-func trim(s string, n int) string {
+func Trim(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}

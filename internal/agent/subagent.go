@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/chat"
 	"github.com/creator915/Koncept_OS/internal/llm"
 	"github.com/creator915/Koncept_OS/internal/session"
 	"github.com/creator915/Koncept_OS/internal/tools"
@@ -139,7 +138,7 @@ func (r *SubAgentRunner) Run(ctx context.Context, req tools.SubAgentRequest) (st
 
 	// Fresh message history. Start with the sub-agent's focused system
 	// prompt — the parent's system prompt would only confuse it.
-	messages := []chat.Message{
+	messages := []llm.Message{
 		{Role: "system", Content: subAgentSystemPrompt},
 	}
 

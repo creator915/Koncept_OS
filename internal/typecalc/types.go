@@ -1,5 +1,5 @@
 // Package typecalc implements the KonceptOS type calculator described in
-// KonceptOS_TypeCalculator.md. It is a layered, orthogonal system: while
+// docs/TypeCalculator.md. It is a layered, orthogonal system: while
 // the existing graph package handles the *spatial* dimension (who produces
 // what, who consumes what), typecalc handles the *temporal* dimension
 // (what state a piece of code is in and which operations it admits).
