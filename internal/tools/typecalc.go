@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/creator915/Koncept_OS/internal/chat"
@@ -42,6 +43,45 @@ func recordTypecalcEvidence(objectID, kind, lang string, ok bool) error {
 	}
 	raw, _ := json.MarshalIndent(rec, "", "  ")
 	return os.WriteFile(filepath.Join(typecalcEvidenceDir, objectID+".json"), raw, 0o644)
+}
+
+// detectEffectiveLang closes the §1 HTML loophole: an HTML file whose
+// content includes a `<script>` block is in practice a JavaScript
+// container, and the test-evidence requirement should apply to the JS
+// inside. When called with lang=HTML and content containing `<script>`,
+// we promote to JavaScript so downstream gate rules
+// (typecalc-test-required) treat the file as JS and demand a real test.
+//
+// For other languages, we return them unchanged. For pure HTML (no
+// embedded script), we keep HTML — there's no JS to test.
+func detectEffectiveLang(content string, declared typecalc.Lang) typecalc.Lang {
+	if declared != typecalc.LangHTML {
+		return declared
+	}
+	if hasInlineScript(content) {
+		return typecalc.LangJavaScript
+	}
+	return declared
+}
+
+// hasInlineScript reports whether the content contains a non-empty
+// `<script>...</script>` block. We accept any attributes on the open tag
+// (e.g. `<script type="module">`) but require closing `</script>`.
+func hasInlineScript(content string) bool {
+	open := strings.Index(strings.ToLower(content), "<script")
+	if open < 0 {
+		return false
+	}
+	close := strings.Index(strings.ToLower(content[open:]), "</script>")
+	if close < 0 {
+		return false
+	}
+	gt := strings.Index(content[open:], ">")
+	if gt < 0 {
+		return false
+	}
+	body := content[open+gt+1 : open+close]
+	return strings.TrimSpace(body) != ""
 }
 
 // typecalcCompileTool wraps typecalc.CompileLanguageInvoker as an agent
@@ -102,7 +142,12 @@ func typecalcCompileTool() Tool {
 			// evidence of a working object — the agent must retry per §7.1
 			// before evidence is laid down.
 			if objectID != "" && out.State == typecalc.StateCompiled {
-				if recErr := recordTypecalcEvidence(objectID, "compile", lang, true); recErr != nil {
+				// Fix 1: HTML containing <script> is recorded as
+				// JavaScript so the gate's typecalc-test-required rule
+				// fires. The agent can't dodge testing by mislabeling the
+				// container language.
+				effectiveLang := string(detectEffectiveLang(payload, tv.Lang))
+				if recErr := recordTypecalcEvidence(objectID, "compile", effectiveLang, true); recErr != nil {
 					return "", recErr
 				}
 			}
@@ -162,7 +207,11 @@ func typecalcTestTool() Tool {
 				return "", err
 			}
 			if objectID != "" && out.State == typecalc.StateTestedPass {
-				if recErr := recordTypecalcEvidence(objectID, "test", lang, true); recErr != nil {
+				// Fix 1: same HTML-with-script promotion as in
+				// typecalcCompileTool — the lang recorded in evidence is
+				// the EFFECTIVE content language, not the container.
+				effectiveLang := string(detectEffectiveLang(code, langTag))
+				if recErr := recordTypecalcEvidence(objectID, "test", effectiveLang, true); recErr != nil {
 					return "", recErr
 				}
 			}

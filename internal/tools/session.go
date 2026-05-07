@@ -371,6 +371,42 @@ func sessionAggregateTool() Tool {
 	}
 }
 
+func sessionSetArchitectureTool() Tool {
+	return Tool{
+		Spec: chat.ToolSpec{
+			Type: "function",
+			Function: chat.ToolFunction{
+				Name:        "session_set_architecture",
+				Description: "Write the architecture description for a session — a markdown-style list of sub-modules and intermediate variables produced BEFORE any implementation code is written. Required for root session finish (gate rule [architecture-non-empty]).\n\nCLAUDE.md §5.4 path A: \"even if a one-shot implementation, first list sub-modules and intermediate variables\". This step is the design artifact that justifies the hypergraph structure that follows. Format is free-form markdown — typical content: a bullet list of sub-modules with their responsibilities, and a bullet list of intermediate variables with their roles.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":          map[string]interface{}{"type": "string", "description": "Session id."},
+						"description": map[string]interface{}{"type": "string", "description": "Markdown description of sub-modules + intermediate variables."},
+					},
+					"required": []string{"id", "description"},
+				},
+			},
+		},
+		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			rawID, _ := args["id"].(string)
+			description, _ := args["description"].(string)
+			if description == "" {
+				return "", fmt.Errorf("description required")
+			}
+			id, err := session.NormalizeID(rawID)
+			if err != nil {
+				return "", err
+			}
+			s, err := session.SetArchitecture(session.DefaultDir, id, description)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("architecture set on %s (%d chars)", s.ID, len(s.Output.Architecture)), nil
+		},
+	}
+}
+
 func sessionGateCheckTool() Tool {
 	return Tool{
 		Spec: chat.ToolSpec{

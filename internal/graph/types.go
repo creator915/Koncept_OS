@@ -25,10 +25,18 @@ type Attribute struct {
 }
 
 type Object struct {
-	Def            string    `json:"def"`
-	Impl           *string   `json:"impl"`
-	Consumes       []string  `json:"consumes"`
-	Produces       []string  `json:"produces"`
+	Def      string   `json:"def"`
+	Impl     *string  `json:"impl"`
+	Consumes []string `json:"consumes"`
+	Produces []string `json:"produces"`
+	// Mutates names attributes the object reads AND writes in place
+	// (mutation-style semantics, e.g. JS object property assignment).
+	// Distinct from Produces (pure functional output) and from Consumes
+	// (read-only). preflight ignores Mutates edges in cycle detection,
+	// since mutation creates a self-loop in the produce/consume DAG that
+	// would otherwise spuriously trip cycles. See
+	// KonceptOS_kcpos_analysis.md §5.3.
+	Mutates        []string  `json:"mutates"`
 	Intent         string    `json:"intent"`
 	Temporal       *Temporal `json:"temporal"`
 	Preconditions  string    `json:"preconditions"`
@@ -76,6 +84,7 @@ func NewObject(def, intent string) *Object {
 		Def:      def,
 		Consumes: []string{},
 		Produces: []string{},
+		Mutates:  []string{},
 		Intent:   intent,
 		Status:   StatusDeclared,
 	}

@@ -341,7 +341,12 @@ func TestGate_RootDeliverPassesWhenAllConfirmed(t *testing.T) {
 	if err := mkdirAll(evidenceDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFile(filepath.Join(evidenceDir, "Op.json"), `{"objectId":"Op","kind":"compile","ok":true}`); err != nil {
+	if err := writeFile(filepath.Join(evidenceDir, "Op.json"), `{"objectId":"Op","kind":"test","lang":"Go","ok":true}`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fix 4: architecture must be set for root finish gate.
+	if _, err := SetArchitecture(sessionDir, "s_root", "Sub-modules: Op. Intermediate vars: a."); err != nil {
 		t.Fatal(err)
 	}
 
@@ -564,7 +569,9 @@ func newRootDeliverFixtureGraph(t *testing.T) *graph.Graph {
 func newConfirmedGraph(t *testing.T, implPath string) *graph.Graph {
 	t.Helper()
 	g := graph.NewGraph()
-	g.AddAttribute("a", graph.NewAttribute(implPath, "an attr"))
+	a := graph.NewAttribute(implPath, "an attr")
+	a.Status = graph.StatusConfirmed // attrs-backfilled (5.1b) gate requires this
+	g.AddAttribute("a", a)
 	o := graph.NewObject(implPath, "an op")
 	o.Status = graph.StatusConfirmed
 	impl := implPath

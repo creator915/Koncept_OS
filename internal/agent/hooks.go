@@ -429,11 +429,23 @@ func typecalcEvidenceExists(objectID string) bool {
 	rel := filepath.Join(typecalcEvidenceDirRel, objectID+".json")
 	cwd, _ := os.Getwd()
 	path := filepath.Join(cwd, rel)
-	info, err := os.Stat(path)
-	if err != nil {
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 {
 		return false
 	}
-	return info.Size() > 0
+	// Minimal parse — we don't need the full struct here, just the
+	// `ok` field. The gate (internal/session/gate.go) does the full
+	// inspection (kind=test enforcement, etc.). The hook is intentionally
+	// lighter: it lets a compile-only evidence file pass at merge time
+	// so the agent can still iterate, while the gate at root-finish
+	// makes the harder demand.
+	var rec struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return false
+	}
+	return rec.OK
 }
 
 // --- helpers ---

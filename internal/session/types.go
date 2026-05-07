@@ -43,6 +43,15 @@ type Input struct {
 }
 
 type Output struct {
+	// Architecture (Fix 4 / KonceptOS_kcpos_analysis.md §6) is the
+	// pre-implementation design artifact — a description of the
+	// sub-modules and intermediate variables produced before any code
+	// is written. CLAUDE.md §5.4 path A requires "even if a one-shot
+	// implementation, first list sub-modules and intermediate variables".
+	// The root finish gate enforces this: a root session cannot finish
+	// while its Architecture is empty. Free-form string; the agent fills
+	// it via session_set_architecture.
+	Architecture    string    `json:"architecture"`
 	Implementations []string  `json:"implementations"`
 	NewSignatures   []string  `json:"newSignatures"`
 	NewAttributes   []string  `json:"newAttributes"`

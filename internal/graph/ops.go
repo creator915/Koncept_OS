@@ -122,6 +122,38 @@ func (g *Graph) UnlinkProduce(object, attribute string) error {
 	return nil
 }
 
+// LinkMutate records that object reads AND writes attribute in place
+// (mutation semantics — common for JS object property assignment, in-place
+// data structure updates, etc.). The §5.3 design distinguishes mutation
+// from production: a mutation does not break referential transparency the
+// way a fresh produce does, but it IS a write — preflight cycle detection
+// must skip these edges (otherwise self-loops and "Foo mutates X →
+// consumes X" trip false cycles). Idempotent.
+func (g *Graph) LinkMutate(object, attribute string) error {
+	o, ok := g.Objects[object]
+	if !ok {
+		return fmt.Errorf("object %q not found", object)
+	}
+	if _, ok := g.Attributes[attribute]; !ok {
+		return fmt.Errorf("attribute %q not found", attribute)
+	}
+	if contains(o.Mutates, attribute) {
+		return nil
+	}
+	o.Mutates = append(o.Mutates, attribute)
+	return nil
+}
+
+// UnlinkMutate removes the attribute from object's mutates list. Idempotent.
+func (g *Graph) UnlinkMutate(object, attribute string) error {
+	o, ok := g.Objects[object]
+	if !ok {
+		return fmt.Errorf("object %q not found", object)
+	}
+	o.Mutates = removeString(o.Mutates, attribute)
+	return nil
+}
+
 func contains(xs []string, x string) bool {
 	for _, v := range xs {
 		if v == x {

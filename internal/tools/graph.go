@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/chat"
 	"github.com/creator915/Koncept_OS/internal/graph"
 	"github.com/creator915/Koncept_OS/internal/session"
+	"github.com/creator915/Koncept_OS/internal/typecalc"
 )
 
 // Graph tools share the load → mutate → save pattern. Each call reads
@@ -217,7 +219,7 @@ func graphLinkProduceTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "graph_link_produce",
-				Description: "Record that an object produces an attribute (writes it as output). Both must already exist.",
+				Description: "Record that an object produces an attribute (writes it as fresh output, replacing any prior value). Use `graph_link_mutate` instead for in-place mutation (e.g. JS object property assignment).",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -237,6 +239,75 @@ func graphLinkProduceTool() Tool {
 				return "", err
 			}
 			return fmt.Sprintf("%s produces %s", obj, attr), nil
+		},
+	}
+}
+
+// graphLinkMutateTool wires the §5.3 `mutates` edge: an object reads AND
+// writes the attribute in place, without creating a new value. preflight
+// cycle detection ignores mutates edges so a function can both consume
+// and mutate the same attribute without tripping a self-cycle.
+//
+// Use this instead of graph_link_produce when modeling JavaScript-style
+// object mutation, in-place data structure updates, or any function whose
+// "output" is "the same object, modified". Use graph_link_produce when
+// the function returns a fresh value.
+func graphLinkMutateTool() Tool {
+	return Tool{
+		Spec: chat.ToolSpec{
+			Type: "function",
+			Function: chat.ToolFunction{
+				Name:        "graph_link_mutate",
+				Description: "Record that an object MUTATES an attribute in place (reads + writes the same value, no fresh output). Use this for JS-style mutation. Distinct from `produces` (fresh output) — `mutates` does NOT count as a producer in cycle detection, so mutual mutation of shared state does not create false cycles.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"object":    map[string]interface{}{"type": "string", "description": "Object id (PascalCase)."},
+						"attribute": map[string]interface{}{"type": "string", "description": "Attribute id (snake_case)."},
+					},
+					"required": []string{"object", "attribute"},
+				},
+			},
+		},
+		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			obj, _ := args["object"].(string)
+			attr, _ := args["attribute"].(string)
+			if err := mutateGraph(func(g *graph.Graph) error {
+				return g.LinkMutate(obj, attr)
+			}); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%s mutates %s", obj, attr), nil
+		},
+	}
+}
+
+func graphUnlinkMutateTool() Tool {
+	return Tool{
+		Spec: chat.ToolSpec{
+			Type: "function",
+			Function: chat.ToolFunction{
+				Name:        "graph_unlink_mutate",
+				Description: "Remove a mutates edge from object's mutates list. Idempotent.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"object":    map[string]interface{}{"type": "string"},
+						"attribute": map[string]interface{}{"type": "string"},
+					},
+					"required": []string{"object", "attribute"},
+				},
+			},
+		},
+		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			obj, _ := args["object"].(string)
+			attr, _ := args["attribute"].(string)
+			if err := mutateGraph(func(g *graph.Graph) error {
+				return g.UnlinkMutate(obj, attr)
+			}); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%s no longer mutates %s", obj, attr), nil
 		},
 	}
 }
@@ -414,9 +485,84 @@ func graphMergeObjectTool() Tool {
 			}); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("merged %d field(s) into object %s", len(patch), id), nil
+			result := fmt.Sprintf("merged %d field(s) into object %s", len(patch), id)
+			// Fix 3 (auto-typecalc on impl-set): when the patch sets `impl`,
+			// the file path now formally identifies this object's
+			// implementation. Run typecalc_compile against the file
+			// content immediately and record evidence — closes the §5.5
+			// timing gap where write_file ran BEFORE impl was set, so
+			// auto-typecalc-after-write found no graph match. With this
+			// hook, the agent gets the same compile evidence either way:
+			// write-then-merge (auto on write) or merge-then-write
+			// (verifies later) or merge-after-write (verifies now).
+			if extra := autoCompileOnImplSet(ctx, id, patch); extra != "" {
+				result += "\n\n" + extra
+			}
+			return result, nil
 		},
 	}
+}
+
+// autoCompileOnImplSet runs typecalc_compile against the file referenced
+// by a freshly-set `impl` field on a graph object, and writes evidence
+// for that object on success. Returns a string to append to the merge
+// result describing what happened (empty = no auto-compile triggered).
+//
+// Trigger: patch contains "impl" key with a non-empty string value.
+// We re-load the graph after merge to get the canonical impl path
+// (the patch may use a relative path that the merger normalized).
+func autoCompileOnImplSet(ctx context.Context, objectID string, patch map[string]any) string {
+	implRaw, ok := patch["impl"]
+	if !ok {
+		return ""
+	}
+	implPath, ok := implRaw.(string)
+	if !ok || implPath == "" {
+		return ""
+	}
+	content, err := os.ReadFile(implPath)
+	if err != nil {
+		// File not on disk yet — likely the agent will write_file next
+		// (which will trigger auto-typecalc-on-write since impl is now
+		// set). Don't fail the merge; just note.
+		return fmt.Sprintf("[auto-typecalc] impl=%q referenced but file not yet on disk; "+
+			"compile will run automatically on the next write_file to that path", implPath)
+	}
+	ext := filepath.Ext(implPath)
+	lang := typecalc.LangFromExt(ext)
+	if lang == typecalc.LangNone {
+		return fmt.Sprintf("[auto-typecalc] could not infer language from extension %q (impl=%q); "+
+			"call typecalc_compile object_id=%q lang=<L> manually", ext, implPath, objectID)
+	}
+	tv := typecalc.New(typecalc.KindCode, string(content)).
+		WithState(typecalc.StateUncompiled).
+		WithLang(lang)
+	env := &typecalc.RuleEnv{WorkDir: "."}
+	out, err := typecalc.CompileLanguageInvoker(ctx, env, tv)
+	if err != nil {
+		return fmt.Sprintf("[auto-typecalc] invoker error on %s: %v", implPath, err)
+	}
+	if out.State == typecalc.StateCompiled {
+		// recordTypecalcEvidence may detect the JS-in-HTML case below
+		// (Fix 1) and record lang=JavaScript instead of HTML so the
+		// gate's typecalc-test-required rule kicks in for the right
+		// content kind.
+		effectiveLang := detectEffectiveLang(string(content), lang)
+		if recErr := recordTypecalcEvidence(objectID, "compile", string(effectiveLang), true); recErr != nil {
+			return fmt.Sprintf("[auto-typecalc] compile passed but evidence write failed: %v", recErr)
+		}
+		return fmt.Sprintf("[auto-typecalc] %s compile passed; evidence recorded for %s (lang=%s)",
+			implPath, objectID, effectiveLang)
+	}
+	if out.Kind == typecalc.KindCompileError {
+		ce, _ := typecalc.DecodeCompileError(out)
+		return fmt.Sprintf(
+			"[auto-typecalc] COMPILE FAILED on %s for object %s\n  errorCode: %s\n  errorLog:\n%s\n\n"+
+				"No evidence was recorded. Fix the source file and re-merge (or simply re-write the file — "+
+				"auto-typecalc-on-write will retry).",
+			implPath, objectID, ce.ErrorCode, indent(ce.ErrorLog, "    "))
+	}
+	return ""
 }
 
 // withTempFocus saves current focus, sets focus to id, and returns a

@@ -1,9 +1,11 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/checkpoint"
 	"github.com/creator915/Koncept_OS/internal/graph"
@@ -76,6 +78,34 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 		r.Issues = append(r.Issues, "[outputs-aggregated] session has children but output.implementations is empty — call session_aggregate before finishing")
 	}
 
+	// outputs-tests-non-empty (5.1a, refined by Fix 2) — sessions with
+	// children should have aggregated tests, BUT only if any of the
+	// confirmed objects are in a language with an in-tree test runner.
+	// A pure Rust / Java / HTML-without-script project legitimately has
+	// no test files (kcpos can't drive those runners), and demanding
+	// non-empty output.tests there would be unfair.
+	//
+	// The check is scoped: read the evidence file of each confirmed
+	// object on the graph; if any one has lang in the testable set,
+	// require non-empty tests. Otherwise skip the check.
+	if len(s.Children) > 0 && len(s.Output.Tests) == 0 {
+		if anyConfirmedTestable(graphPath) {
+			r.Issues = append(r.Issues, "[outputs-tests-non-empty] session has children and at least one confirmed object is in a testable language, but output.tests is empty — call typecalc_test object_id=<id> for each testable confirmed object before session_aggregate")
+		}
+	}
+
+	// architecture-non-empty (Fix 4) — root sessions must have an
+	// Architecture description set. CLAUDE.md §5.4 path A: "even if a
+	// one-shot implementation, first list sub-modules and intermediate
+	// variables". The pre-fix run had no Architecture step at all (problem
+	// 6 in KonceptOS_kcpos_analysis.md). Now session_set_architecture
+	// is the canonical writer; the gate refuses root finish without it.
+	if s.Parent == "" {
+		if strings.TrimSpace(s.Output.Architecture) == "" {
+			r.Issues = append(r.Issues, "[architecture-non-empty] root session has empty output.architecture — call session_set_architecture id="+id+" description=<markdown listing sub-modules + intermediate variables> before finishing")
+		}
+	}
+
 	// root-deliver — root sessions deliver a fully-implemented graph. Even
 	// if individual sessions' graphDiff captures were missed (e.g. focus
 	// was set late), the root cannot finish until every object on the graph
@@ -98,23 +128,86 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 				r.Issues = append(r.Issues, fmt.Sprintf("[root-deliver] object %s impl %q missing or empty on disk", objID, *obj.Impl))
 				continue
 			}
+			// produces-or-mutates-non-empty (5.1d + 5.3) — a confirmed
+			// object must EITHER produce at least one attribute (fresh
+			// output) OR mutate at least one (in-place write). The agent
+			// has been observed to remove `produces` edges to break
+			// cycles, leaving the object claiming no effects at all;
+			// this rule blocks that. With mutates now available, the
+			// agent should re-link as graph_link_mutate instead of just
+			// deleting the edge.
+			if len(obj.Produces) == 0 && len(obj.Mutates) == 0 {
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[produces-or-mutates-non-empty] confirmed object %s has produces=[] AND mutates=[]; "+
+						"a confirmed function must declare at least one effect — use graph_link_produce for fresh output OR graph_link_mutate for in-place mutation",
+					objID))
+			}
 			// typecalc evidence — every confirmed object on the root graph
-			// must have a typecalc-compile/test record on disk. The agent-
-			// side `typecalc-use` hook already flags individual merges that
-			// skipped evidence, but a root session that ignored or missed
-			// those warnings would otherwise still finish. This gate makes
-			// the evidence load-bearing: no evidence → no finish.
-			if !typecalcEvidenceExistsAt(cwd, objID) {
+			// must have a passing typecalc-compile/test record on disk. The
+			// hook already flags individual merges that skipped evidence;
+			// the gate makes this load-bearing for finish.
+			ev, ok := readEvidence(cwd, objID)
+			if !ok {
 				r.Issues = append(r.Issues, fmt.Sprintf(
 					"[root-deliver] object %s confirmed but no typecalc evidence at .kcpos/typecalc-evidence/%s.json — run typecalc_compile/typecalc_test with object_id=%q before finishing root",
 					objID, objID, objID))
+				continue
+			}
+			// typecalc-evidence-passing (5.1c) — existence is not enough; the
+			// recorded run must have ok=true.
+			if !ev.OK {
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[typecalc-evidence-passing] object %s evidence file records ok=false — re-run typecalc_compile/typecalc_test until it passes before confirming",
+					objID))
+				continue
+			}
+			// typecalc-test-required (5.2) — for languages whose test runner
+			// kcpos can drive (Go / TypeScript / JavaScript / Python), a
+			// confirmed object must have evidence of a passing TEST, not
+			// just a passing compile. For languages without an in-tree
+			// runner (Rust / Java / HTML), compile evidence is accepted.
+			if requiresTestEvidence(ev.Lang) && ev.Kind != "test" {
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[typecalc-test-required] object %s has only compile evidence (kind=%q) — language %q has a test runner; run typecalc_test with object_id=%q to attest a passing test before confirming",
+					objID, ev.Kind, ev.Lang, objID))
 			}
 		}
-		// Also surface attribute orphans-of-truth: an attribute that was
-		// declared but never advanced is fine on a non-root, but on root
-		// it suggests the type was named and forgotten. Warn (not error).
-		// Currently we only error on objects since attributes don't have
-		// impl semantics in the same way.
+		// attrs-backfilled (5.1b) — every attribute produced by a confirmed
+		// object must itself be in status=confirmed. The "自下而上回填"
+		// principle: when an object's implementation succeeds, the
+		// attributes it produces have their value space confirmed. If the
+		// object is confirmed but the attribute is still declared, the
+		// agent skipped the backfill step.
+		producedByConfirmed := map[string]string{} // attrID → producing/mutating objID
+		for objID, obj := range g.Objects {
+			if obj.Status != graph.StatusConfirmed {
+				continue
+			}
+			for _, attr := range obj.Produces {
+				if _, seen := producedByConfirmed[attr]; !seen {
+					producedByConfirmed[attr] = objID
+				}
+			}
+			// An attribute mutated by a confirmed object also needs its
+			// value space confirmed — the mutation operation is now part
+			// of the confirmed surface.
+			for _, attr := range obj.Mutates {
+				if _, seen := producedByConfirmed[attr]; !seen {
+					producedByConfirmed[attr] = objID
+				}
+			}
+		}
+		for attrID, producer := range producedByConfirmed {
+			a, ok := g.Attributes[attrID]
+			if !ok {
+				continue
+			}
+			if a.Status != graph.StatusConfirmed {
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[attrs-backfilled] attribute %s is produced by confirmed object %s but is still status=%s — confirmed objects backfill their produced attributes (graph_merge_attribute id=%q patch='{\"status\":\"confirmed\",\"valueSpace\":...}'); see CLAUDE.md \"自下而上回填\"",
+					attrID, producer, a.Status, attrID))
+			}
+		}
 	}
 
 	// checkpoint-pass — checkpoint final verdict (only meaningful when frozen)
@@ -147,17 +240,78 @@ func implFileOK(implPath, cwd string) bool {
 	return info.Size() > 0
 }
 
-// typecalcEvidenceExistsAt mirrors the agent-package helper of the same
-// name (we duplicate the path constant rather than introduce a circular
-// import — agent imports session, not the other way around).
-func typecalcEvidenceExistsAt(cwd, objectID string) bool {
+// evidenceRecord mirrors the JSON layout written by typecalc_compile /
+// typecalc_test (see internal/tools/typecalc.go recordTypecalcEvidence).
+// Kept private to this file — the canonical writer is tools/typecalc.go.
+type evidenceRecord struct {
+	ObjectID  string `json:"objectId"`
+	Kind      string `json:"kind"` // "compile" | "test"
+	Lang      string `json:"lang"`
+	OK        bool   `json:"ok"`
+	Timestamp string `json:"timestamp"`
+}
+
+// readEvidence loads .kcpos/typecalc-evidence/<objectID>.json. Returns
+// (record, true) on success; (zero, false) if the file is missing or
+// malformed. Callers should prefer this over typecalcEvidenceExistsAt
+// when they need to inspect kind/ok.
+func readEvidence(cwd, objectID string) (evidenceRecord, bool) {
 	if objectID == "" {
-		return false
+		return evidenceRecord{}, false
 	}
 	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".json")
-	info, err := os.Stat(path)
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 {
+		return evidenceRecord{}, false
+	}
+	var rec evidenceRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return evidenceRecord{}, false
+	}
+	return rec, true
+}
+
+// typecalcEvidenceExistsAt is preserved for callers that just need the
+// existence check. New gate code uses readEvidence to also inspect ok/kind.
+func typecalcEvidenceExistsAt(cwd, objectID string) bool {
+	_, ok := readEvidence(cwd, objectID)
+	return ok
+}
+
+// requiresTestEvidence reports whether the language has an in-tree test
+// runner kcpos can drive (so test evidence is achievable). Mirrors the
+// language switch in internal/typecalc/test.go TestRunInvoker.
+func requiresTestEvidence(lang string) bool {
+	switch lang {
+	case "Go", "TypeScript", "JavaScript", "Python":
+		return true
+	}
+	return false
+}
+
+// anyConfirmedTestable reports whether the graph at graphPath has any
+// confirmed object whose typecalc evidence records a testable language.
+// Used by the outputs-tests-non-empty gate to scope itself fairly.
+func anyConfirmedTestable(graphPath string) bool {
+	if graphPath == "" {
+		return false
+	}
+	g, err := graph.LoadOrInit(graphPath)
 	if err != nil {
 		return false
 	}
-	return info.Size() > 0
+	cwd, _ := os.Getwd()
+	for objID, obj := range g.Objects {
+		if obj.Status != graph.StatusConfirmed {
+			continue
+		}
+		ev, ok := readEvidence(cwd, objID)
+		if !ok {
+			continue
+		}
+		if requiresTestEvidence(ev.Lang) {
+			return true
+		}
+	}
+	return false
 }

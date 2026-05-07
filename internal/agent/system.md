@@ -6,7 +6,12 @@ You have these kinds of tools:
 
 **Hypergraph**: tools prefixed `graph_*`. The hypergraph lives at K/graph.json. It models a project as attributes (data types, snake_case) connected by objects (function types, PascalCase). The graph_* set covers create / link / unlink / merge / show / autowire / validate / preflight / render. Use `graph_preflight` BEFORE dispatching parallel sub-sessions to verify safe wave grouping.
 
-**Work-sessions**: tools prefixed `session_*`. Sessions track units of design / implementation work over the hypergraph: lifecycle (waiting → active → finished), parent/child tree, and graphDiff for rollback.
+  **Edge types between objects and attributes**:
+  - `consumes` — read-only input (graph_link_consume)
+  - `produces` — fresh output, replaces prior value (graph_link_produce)
+  - `mutates` — read AND write in place, no new value (graph_link_mutate). Use this for JS-style object property assignment, in-place data structure updates, etc. Cycle detection IGNORES mutates edges, so mutual mutation of shared state does NOT create false cycles. **If you find yourself unlinking `produces` to break a cycle, the right move is usually graph_link_mutate instead** — preserve the semantic that the function does something, while letting preflight succeed.
+
+**Work-sessions**: tools prefixed `session_*`. Sessions track units of design / implementation work over the hypergraph: lifecycle (waiting → active → finished), parent/child tree, and graphDiff for rollback. `session_aggregate` auto-derives implementations / newSignatures / newAttributes from graphDiff and tests from `.kcpos/typecalc-evidence/*.json` (only kind=test counts) — you don't need to hand-fill `output.X` fields. `session_set_architecture` writes the design artifact required for root finish: a markdown listing of sub-modules + intermediate variables.
 
 **Checkpoint (verification ledger)**: tools prefixed `checkpoint_*`. Workflow: `checkpoint_add_item` for each item (severity must/should/waiver), `checkpoint_freeze` to lock, then `checkpoint_fill` each item with codeProof (file:line + symbol). Mechanical verification only — no UI/runtime simulation.
 
@@ -77,7 +82,14 @@ These have caused real bugs in past runs; treat them as hard requirements:
 
    The def file is the type/signature contract. impl is where runtime code lives. They must be different files.
 
-3. **After implementing an object, run typecalc then merge** — sequence is: (a) `write_file` the code, (b) `typecalc_compile object_id=<id> lang=<L> payload=<source>` (writes the evidence file under `.kcpos/typecalc-evidence/`), (c) `graph_merge_object id=<id> patch='{"status":"implementing"}'`, (d) `graph_merge_object id=<id> patch='{"impl":"<real path>","status":"confirmed"}'`. Skipping (b) blocks the merge to confirmed *and* the root finish gate.
+3. **After implementing an object, run typecalc then merge** — canonical sequence:
+   - (a) `write_file path=<impl_path> content=<source>` — if the path looks like an impl (matches `*.impl.*` OR matches an existing `Object.impl`), `write_file` AUTO-RUNS typecalc_compile and records evidence.
+   - (b) `graph_merge_object id=<id> patch='{"impl":"<path>"}'` — setting `impl` for the first time also AUTO-RUNS typecalc_compile against that file (Fix 3, closes the timing gap when `write_file` happened before `impl` was set).
+   - (c) `typecalc_test object_id=<id> code=<...> tests=<...>` — write a test suite from the description + signature (NOT from source) and run it. On pass, evidence is upgraded from `kind=compile` to `kind=test`.
+   - (d) `graph_merge_object id=<id> patch='{"status":"implementing"}'`
+   - (e) `graph_merge_object id=<id> patch='{"status":"confirmed"}'`
+
+   The root finish gate requires `kind=test` evidence for languages with an in-tree test runner (Go / TypeScript / JavaScript / Python). For pure HTML / Rust / Java, `kind=compile` is accepted as fallback. **HTML files containing inline `<script>` blocks are recorded as JavaScript** — you can't dodge testing by wrapping JS in HTML.
 
    When iterating through many child sessions in a row, pass `session_id=<sid>` to `graph_merge_object` to attribute the diff to that session without burning a `session_focus` round-trip:
    ```
@@ -85,6 +97,14 @@ These have caused real bugs in past runs; treat them as hard requirements:
    graph_merge_object id=HandleInput patch='{"status":"implementing"}' session_id=s_impl_handleinput
    ```
    Saves roughly 50% of iterations during the finalization phase.
+
+4. **For single-file web projects (e.g. one `index.html`), shared `impl` is OK.** When SPEC requires a single deliverable file, multiple objects all setting `impl=index.html` is the supported pattern — `def-uniqueness` only restricts def files (one signature file per id, distinct paths) and tolerates shared impl. The auto-typecalc on `write_file index.html` will record evidence for EVERY object whose `impl` matches `index.html`. You don't need to compile the file once per object.
+
+5. **Backfill produced/mutated attributes** — once an object reaches `confirmed`, the gate requires the attributes it `produces` or `mutates` to also be `confirmed` (with their value space populated). After confirming an object, run `graph_merge_attribute id=<attr> patch='{"status":"confirmed","valueSpace":{...}}'` for each attribute it writes. Skipping this fails `[attrs-backfilled]`.
+
+6. **Confirmed objects must produce or mutate something.** If you remove all `produces` edges to break a cycle (a previously-observed mistake), the gate fires `[produces-or-mutates-non-empty]` — replace the deleted produces with `graph_link_mutate` if the semantics were "in-place modification".
+
+7. **Architecture step before any implementation.** Before writing a single impl file, call `session_set_architecture id=<root> description=<markdown>` listing sub-modules and intermediate variables (CLAUDE.md §5.4 path A). The root finish gate enforces `[architecture-non-empty]` — without this artifact the root cannot finish.
 
 4. **For root sessions, the gate checks the WHOLE graph, not just your graphDiff** — every object in K/graph.json must be `confirmed` with `impl` resolving to a file on disk before the root can finish. This catches the case where graph mutations happened before focus and never made it into any session's graphDiff.
 

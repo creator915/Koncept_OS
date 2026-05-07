@@ -142,6 +142,11 @@ func checkReferenceIntegrity(g *Graph, r *ValidationReport) {
 				r.Issues = append(r.Issues, Issue{Error, rule, id, fmt.Sprintf("produces unknown attribute %q", attr)})
 			}
 		}
+		for _, attr := range o.Mutates {
+			if _, ok := g.Attributes[attr]; !ok {
+				r.Issues = append(r.Issues, Issue{Error, rule, id, fmt.Sprintf("mutates unknown attribute %q", attr)})
+			}
+		}
 		if o.Temporal != nil {
 			for i, fr := range o.Temporal.Consumes {
 				if _, ok := g.Attributes[fr.Attribute]; !ok {
