@@ -8,9 +8,16 @@ import (
 	"github.com/creator915/Koncept_OS/internal/chat"
 	"github.com/creator915/Koncept_OS/internal/llm"
 	"github.com/creator915/Koncept_OS/internal/tools"
+	"github.com/creator915/Koncept_OS/internal/typecalc"
 )
 
-const defaultMaxIterations = 25
+// defaultMaxIterations: 60 was chosen empirically — a non-trivial web app
+// (pong / tic-tac-toe / counter) takes ~30–45 turns to design, implement,
+// and finalize through the kcpos workflow when subagents are NOT used. 25
+// (the prior default) routinely ran out mid-finalization, leaving objects
+// stuck in declared/implementing while index.html was already written.
+// Top-level callers can still tune via RunOptions.MaxIterations.
+const defaultMaxIterations = 60
 
 // RunOptions tunes agent execution. The zero value is valid: it uses the
 // default tool set, default spec hooks, no indentation, the default
@@ -44,6 +51,14 @@ type RunOptions struct {
 	// HooksOptOut, if true, completely disables hook execution. Distinguished
 	// from Hooks: nil so users can detect the "I want defaults" intent.
 	HooksOptOut bool
+
+	// Caps is the §6 capability set scoping every tool call. nil/empty
+	// disables the gate entirely (top-level user-facing agent default —
+	// the user is implicitly trusted with everything). Sub-agents that
+	// opt into capability scoping pass a CapSet here; every tool call
+	// is then authorized against this set before execution, and a denial
+	// becomes a PermissionDenied tool result the model can react to.
+	Caps typecalc.CapSet
 }
 
 // RunTurn executes one user turn — append the prompt, drive the agent loop
@@ -132,7 +147,15 @@ func RunTurnOpts(ctx context.Context, client *llm.Client, messages *[]chat.Messa
 
 		for _, tc := range assistant.ToolCalls {
 			fmt.Fprintf(os.Stderr, "%s» %s(%s)\n", opts.Indent, tc.Function.Name, truncate(tc.Function.Arguments, 200))
-			result := tools.Execute(ctx, builtins, tc.Function.Name, tc.Function.Arguments)
+			var result string
+			if denied := authorizeToolCall(opts.Caps, tc.Function.Name, tc.Function.Arguments); denied != nil {
+				// §6.2 permission_gate: refuse before execute, surface as
+				// PermissionDenied so the model can react.
+				result = renderPermissionDenied(denied, tc.Function.Name)
+				fmt.Fprintf(os.Stderr, "%s\x1b[31m✗ permission denied\x1b[0m\n", opts.Indent)
+			} else {
+				result = tools.Execute(ctx, builtins, tc.Function.Name, tc.Function.Arguments)
+			}
 			*messages = append(*messages, chat.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,

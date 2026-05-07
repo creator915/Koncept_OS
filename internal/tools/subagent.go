@@ -32,6 +32,17 @@ type SubAgentRequest struct {
 	// MaxIterations caps the child's internal LLM round-trips. 0 = use the
 	// agent package's default.
 	MaxIterations int
+
+	// Role names a CapSet preset (implementer / tester / integrator / root).
+	// Resolved by the agent package via typecalc.PresetByName. Mutually
+	// exclusive with Caps; if both are set Role wins.
+	Role string
+
+	// Caps is the explicit capability list, in canonical token form
+	// (e.g. "read_file:K/defs/*", "run_tool:graph_validate"). Used when
+	// the parent wants finer control than a preset gives. The agent
+	// package enforces child ⊆ parent (§6.1) before spawning.
+	Caps []string
 }
 
 func subAgentTool(runner SubAgentRunner) Tool {
@@ -40,7 +51,7 @@ func subAgentTool(runner SubAgentRunner) Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name: "spawn_subagent",
-				Description: "Spawn a child agent to handle a focused, self-contained sub-task. The child runs in its own conversation context — it does NOT see your messages — and returns a single summary string when done. The child shares K/* state with you (graph, sessions, checkpoint) but its tool-call detail and reasoning stay out of your context.\n\nUse this when:\n- a sub-task is well-scoped (one object's implementation; one type analysis; one file's refactor) — i.e. a child can succeed with the task description alone\n- your context is getting large and you want sub-task detail out\n- you explicitly want isolation: a child's failure won't contaminate your reasoning\n\nIf session_id is provided, the child auto-focuses on that KonceptOS session — its graph mutations record to that session's graphDiff. Focus is restored to your previous state on return.\n\nThe child has the same tool set as you, including (recursively, up to a depth cap) spawn_subagent.",
+				Description: "Spawn a child agent to handle a focused, self-contained sub-task. The child runs in its own conversation context — it does NOT see your messages — and returns a single summary string when done. The child shares K/* state with you (graph, sessions, checkpoint) but its tool-call detail and reasoning stay out of your context.\n\nUse this when:\n- a sub-task is well-scoped (one object's implementation; one type analysis; one file's refactor) — i.e. a child can succeed with the task description alone\n- your context is getting large and you want sub-task detail out\n- you explicitly want isolation: a child's failure won't contaminate your reasoning\n\nIf session_id is provided, the child auto-focuses on that KonceptOS session — its graph mutations record to that session's graphDiff. Focus is restored to your previous state on return.\n\nThe child has the same tool set as you, including (recursively, up to a depth cap) spawn_subagent.\n\nOptional capability scoping (§6 of KonceptOS_TypeCalculator.md): pass `role` to use a preset (implementer / tester / integrator / root) or `caps` for an explicit token list. If you pass either, every tool call in the child is gated against that set; tool calls outside the set return PermissionDenied. Child caps must be a subset of yours.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -55,6 +66,15 @@ func subAgentTool(runner SubAgentRunner) Tool {
 						"max_iterations": map[string]interface{}{
 							"type":        "integer",
 							"description": "Optional. Cap on the child's LLM iterations (default 25).",
+						},
+						"role": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional. Capability preset: implementer | tester | integrator | root. Mutually exclusive with caps.",
+						},
+						"caps": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "Optional. Explicit capability tokens, e.g. ['read_file:K/defs/*','run_tool:graph_validate']. Must be a subset of your caps.",
 						},
 					},
 					"required": []string{"task"},
@@ -75,6 +95,16 @@ func subAgentTool(runner SubAgentRunner) Tool {
 			}
 			if iters, ok := args["max_iterations"].(float64); ok {
 				req.MaxIterations = int(iters)
+			}
+			if role, ok := args["role"].(string); ok {
+				req.Role = role
+			}
+			if rawCaps, ok := args["caps"].([]interface{}); ok {
+				for _, c := range rawCaps {
+					if s, ok := c.(string); ok {
+						req.Caps = append(req.Caps, s)
+					}
+				}
 			}
 			return runner.Run(ctx, req)
 		},

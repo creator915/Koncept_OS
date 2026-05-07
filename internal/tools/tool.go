@@ -52,6 +52,10 @@ func Builtins() map[string]Tool {
 		"checkpoint_fill":        checkpointFillTool(),
 		"checkpoint_waive":       checkpointWaiveTool(),
 		"checkpoint_show":        checkpointShowTool(),
+		"typecalc_compile":       typecalcCompileTool(),
+		"typecalc_test":          typecalcTestTool(),
+		"typecalc_probe_plan":    typecalcProbePlanTool(),
+		"typecalc_apply_feedback": typecalcApplyFeedbackTool(),
 	}
 }
 

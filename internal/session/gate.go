@@ -96,6 +96,18 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 			}
 			if !implFileOK(*obj.Impl, cwd) {
 				r.Issues = append(r.Issues, fmt.Sprintf("[root-deliver] object %s impl %q missing or empty on disk", objID, *obj.Impl))
+				continue
+			}
+			// typecalc evidence — every confirmed object on the root graph
+			// must have a typecalc-compile/test record on disk. The agent-
+			// side `typecalc-use` hook already flags individual merges that
+			// skipped evidence, but a root session that ignored or missed
+			// those warnings would otherwise still finish. This gate makes
+			// the evidence load-bearing: no evidence → no finish.
+			if !typecalcEvidenceExistsAt(cwd, objID) {
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[root-deliver] object %s confirmed but no typecalc evidence at .kcpos/typecalc-evidence/%s.json — run typecalc_compile/typecalc_test with object_id=%q before finishing root",
+					objID, objID, objID))
 			}
 		}
 		// Also surface attribute orphans-of-truth: an attribute that was
@@ -128,6 +140,21 @@ func implFileOK(implPath, cwd string) bool {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(cwd, path)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Size() > 0
+}
+
+// typecalcEvidenceExistsAt mirrors the agent-package helper of the same
+// name (we duplicate the path constant rather than introduce a circular
+// import — agent imports session, not the other way around).
+func typecalcEvidenceExistsAt(cwd, objectID string) bool {
+	if objectID == "" {
+		return false
+	}
+	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".json")
 	info, err := os.Stat(path)
 	if err != nil {
 		return false

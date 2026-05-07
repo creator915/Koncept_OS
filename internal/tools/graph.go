@@ -337,12 +337,13 @@ func graphMergeAttributeTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "graph_merge_attribute",
-				Description: "Apply a partial JSON patch to an existing attribute. Allowed fields: intent, status, statusSession, valueSpace, confirmedOps, laws. Structural fields (def, refines) are not patchable here — use unlink/relink instead. The patch must be a JSON object string; only present keys are updated.",
+				Description: "Apply a partial JSON patch to an existing attribute. Allowed fields: intent, status, statusSession, valueSpace, confirmedOps, laws. Structural fields (def, refines) are not patchable here — use unlink/relink instead. The patch must be a JSON object string; only present keys are updated.\n\nOptional `session_id` temporarily swaps the focused session for the duration of the merge so the diff is recorded against that session — saves the focus / merge / re-focus call cycle when ticking through child sessions in batch.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":    map[string]interface{}{"type": "string", "description": "Attribute id."},
-						"patch": map[string]interface{}{"type": "string", "description": "JSON object as string, e.g. '{\"status\":\"confirmed\",\"valueSpace\":{\"celsius\":\"number\"}}'."},
+						"id":         map[string]interface{}{"type": "string", "description": "Attribute id."},
+						"patch":      map[string]interface{}{"type": "string", "description": "JSON object as string, e.g. '{\"status\":\"confirmed\",\"valueSpace\":{\"celsius\":\"number\"}}'."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Optional. Session id to record this diff against — temporarily focused for the merge, then previous focus restored."},
 					},
 					"required": []string{"id", "patch"},
 				},
@@ -351,6 +352,7 @@ func graphMergeAttributeTool() Tool {
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			id, _ := args["id"].(string)
 			patchStr, _ := args["patch"].(string)
+			sessionID, _ := args["session_id"].(string)
 			if id == "" || patchStr == "" {
 				return "", fmt.Errorf("id and patch required")
 			}
@@ -358,6 +360,11 @@ func graphMergeAttributeTool() Tool {
 			if err := json.Unmarshal([]byte(patchStr), &patch); err != nil {
 				return "", fmt.Errorf("patch must be valid JSON object: %w", err)
 			}
+			restore, err := withTempFocus(sessionID)
+			if err != nil {
+				return "", err
+			}
+			defer restore()
 			if err := mutateGraph(func(g *graph.Graph) error {
 				return g.MergeAttribute(id, patch)
 			}); err != nil {
@@ -374,12 +381,13 @@ func graphMergeObjectTool() Tool {
 			Type: "function",
 			Function: chat.ToolFunction{
 				Name:        "graph_merge_object",
-				Description: "Apply a partial JSON patch to an existing object. Allowed fields: intent, impl, status, statusSession, temporal, preconditions, postconditions. Structural fields (def, consumes, produces) are not patchable — use unlink/relink. Patch must be a JSON object string.",
+				Description: "Apply a partial JSON patch to an existing object. Allowed fields: intent, impl, status, statusSession, temporal, preconditions, postconditions. Structural fields (def, consumes, produces) are not patchable — use unlink/relink. Patch must be a JSON object string.\n\nOptional `session_id` temporarily swaps the focused session for the duration of the merge so the diff is recorded against that session — saves the focus / merge / re-focus cycle when ticking many child sessions through implementing→confirmed in a batch.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":    map[string]interface{}{"type": "string", "description": "Object id."},
-						"patch": map[string]interface{}{"type": "string", "description": "JSON object as string."},
+						"id":         map[string]interface{}{"type": "string", "description": "Object id."},
+						"patch":      map[string]interface{}{"type": "string", "description": "JSON object as string."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Optional. Session id to record this diff against — temporarily focused for the merge, then previous focus restored."},
 					},
 					"required": []string{"id", "patch"},
 				},
@@ -388,6 +396,7 @@ func graphMergeObjectTool() Tool {
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			id, _ := args["id"].(string)
 			patchStr, _ := args["patch"].(string)
+			sessionID, _ := args["session_id"].(string)
 			if id == "" || patchStr == "" {
 				return "", fmt.Errorf("id and patch required")
 			}
@@ -395,6 +404,11 @@ func graphMergeObjectTool() Tool {
 			if err := json.Unmarshal([]byte(patchStr), &patch); err != nil {
 				return "", fmt.Errorf("patch must be valid JSON object: %w", err)
 			}
+			restore, err := withTempFocus(sessionID)
+			if err != nil {
+				return "", err
+			}
+			defer restore()
 			if err := mutateGraph(func(g *graph.Graph) error {
 				return g.MergeObject(id, patch)
 			}); err != nil {
@@ -403,6 +417,27 @@ func graphMergeObjectTool() Tool {
 			return fmt.Sprintf("merged %d field(s) into object %s", len(patch), id), nil
 		},
 	}
+}
+
+// withTempFocus saves current focus, sets focus to id, and returns a
+// closure that restores the prior focus. If id is empty (caller opted
+// out of temp-focus), the closure is a no-op and current focus stays as
+// the agent left it.
+//
+// We use a closure rather than `defer session.SetFocus(prev)` directly
+// so the merge tools can both share the pattern without each one
+// repeating the save/restore boilerplate.
+func withTempFocus(id string) (func(), error) {
+	if id == "" {
+		return func() {}, nil
+	}
+	prev, _ := session.GetFocus(session.DefaultDir)
+	if err := session.SetFocus(session.DefaultDir, id); err != nil {
+		return func() {}, fmt.Errorf("temp-focus %s: %w", id, err)
+	}
+	return func() {
+		_ = session.SetFocus(session.DefaultDir, prev)
+	}, nil
 }
 
 func graphValidateTool() Tool {

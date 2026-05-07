@@ -334,6 +334,17 @@ func TestGate_RootDeliverPassesWhenAllConfirmed(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// typecalc evidence — every confirmed object on a root graph must have
+	// a recorded typecalc compile/test (post-2026-05-07 enforcement; see
+	// internal/agent/hooks.go typecalcUseHook).
+	evidenceDir := filepath.Join(root, ".kcpos", "typecalc-evidence")
+	if err := mkdirAll(evidenceDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(evidenceDir, "Op.json"), `{"objectId":"Op","kind":"compile","ok":true}`); err != nil {
+		t.Fatal(err)
+	}
+
 	// Run gate from cwd=root so relative impl path resolves
 	cwdRestore := mustChdir(t, root)
 	defer cwdRestore()

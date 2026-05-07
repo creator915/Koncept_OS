@@ -361,6 +361,64 @@ func TestDefUniqueness_PassesWhenAllUnique(t *testing.T) {
 	}
 }
 
+// --- status-transition hook ---
+
+func TestStatusTransition_FlagsSkipFromDeclared(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "K"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	graphJSON := `{
+  "attributes": {},
+  "objects": {
+    "F": {"def":"defs/F.ts","impl":null,"consumes":[],"produces":[],"intent":"x","temporal":null,"preconditions":"","postconditions":"","status":"declared","statusSession":null}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "K", "graph.json"), []byte(graphJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdirTo(t, dir)
+
+	// The merge tool itself rejects this transition, so the on-disk file
+	// won't actually change to confirmed before this hook fires. Simulate
+	// the situation by writing a graph where status is already "confirmed"
+	// while the hook receives a patch attempting declared → confirmed.
+	// In practice the hook runs after the tool succeeds, so what we want
+	// to verify is that a patch that *would* skip is flagged.
+	h := &statusTransitionHook{}
+	args := `{"id":"F","patch":"{\"status\":\"confirmed\"}"}`
+	out := h.After("graph_merge_object", args, "ok")
+	if out == "" {
+		t.Fatal("expected violation when status patch skips implementing")
+	}
+	if !strings.Contains(out, "implementing") {
+		t.Fatalf("violation should mention implementing: %s", out)
+	}
+}
+
+func TestStatusTransition_AllowsValidStep(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "K"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	graphJSON := `{
+  "attributes": {},
+  "objects": {
+    "F": {"def":"defs/F.ts","impl":null,"consumes":[],"produces":[],"intent":"x","temporal":null,"preconditions":"","postconditions":"","status":"implementing","statusSession":null}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "K", "graph.json"), []byte(graphJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdirTo(t, dir)
+
+	h := &statusTransitionHook{}
+	args := `{"id":"F","patch":"{\"status\":\"confirmed\"}"}`
+	if v := h.After("graph_merge_object", args, "ok"); v != "" {
+		t.Errorf("implementing → confirmed should be allowed, got: %s", v)
+	}
+}
+
 // --- FormatViolations ---
 
 func TestFormatViolations_RendersAllItems(t *testing.T) {

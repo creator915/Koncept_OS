@@ -33,6 +33,8 @@ func DefaultHooks() []SpecHook {
 		&defImplDistinctHook{},
 		&defUniquenessHook{},
 		&rootFinishGateHook{},
+		&statusTransitionHook{},
+		&typecalcUseHook{},
 	}
 }
 
@@ -283,6 +285,155 @@ func (h *rootFinishGateHook) After(toolName, argsJSON, result string) string {
 	// We do, however, refuse to be silent if the result actually failed —
 	// the agent should reason about what went wrong before retrying.
 	return ""
+}
+
+// --- Hook 6: status-transition state machine (§5.2 of TypeCalculator doc) ---
+//
+// graph.Status transitions must follow the chain
+// declared → implementing → confirmed; a graph_merge_*  call that tries
+// to leap over implementing (or to demote a status) is flagged. The hook
+// inspects the merge patch's "status" field and looks up the entity's
+// current status from the on-disk graph.
+
+type statusTransitionHook struct{}
+
+func (h *statusTransitionHook) Name() string { return "status-transition" }
+
+func (h *statusTransitionHook) After(toolName, argsJSON, _ string) string {
+	if toolName != "graph_merge_attribute" && toolName != "graph_merge_object" {
+		return ""
+	}
+	var args struct {
+		ID    string `json:"id"`
+		Patch string `json:"patch"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ""
+	}
+	var patch map[string]any
+	if err := json.Unmarshal([]byte(args.Patch), &patch); err != nil {
+		return ""
+	}
+	statusVal, hasStatus := patch["status"]
+	if !hasStatus {
+		return ""
+	}
+	to, _ := statusVal.(string)
+	if to == "" {
+		return ""
+	}
+	g, err := graph.LoadOrInit(graph.DefaultPath)
+	if err != nil {
+		return ""
+	}
+	var from string
+	if toolName == "graph_merge_attribute" {
+		if attr, ok := g.Attributes[args.ID]; ok {
+			from = attr.Status
+		}
+	} else {
+		if obj, ok := g.Objects[args.ID]; ok {
+			from = obj.Status
+		}
+	}
+	if from == "" || from == to {
+		return ""
+	}
+	// The patch already landed on disk. We can't strictly block the
+	// transition here (lifecycle of the merge tool decides that), so we
+	// report the violation and require the agent to undo or correct on
+	// next turn. The tool itself should also enforce — see graph.go below.
+	allowed := map[string]string{
+		graph.StatusDeclared:     graph.StatusImplementing,
+		graph.StatusImplementing: graph.StatusConfirmed,
+	}
+	expectedNext, ok := allowed[from]
+	if !ok {
+		return fmt.Sprintf(
+			"[status-transition] entity %q is in status %q (terminal); transition to %q is not allowed. "+
+				"To revisit a confirmed entity, roll back the session that confirmed it instead.",
+			args.ID, from, to,
+		)
+	}
+	if to != expectedNext {
+		return fmt.Sprintf(
+			"[status-transition] entity %q tried %s → %s, but the only legal next step is %s. "+
+				"Status must follow declared → implementing → confirmed (KonceptOS_TypeCalculator.md §5.2). "+
+				"Required next turn: graph_merge_<kind> with patch '{\"status\":%q}' first, finish the implementation, then advance to %q.",
+			args.ID, from, to, expectedNext, expectedNext, to,
+		)
+	}
+	return ""
+}
+
+// --- Hook 7: typecalc-use enforcement ---
+//
+// Before any object can transition to status=confirmed, there must be on-
+// disk evidence that the agent ran typecalc_compile (or typecalc_test) for
+// that object. The typecalc tool writes
+// .kcpos/typecalc-evidence/<objectID>.json on success; this hook checks
+// for that file when a graph_merge_object patch sets status=confirmed.
+//
+// Without this enforcement, the LLM tends to skip the mechanical
+// validation entirely (we observed this on the first end-to-end run:
+// "let me try typecalc_compile" thoughts but no actual call). Making the
+// evidence load-bearing for confirmation forces the pathway to be used.
+
+type typecalcUseHook struct{}
+
+const typecalcEvidenceDirRel = ".kcpos/typecalc-evidence"
+
+func (h *typecalcUseHook) Name() string { return "typecalc-use" }
+
+func (h *typecalcUseHook) After(toolName, argsJSON, _ string) string {
+	if toolName != "graph_merge_object" {
+		return ""
+	}
+	var args struct {
+		ID    string `json:"id"`
+		Patch string `json:"patch"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ""
+	}
+	var patch map[string]any
+	if err := json.Unmarshal([]byte(args.Patch), &patch); err != nil {
+		return ""
+	}
+	statusVal, hasStatus := patch["status"]
+	if !hasStatus {
+		return ""
+	}
+	if s, _ := statusVal.(string); s != graph.StatusConfirmed {
+		return ""
+	}
+	if typecalcEvidenceExists(args.ID) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[typecalc-use] object %q was set to status=confirmed without prior typecalc evidence "+
+			"(no file under %s/%s.json). The mechanical compile/test pathway is required for "+
+			"confirmation — \"confirmed\" without typecalc evidence is just a string the LLM typed.\n"+
+			"Required next turn: call typecalc_compile (or typecalc_test) with object_id=%q and the "+
+			"actual implementation payload, then re-issue the merge. If you have already merged, "+
+			"the evidence file will be created on the next typecalc call and the next finish gate "+
+			"will pass — but if you skip this step the gate at root-finish will block you.",
+		args.ID, typecalcEvidenceDirRel, args.ID, args.ID,
+	)
+}
+
+func typecalcEvidenceExists(objectID string) bool {
+	if objectID == "" {
+		return false
+	}
+	rel := filepath.Join(typecalcEvidenceDirRel, objectID+".json")
+	cwd, _ := os.Getwd()
+	path := filepath.Join(cwd, rel)
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Size() > 0
 }
 
 // --- helpers ---

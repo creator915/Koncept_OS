@@ -52,6 +52,9 @@ func (g *Graph) MergeAttribute(id string, patch map[string]any) error {
 		if !ok || !validStatus(s) {
 			return fmt.Errorf("status must be one of declared|implementing|confirmed")
 		}
+		if err := validStatusTransition(a.Status, s); err != nil {
+			return fmt.Errorf("attribute %q: %w", id, err)
+		}
 		a.Status = s
 	}
 	if v, has := patch["statusSession"]; has {
@@ -119,6 +122,9 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 		if !ok || !validStatus(s) {
 			return fmt.Errorf("status must be one of declared|implementing|confirmed")
 		}
+		if err := validStatusTransition(o.Status, s); err != nil {
+			return fmt.Errorf("object %q: %w", id, err)
+		}
 		o.Status = s
 	}
 	if v, has := patch["statusSession"]; has {
@@ -158,6 +164,32 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 
 func validStatus(s string) bool {
 	return s == StatusDeclared || s == StatusImplementing || s == StatusConfirmed
+}
+
+// validStatusTransition enforces the §5.2 state machine from the
+// TypeCalculator design doc:
+//
+//	declared → implementing → confirmed
+//
+// No-op transitions (from == to) are allowed. Skipping implementing or
+// demoting status are rejected; rollback is the only legal way out of
+// confirmed (see internal/session/rollback.go).
+func validStatusTransition(from, to string) error {
+	if from == to || from == "" {
+		return nil
+	}
+	allowed := map[string]string{
+		StatusDeclared:     StatusImplementing,
+		StatusImplementing: StatusConfirmed,
+	}
+	expected, ok := allowed[from]
+	if !ok {
+		return fmt.Errorf("status %s is terminal — rollback the session that confirmed this entity instead of mutating it", from)
+	}
+	if to != expected {
+		return fmt.Errorf("illegal status transition %s → %s; the only legal next step is %s (KonceptOS_TypeCalculator.md §5.2)", from, to, expected)
+	}
+	return nil
 }
 
 func stringSlice(v any, field string) ([]string, error) {

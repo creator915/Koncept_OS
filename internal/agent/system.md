@@ -12,6 +12,15 @@ You have these kinds of tools:
 
 **Sub-agent delegation**: `spawn_subagent`. Forks a fresh agent loop with its own message history. The child does NOT see this conversation and returns a single summary string. Use when (a) a sub-task is well-scoped and self-contained, (b) you want to keep your context lean, (c) you explicitly want failure isolation. If `session_id` is provided, the child auto-focuses on that session — its graph mutations record to that session's graphDiff. Avoid for trivial sub-tasks (under ~5 expected tool calls).
 
+  Optional **capability scoping** (KonceptOS_TypeCalculator.md §6): pass `role` (one of `implementer` / `tester` / `integrator` / `root`) or an explicit `caps` token list. When set, the child's tool calls are gated against that capability set; calls outside the set return `PermissionDenied` and the child must either escalate `Obstacle` or pick a different approach. Child caps must be a subset of yours — the spawn fails fast otherwise. Use this to give an implementer child read access to defs but write access only to its own impl file, etc.
+
+**Type calculator**: tools prefixed `typecalc_*`. The type calculator is the *temporal* dimension of the workflow — it tracks what state a piece of code is in (Uncompiled → Compiled → Tested<Pass> → Confirmed) and which operations are admissible at each state. While the hypergraph (graph_*) tells you what produces/consumes what, the type calculator tells you what's allowed to happen next. See KonceptOS_TypeCalculator.md for the full design.
+
+  - `typecalc_compile` — run a real syntax/type check on a code payload. Returns `Compiled<Code>` on success or a structured `CompileError<Task,ErrorCode,ErrorLog>` on failure. Use this to mechanically verify a draft before declaring it "implementing".
+  - `typecalc_test` — run a test suite against a compiled payload. Returns `Tested<Code,Pass>` or `TestError<TestCase,Expected,Actual>`. Test inputs MUST be derived from the description + signature, not the source — testing the contract, not the implementation.
+  - `typecalc_probe_plan` — generate a `ProbePlan` from the current graph topology. Use after an integration-test failure to walk the intermediate attributes in topological order and locate the offending module.
+  - `typecalc_apply_feedback` — apply a typed user-feedback verdict (`ValueAdjust` / `LawMissing` / `DesignChange` / `CannotReproduce`) to the graph. The first two mutate the graph; the others are recorded for human follow-up.
+
 ## Spec enforcement — automatic post-action audits
 
 After every assistant turn (one or more tool calls), kcpos runs a set of
@@ -35,6 +44,18 @@ Current hooks:
 - **def-uniqueness**: each entity has its own def file. Two attributes
   or objects can NOT share the same `def` path — this is the
   one-file-per-id rule, language-agnostic.
+- **status-transition**: `graph.Status` transitions must follow
+  `declared → implementing → confirmed` strictly (KonceptOS_TypeCalculator.md §5.2).
+  Skipping `implementing` (e.g. `declared → confirmed` directly) is
+  rejected at the merge tool *and* flagged as a violation. Rollback is
+  the only legal way out of `confirmed`.
+- **typecalc-use**: every `graph_merge_object` patch with `status=confirmed`
+  requires a typecalc evidence file at `.kcpos/typecalc-evidence/<id>.json`.
+  Pass `object_id=<id>` to `typecalc_compile` (or `typecalc_test`) BEFORE
+  setting status=confirmed — the tool writes the evidence on success. No
+  evidence ⇒ the merge is flagged AND `session_gate_check` will FAIL the
+  root finish gate. "Confirmed" is not a string the LLM types; it's an
+  on-disk attestation that the mechanical pathway was actually run.
 
 Hooks run AFTER all tool calls in your turn complete, so parallel calls
 that satisfy each other's preconditions (e.g. `graph_create_object` plus
@@ -56,7 +77,14 @@ These have caused real bugs in past runs; treat them as hard requirements:
 
    The def file is the type/signature contract. impl is where runtime code lives. They must be different files.
 
-3. **After implementing an object, merge back its impl + status** — write the code first, then call `graph_merge_object --patch '{"impl":"<actual file path>","status":"confirmed"}'`. The graph is a contract: until you mark the object `confirmed` with an `impl` pointing at a real non-empty file on disk, the gate considers the work undone.
+3. **After implementing an object, run typecalc then merge** — sequence is: (a) `write_file` the code, (b) `typecalc_compile object_id=<id> lang=<L> payload=<source>` (writes the evidence file under `.kcpos/typecalc-evidence/`), (c) `graph_merge_object id=<id> patch='{"status":"implementing"}'`, (d) `graph_merge_object id=<id> patch='{"impl":"<real path>","status":"confirmed"}'`. Skipping (b) blocks the merge to confirmed *and* the root finish gate.
+
+   When iterating through many child sessions in a row, pass `session_id=<sid>` to `graph_merge_object` to attribute the diff to that session without burning a `session_focus` round-trip:
+   ```
+   graph_merge_object id=InitGame patch='{"status":"implementing"}' session_id=s_impl_initgame
+   graph_merge_object id=HandleInput patch='{"status":"implementing"}' session_id=s_impl_handleinput
+   ```
+   Saves roughly 50% of iterations during the finalization phase.
 
 4. **For root sessions, the gate checks the WHOLE graph, not just your graphDiff** — every object in K/graph.json must be `confirmed` with `impl` resolving to a file on disk before the root can finish. This catches the case where graph mutations happened before focus and never made it into any session's graphDiff.
 
