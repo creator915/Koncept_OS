@@ -11,6 +11,7 @@ import (
 
 func gitStatusTool() llm.Tool {
 	return llm.Tool{
+		Concurrent: true,
 		Spec: llm.ToolSpec{
 			Type: "function",
 			Function: llm.ToolFunction{

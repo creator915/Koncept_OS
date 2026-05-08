@@ -15,6 +15,7 @@ const maxGlobResults = 500
 
 func globTool() llm.Tool {
 	return llm.Tool{
+		Concurrent: true,
 		Spec: llm.ToolSpec{
 			Type: "function",
 			Function: llm.ToolFunction{

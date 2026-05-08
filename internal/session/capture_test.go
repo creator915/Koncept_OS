@@ -344,6 +344,13 @@ func TestGate_RootDeliverPassesWhenAllConfirmed(t *testing.T) {
 	if err := writeFile(filepath.Join(evidenceDir, "Op.json"), `{"objectId":"Op","kind":"test","lang":"Go","ok":true}`); err != nil {
 		t.Fatal(err)
 	}
+	// post-2026-05-08: accepted evidence (typecalc_review verdict) is now
+	// also required for root-finish. Lay it down with ok=true so this
+	// fixture continues to test the OK path.
+	if err := writeFile(filepath.Join(evidenceDir, "Op.accepted.json"),
+		`{"objectId":"Op","kind":"accepted","ok":true,"reasonableness":{"verdict":"pass","reasons":["fixture"],"confidence":1.0}}`); err != nil {
+		t.Fatal(err)
+	}
 
 	// Fix 4: architecture must be set for root finish gate.
 	if _, err := SetArchitecture(sessionDir, "s_root", "Sub-modules: Op. Intermediate vars: a."); err != nil {

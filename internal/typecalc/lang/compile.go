@@ -54,7 +54,11 @@ func CompileLanguageInvoker(ctx context.Context, env *typecalc.RuleEnv, src *typ
 	case typecalc.LangPython:
 		return runPythonCompile(ctx, env, src)
 	}
-	return src.WithState(typecalc.StateCompiled), nil
+	// CRITICAL (D1): no in-tree compile invoker for this language.
+	// Previously returned Compiled — that lied. Now Insufficient.
+	return typecalc.NewInsufficient(fmt.Sprintf(
+		"no in-tree compile invoker for language %q — kcpos cannot mechanically syntax-check this code. To proceed, restructure into a supported language or record an explicit waiver via typecalc_waive.",
+		src.Lang)), nil
 }
 
 func runGoCompile(ctx context.Context, env *typecalc.RuleEnv, src *typecalc.TypedValue) (*typecalc.TypedValue, error) {

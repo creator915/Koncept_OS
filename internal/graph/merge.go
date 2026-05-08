@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"strings"
 )
 
 // mergeableAttrFields lists fields a merge patch is allowed to touch.
@@ -17,13 +18,14 @@ var mergeableAttrFields = map[string]bool{
 }
 
 var mergeableObjectFields = map[string]bool{
-	"intent":         true,
-	"impl":           true,
-	"status":         true,
-	"statusSession":  true,
-	"temporal":       true,
-	"preconditions":  true,
-	"postconditions": true,
+	"intent":          true,
+	"impl":            true,
+	"status":          true,
+	"statusSession":   true,
+	"temporal":        true,
+	"preconditions":   true,
+	"postconditions":  true,
+	"portObservation": true,
 }
 
 // MergeAttribute applies a partial JSON patch to an existing attribute.
@@ -159,7 +161,41 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 		}
 		o.Postconditions = s
 	}
+	if v, has := patch["portObservation"]; has {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return fmt.Errorf("portObservation must be an object {port: extractor}")
+		}
+		out := make(map[string]string, len(m))
+		for k, val := range m {
+			s, ok := val.(string)
+			if !ok {
+				return fmt.Errorf("portObservation[%q] must be string (e.g. \"global\", \"return.ball\", \"side_effect\"), got %T", k, val)
+			}
+			if !validPortObservation(s) {
+				return fmt.Errorf("portObservation[%q]=%q is not a recognised extractor (allowed: \"global\", \"return.<path>\", \"args.<n>.<path>\", \"side_effect\")", k, s)
+			}
+			out[k] = s
+		}
+		o.PortObservation = out
+	}
 	return nil
+}
+
+// validPortObservation gatekeeps the small DSL of extractor strings.
+// Extending this list requires touching the harness at the same time —
+// keep it conservative.
+func validPortObservation(s string) bool {
+	if s == "global" || s == "side_effect" {
+		return true
+	}
+	if strings.HasPrefix(s, "return.") || strings.HasPrefix(s, "return") && (s == "return") {
+		return true
+	}
+	if strings.HasPrefix(s, "args.") {
+		return true
+	}
+	return false
 }
 
 func validStatus(s string) bool {

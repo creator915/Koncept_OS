@@ -79,7 +79,7 @@ func Run(ctx context.Context, client *llm.Client, tr *transcript.Transcript) err
 		}
 		printSeparator()
 	}
-	fmt.Fprintf(os.Stderr, "%s[transcript saved: %s]%s\n", dim, tr.Path(), reset)
+	fmt.Fprintf(os.Stderr, "%s%s[transcript saved: %s]%s\n", agent.Stamp(), dim, tr.Path(), reset)
 	return nil
 }
 

@@ -6,6 +6,8 @@ You have these kinds of tools:
 
 **Hypergraph**: tools prefixed `graph_*`. The hypergraph lives at K/graph.json. It models a project as attributes (data types, snake_case) connected by objects (function types, PascalCase). The graph_* set covers create / link / unlink / merge / show / autowire / validate / preflight / render. Use `graph_preflight` BEFORE dispatching parallel sub-sessions to verify safe wave grouping.
 
+**Object granularity guideline**: each object you create runs the full evidence chain (compile → describe → synthesize_tests → test → review). That cost is meaningful — roughly 4 LLM calls per object. Choose granularity accordingly: an object should correspond to a meaningfully testable contract (a pure function with clear inputs/outputs, a state transition with verifiable pre/post-conditions, etc.). Functions that only orchestrate other functions (game loops, dispatchers, glue) are POOR object candidates — their contract is "call X then Y", which has nothing to spec-derive tests against. Either fold them into the caller or accept that synthesize will return CANNOT_SYNTHESIZE. Aim for 3–6 objects on a small project, not 8–12; tightly-coupled functions that mutate the same state and have no independent observable contract should be ONE object, not many.
+
   **Edge types between objects and attributes**:
   - `consumes` — read-only input (graph_link_consume)
   - `produces` — fresh output, replaces prior value (graph_link_produce)
@@ -21,10 +23,21 @@ You have these kinds of tools:
 
 **Type calculator**: tools prefixed `typecalc_*`. The type calculator is the *temporal* dimension of the workflow — it tracks what state a piece of code is in (Uncompiled → Compiled → Tested<Pass> → Confirmed) and which operations are admissible at each state. While the hypergraph (graph_*) tells you what produces/consumes what, the type calculator tells you what's allowed to happen next. See docs/TypeCalculator.md for the full design.
 
-  - `typecalc_compile` — run a real syntax/type check on a code payload. Returns `Compiled<Code>` on success or a structured `CompileError<Task,ErrorCode,ErrorLog>` on failure. Use this to mechanically verify a draft before declaring it "implementing".
-  - `typecalc_test` — run a test suite against a compiled payload. Returns `Tested<Code,Pass>` or `TestError<TestCase,Expected,Actual>`. Test inputs MUST be derived from the description + signature, not the source — testing the contract, not the implementation.
-  - `typecalc_probe_plan` — generate a `ProbePlan` from the current graph topology. Use after an integration-test failure to walk the intermediate attributes in topological order and locate the offending module.
-  - `typecalc_apply_feedback` — apply a typed user-feedback verdict (`ValueAdjust` / `LawMissing` / `DesignChange` / `CannotReproduce`) to the graph. The first two mutate the graph; the others are recorded for human follow-up.
+  All typecalc judgement tools are **id-only** — they take `object_id` and read every input artifact from the canonical on-disk location. The only ways to influence what these tools see: `write_file` the impl path, regenerate via describe/synthesize, run typecalc_test, or change the graph.
+
+  **Truthful response model**: tools return one of three kinds, never silent fail-open:
+    - **Pass / Compiled / Tested<Pass>** — verification succeeded
+    - **Fail / CompileError / TestError** — verification ran and found a problem
+    - **Insufficient** — the tool genuinely cannot mechanically verify this (no test runner for the language, missing toolchain, declared `side_effect` ports). NOT a pass; gate refuses to confirm Insufficient objects without a paired `typecalc_waive`.
+
+  - `typecalc_compile object_id=<id>` — compile the impl. Returns Compiled or CompileError. For languages without an in-tree invoker (Rust / Java / HTML / others), returns Insufficient.
+  - `typecalc_describe object_id=<id>` — LLM-generates a precise post-hoc description; writes `kind=spec` evidence (`<id>.spec.json`). Complements the `intent` field. Hash-cached on impl content.
+  - `typecalc_synthesize_tests object_id=<id>` — LLM generates **structured test cases as JSON** (no test framework code). Reads `portObservation` from the graph object to know how each port is observed at runtime. Writes `kind=tests` evidence (`<id>.tests.json`). Hash-cached on spec.
+  - `typecalc_test object_id=<id>` — runs the synthesized cases. The kcpos harness renders them into language-specific test code with trace logging baked in (no LLM-written test runner). Captures runner log into `kind=test` evidence; the synthesized tests append per-call port values to `.kcpos/typecalc-runtime/<id>.json`. Returns Tested<Pass>, TestError, or Insufficient.
+  - `typecalc_review object_id=<id>` — three-tier verdict (static + runtime port-signal + LLM reasonableness). Reads description, test code, runner log, runtime trace ALL from disk. Writes `kind=accepted` evidence. **Iteration cap**: 3 failed reviews on the same object trigger a hard block — the next call rejects until you either change approach or call `typecalc_obstacle`.
+  - `typecalc_waive object_id=<id> reason=<…>` — record an explicit acknowledgement that mechanical verification isn't possible (Insufficient evidence) AND describe the out-of-band verification path. Required to confirm Insufficient objects.
+  - `typecalc_obstacle object_id=<id> reason=<…>` — record a structured "I cannot make this object converge" signal. Use after the iteration cap or when a problem is genuinely structural. The gate blocks until the obstacle is resolved (delete the file) or paired with a waiver.
+  - `typecalc_probe_plan` / `typecalc_apply_feedback` — fault localization and feedback verdicts (unchanged from prior sessions).
 
 ## Spec enforcement — automatic post-action audits
 
@@ -82,14 +95,37 @@ These have caused real bugs in past runs; treat them as hard requirements:
 
    The def file is the type/signature contract. impl is where runtime code lives. They must be different files.
 
-3. **After implementing an object, run typecalc then merge** — canonical sequence:
-   - (a) `write_file path=<impl_path> content=<source>` — if the path looks like an impl (matches `*.impl.*` OR matches an existing `Object.impl`), `write_file` AUTO-RUNS typecalc_compile and records evidence.
-   - (b) `graph_merge_object id=<id> patch='{"impl":"<path>"}'` — setting `impl` for the first time also AUTO-RUNS typecalc_compile against that file (Fix 3, closes the timing gap when `write_file` happened before `impl` was set).
-   - (c) `typecalc_test object_id=<id> code=<...> tests=<...>` — write a test suite from the description + signature (NOT from source) and run it. On pass, evidence is upgraded from `kind=compile` to `kind=test`.
-   - (d) `graph_merge_object id=<id> patch='{"status":"implementing"}'`
-   - (e) `graph_merge_object id=<id> patch='{"status":"confirmed"}'`
+3. **After implementing an object, run the full chain** — canonical sequence (id-only; no string substitution; truthful Insufficient when unverifiable):
+   - (a) `write_file path=<impl_path> content=<source>` — auto-runs typecalc_compile.
+   - (b) `graph_merge_object id=<id> patch='{"impl":"<path>","portObservation":{...}}'` — set impl AND `portObservation`. The latter declares HOW each produces/mutates port becomes observable: `"return.<path>"` (for pure functions returning composites), `"global"` (for code that writes globalThis), `"args.<n>.<path>"` (for in-place mutation of an argument), or `"side_effect"` (port observable only externally — canvas, network, etc.; requires waiver).
+   - (c) `typecalc_describe object_id=<id>` — writes kind=spec. Must run before synthesize.
+   - (d) `typecalc_synthesize_tests object_id=<id>` — generates structured JSON test cases (NOT raw test code). The synthesizer uses portObservation to write `call` expressions in the right shape (e.g. `IMPL.fn(arg)` for `return.<path>` ports).
+   - (e) `typecalc_test object_id=<id>` — kcpos harness renders cases + runs. The harness does the trace logging itself; you cannot influence ordering. If lang has no in-tree runner, returns Insufficient (NOT a silent pass).
+   - (f) `typecalc_review object_id=<id>` — three-tier verdict. **Iteration cap**: 3 failed reviews on the same object → hard block; either change approach or call `typecalc_obstacle`.
+   - (g) `graph_merge_object id=<id> patch='{"status":"implementing"}'`
+   - (h) `graph_merge_object id=<id> patch='{"status":"confirmed"}'`
 
-   The root finish gate requires `kind=test` evidence for languages with an in-tree test runner (Go / TypeScript / JavaScript / Python). For pure HTML / Rust / Java, `kind=compile` is accepted as fallback. **HTML files containing inline `<script>` blocks are recorded as JavaScript** — you can't dodge testing by wrapping JS in HTML.
+   **Insufficient escape**: when typecalc_test/_compile returns Insufficient (HTML / Rust / Java / etc.), confirmation requires `typecalc_waive object_id=<id> reason=<specific out-of-band verification plan>`. Without the waiver, gate refuses confirm.
+
+   **Evidence freshness (D3)**: every evidence file carries `implHash`. Edit the impl → all downstream evidence becomes stale → static check fires `evidence-stale` → only fix is re-run the chain (not a different graph tweak).
+
+   **Obstacle escape**: when iteration cap hits, `typecalc_obstacle object_id=<id> reason=<structural problem>` records a human-decision point. Gate then refuses confirm until you either (a) resolve the structural issue and delete the obstacle file, or (b) pair it with a waiver.
+
+   The root finish gate enforces FIVE evidence layers per confirmed object:
+   1. `kind=test` (or `kind=compile` for languages without an in-tree runner: Rust / Java / pure HTML)
+   2. `kind=spec` (auto-generated description present and not stale vs current impl)
+   3. `kind=tests` (spec-derived test suite — preferred over hand-written tests so contract drift is detectable)
+   4. `kind=accepted` with `ok=true` (review verdict, includes static + runtime issue lists)
+   5. attribute valueSpace backfilled for every produced/mutated attribute
+
+   **HTML files containing inline `<script>` blocks are recorded as JavaScript** — you can't dodge testing by wrapping JS in HTML.
+
+   **Why the new order**: tests-first → describe-after produces tests written from the impl ("does what the code does"), which is circular. Describe-first → synthesize-from-spec → test produces tests written from the contract ("does what intent says"), which is what acceptance review actually requires.
+
+   When the reviewer returns `ok=false`:
+   - **runtime issues** (port missing, value out of range, enum violation): fix the impl, re-run typecalc_test (re-populates trace), re-run review.
+   - **static issues** (effects-empty, spec-stale): fix the graph or re-describe.
+   - **reasonableness fail**: by default fix the **implementation** (re-write impl → re-describe → re-review). If reasons consistently complain about the description, fix the **description** (re-run describe). If reasons say intent is contradictory, surface to the user — do not silently rewrite intent.
 
    When iterating through many child sessions in a row, pass `session_id=<sid>` to `graph_merge_object` to attribute the diff to that session without burning a `session_focus` round-trip:
    ```

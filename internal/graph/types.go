@@ -36,13 +36,31 @@ type Object struct {
 	// since mutation creates a self-loop in the produce/consume DAG that
 	// would otherwise spuriously trip cycles. See
 	// KonceptOS_kcpos_analysis.md §5.3.
-	Mutates        []string  `json:"mutates"`
-	Intent         string    `json:"intent"`
-	Temporal       *Temporal `json:"temporal"`
-	Preconditions  string    `json:"preconditions"`
-	Postconditions string    `json:"postconditions"`
-	Status         string    `json:"status"`
-	StatusSession  *string   `json:"statusSession"`
+	Mutates []string `json:"mutates"`
+	// PortObservation maps each port (consumes/produces/mutates) to an
+	// extraction expression telling kcpos HOW to read that port's value
+	// at runtime (D2 redesign). Without this, the test harness has to
+	// guess — historically that meant "look up globalThis[port_name]",
+	// which only works for one specific impl style.
+	//
+	// Recognised values:
+	//   - "global"          — read from globalThis[<port>] (legacy default)
+	//   - "return.<path>"   — extract from the call's return value
+	//   - "args.<n>.<path>" — read the n-th argument after the call (mutation)
+	//   - "side_effect"     — port has only externally-observable effects
+	//                         (canvas drawing, network); cannot be runtime-
+	//                         checked, requires waiver
+	//
+	// Confirmed objects MUST have a PortObservation entry for every
+	// port in produces and mutates. Missing coverage trips the
+	// `port-observation-required` gate rule.
+	PortObservation map[string]string `json:"portObservation,omitempty"`
+	Intent          string            `json:"intent"`
+	Temporal        *Temporal         `json:"temporal"`
+	Preconditions   string            `json:"preconditions"`
+	Postconditions  string            `json:"postconditions"`
+	Status          string            `json:"status"`
+	StatusSession   *string           `json:"statusSession"`
 }
 
 type Temporal struct {

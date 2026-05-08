@@ -44,6 +44,7 @@ func mutateGraph(mutate func(*graph.Graph) error) error {
 
 func graphShowTool() llm.Tool {
 	return llm.Tool{
+		Concurrent: true,
 		Spec: llm.ToolSpec{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -599,6 +600,7 @@ func withTempFocus(id string) (func(), error) {
 
 func graphValidateTool() llm.Tool {
 	return llm.Tool{
+		Concurrent: true,
 		Spec: llm.ToolSpec{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -624,6 +626,7 @@ func graphValidateTool() llm.Tool {
 
 func graphRenderTool() llm.Tool {
 	return llm.Tool{
+		Concurrent: true,
 		Spec: llm.ToolSpec{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -663,6 +666,7 @@ func graphRenderTool() llm.Tool {
 
 func graphPreflightTool() llm.Tool {
 	return llm.Tool{
+		Concurrent: true,
 		Spec: llm.ToolSpec{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -717,6 +721,7 @@ func stringSliceArg(v any) []string {
 
 func graphAutowireTool() llm.Tool {
 	return llm.Tool{
+		Concurrent: true,
 		Spec: llm.ToolSpec{
 			Type: "function",
 			Function: llm.ToolFunction{

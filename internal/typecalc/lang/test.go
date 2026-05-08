@@ -149,7 +149,15 @@ func TestRunInvoker(ctx context.Context, env *typecalc.RuleEnv, compiled, suite 
 	case typecalc.LangPython:
 		return runPythonTest(ctx, env, compiled, suite)
 	}
-	return compiled.WithState(typecalc.StateTestedPass), nil
+	// CRITICAL (D1): no in-tree test runner for this language.
+	// We used to return Tested<Pass> as a "fail-open" — that lied.
+	// Now we return Insufficient with a reason. The caller writes
+	// kind=insufficient evidence; the gate refuses to confirm without
+	// a paired waiver. The agent must either change the impl into a
+	// language we can run, or escalate via typecalc_waive.
+	return typecalc.NewInsufficient(fmt.Sprintf(
+		"no in-tree test runner for language %q — kcpos cannot mechanically verify this code. To proceed, either (a) restructure the impl into a language with a runner (Go / TypeScript / JavaScript / Python) or (b) record an explicit waiver with typecalc_waive describing how this object will be verified out-of-band.",
+		compiled.Lang)), nil
 }
 
 func runGoTest(ctx context.Context, env *typecalc.RuleEnv, compiled, suite *typecalc.TypedValue) (*typecalc.TypedValue, error) {

@@ -13,10 +13,15 @@ import (
 // Tools returns the typecalc-area agent tools.
 func Tools() map[string]llm.Tool {
 	return map[string]llm.Tool{
-		"typecalc_compile":        typecalcCompileTool(),
-		"typecalc_test":           typecalcTestTool(),
-		"typecalc_probe_plan":     typecalcProbePlanTool(),
-		"typecalc_apply_feedback": typecalcApplyFeedbackTool(),
+		"typecalc_compile":          typecalcCompileTool(),
+		"typecalc_test":             typecalcTestTool(),
+		"typecalc_probe_plan":       typecalcProbePlanTool(),
+		"typecalc_apply_feedback":   typecalcApplyFeedbackTool(),
+		"typecalc_describe":         typecalcDescribeTool(),
+		"typecalc_synthesize_tests": typecalcSynthesizeTestsTool(),
+		"typecalc_review":           typecalcReviewTool(),
+		"typecalc_waive":            typecalcWaiveTool(),
+		"typecalc_obstacle":         typecalcObstacleTool(),
 	}
 }
 

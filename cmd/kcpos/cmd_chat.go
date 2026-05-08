@@ -72,9 +72,9 @@ func runChatWithPrompt(resumeID, prompt, focusID string) int {
 	}
 
 	client := llm.NewClient(cfg)
-	fmt.Fprintf(os.Stderr, "[provider: %s, model: %s]\n", providerName(), cfg.Model)
+	fmt.Fprintf(os.Stderr, "%s[provider: %s, model: %s]\n", agent.SessionStartBanner(), providerName(), cfg.Model)
 	if focusID != "" {
-		fmt.Fprintf(os.Stderr, "[KonceptOS focus: %s]\n", focusID)
+		fmt.Fprintf(os.Stderr, "%s[KonceptOS focus: %s]\n", agent.Stamp(), focusID)
 	}
 	ctx := context.Background()
 

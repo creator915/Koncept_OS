@@ -70,7 +70,25 @@ const (
 	KindCannotReproduce  Kind = "CannotReproduce"
 	KindProbePlan        Kind = "ProbePlan"
 	KindProbeResult      Kind = "ProbeResult"
+
+	// KindInsufficient is the "I cannot verify this" response —
+	// returned by compile / test invokers for languages or situations
+	// the framework genuinely cannot mechanically check (HTML without
+	// in-tree runner, missing toolchain, port_observation undeclared,
+	// etc.). It is NOT a pass: gate refuses Insufficient unless paired
+	// with an explicit waiver evidence. The point is to prevent the
+	// fail-open class of bugs where "we don't know how to test this"
+	// silently became "test passed".
+	KindInsufficient Kind = "Insufficient"
 )
+
+// NewInsufficient constructs an Insufficient TypedValue with a reason
+// payload. Reasons should explain WHY mechanical verification was not
+// possible, in user-readable form (these surface to the agent and
+// downstream gate messages).
+func NewInsufficient(reason string) *TypedValue {
+	return New(KindInsufficient, reason)
+}
 
 // State enumerates the lifecycle constructors from §2.3. Distinct from
 // graph.Status — that is the per-entity status persisted in K/graph.json,

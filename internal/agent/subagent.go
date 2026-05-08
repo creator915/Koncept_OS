@@ -147,7 +147,7 @@ func (r *SubAgentRunner) Run(ctx context.Context, req tools.SubAgentRequest) (st
 	if req.SessionID != "" {
 		focusStr = " · focus=" + req.SessionID
 	}
-	fmt.Fprintf(os.Stderr, "%s\x1b[2m┌─ subagent depth=%d%s ─\x1b[0m\n", indent, childDepth, focusStr)
+	fmt.Fprintf(os.Stderr, "%s%s\x1b[2m┌─ subagent depth=%d%s ─\x1b[0m\n", Stamp(), indent, childDepth, focusStr)
 
 	maxIters := req.MaxIterations
 	if maxIters <= 0 {
@@ -162,7 +162,7 @@ func (r *SubAgentRunner) Run(ctx context.Context, req tools.SubAgentRequest) (st
 		Caps:          childCaps,
 	})
 
-	fmt.Fprintf(os.Stderr, "%s\x1b[2m└─ subagent done ─\x1b[0m\n", indent)
+	fmt.Fprintf(os.Stderr, "%s%s\x1b[2m└─ subagent done ─\x1b[0m\n", Stamp(), indent)
 
 	if err != nil {
 		return "", fmt.Errorf("subagent failed: %w", err)

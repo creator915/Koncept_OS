@@ -1,5 +1,6 @@
 # build artifact
 /kcpos
+/bin/
 
 # Rust build artifacts
 /target/

@@ -153,23 +153,81 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 					objID, objID, objID))
 				continue
 			}
-			// typecalc-evidence-passing (5.1c) — existence is not enough; the
-			// recorded run must have ok=true.
-			if !ev.OK {
+			// D4: obstacle evidence — agent has explicitly given up on
+			// automated convergence for this object. Gate refuses
+			// unless paired with a waiver (which captures the human's
+			// decision to accept).
+			obstaclePath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".obstacle.json")
+			if _, statErr := os.Stat(obstaclePath); statErr == nil {
+				waiverPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".waiver.json")
+				if _, wErr := os.Stat(waiverPath); wErr != nil {
+					r.Issues = append(r.Issues, fmt.Sprintf(
+						"[obstacle-needs-waiver] object %s has an obstacle record at .kcpos/typecalc-evidence/%s.obstacle.json — human review required. Resolve by deleting the obstacle file (after fixing the underlying issue) OR by recording typecalc_waive with reason explaining out-of-band acceptance.",
+						objID, objID))
+				}
+			}
+
+			// D1: kind=insufficient is the "I cannot verify this"
+			// response from the lang invokers. It's NOT a fail — it's
+			// a signal that mechanical verification is impossible for
+			// this language/situation. The gate accepts it ONLY when a
+			// matching waiver evidence exists (typecalc_waive). Without
+			// the waiver, this is a structural failure: human decision
+			// required before this object can be confirmed.
+			if ev.Kind == "insufficient" {
+				waiverPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".waiver.json")
+				if _, statErr := os.Stat(waiverPath); statErr != nil {
+					r.Issues = append(r.Issues, fmt.Sprintf(
+						"[insufficient-needs-waiver] object %s has kind=insufficient evidence (kcpos cannot mechanically verify language %q) and no waiver at .kcpos/typecalc-evidence/%s.waiver.json — call typecalc_waive object_id=%q reason=<specific out-of-band verification plan>",
+						objID, ev.Lang, objID, objID))
+				}
+			} else if !ev.OK {
+				// typecalc-evidence-passing (5.1c) — existence isn't enough;
+				// the recorded run must have ok=true.
 				r.Issues = append(r.Issues, fmt.Sprintf(
 					"[typecalc-evidence-passing] object %s evidence file records ok=false — re-run typecalc_compile/typecalc_test until it passes before confirming",
 					objID))
 				continue
-			}
-			// typecalc-test-required (5.2) — for languages whose test runner
-			// kcpos can drive (Go / TypeScript / JavaScript / Python), a
-			// confirmed object must have evidence of a passing TEST, not
-			// just a passing compile. For languages without an in-tree
-			// runner (Rust / Java / HTML), compile evidence is accepted.
-			if requiresTestEvidence(ev.Lang) && ev.Kind != "test" {
+			} else if requiresTestEvidence(ev.Lang) && ev.Kind != "test" {
+				// For languages whose test runner kcpos can drive
+				// (Go / TS / JS / Python), confirmed objects need
+				// kind=test evidence, not just kind=compile.
 				r.Issues = append(r.Issues, fmt.Sprintf(
 					"[typecalc-test-required] object %s has only compile evidence (kind=%q) — language %q has a test runner; run typecalc_test with object_id=%q to attest a passing test before confirming",
 					objID, ev.Kind, ev.Lang, objID))
+			} else if !requiresTestEvidence(ev.Lang) && ev.Kind == "compile" {
+				// D1: For non-testable langs (Rust / Java / HTML),
+				// kind=compile USED to be accepted as fallback. After
+				// D1, compile alone is no longer enough — those langs
+				// must produce kind=insufficient + waiver, not slip
+				// through on a compile pass.
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[compile-not-enough] object %s has only kind=compile evidence for non-testable language %q — kcpos no longer accepts compile-only as proof. Either restructure the impl into a testable language (kind=test) or use typecalc_waive (kind=insufficient + waiver).",
+					objID, ev.Lang))
+			}
+			// accepted-evidence-required — every confirmed object must
+			// also pass the two-tier acceptance check (typecalc_review:
+			// static structural filter + LLM reasonableness review).
+			// Compile/test evidence proves the code runs; the accepted
+			// evidence proves the code does what intent says it should.
+			// Without this, "confirmed" carries no fitness-for-purpose
+			// signal — the gate would PASS on a syntactically correct
+			// but semantically irrelevant impl.
+			acc, accOK := readAcceptedEvidence(cwd, objID)
+			if !accOK {
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[accepted-evidence-required] object %s confirmed but no review evidence at .kcpos/typecalc-evidence/%s.accepted.json — run typecalc_describe + typecalc_review with object_id=%q before finishing root",
+					objID, objID, objID))
+				continue
+			}
+			if !acc.OK {
+				reasons := strings.Join(acc.Reasonableness.Reasons, "; ")
+				if reasons == "" {
+					reasons = "(no reason recorded)"
+				}
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[accepted-evidence-required] object %s review verdict failed: %s — fix and re-run typecalc_review",
+					objID, reasons))
 			}
 		}
 		// attrs-backfilled (5.1b) — every attribute produced by a confirmed
@@ -276,6 +334,40 @@ func readEvidence(cwd, objectID string) (evidenceRecord, bool) {
 func typecalcEvidenceExistsAt(cwd, objectID string) bool {
 	_, ok := readEvidence(cwd, objectID)
 	return ok
+}
+
+// acceptedRecord mirrors typecalc.AcceptedEvidence — kept here to avoid
+// the gate package importing tools/typecalc (which would create a cycle
+// via the agent layer). The shape MUST stay in sync with the canonical
+// writer in internal/typecalc/evidence.go.
+type acceptedRecord struct {
+	ObjectID       string `json:"objectId"`
+	Kind           string `json:"kind"`
+	OK             bool   `json:"ok"`
+	Reasonableness struct {
+		Verdict    string   `json:"verdict"`
+		Reasons    []string `json:"reasons"`
+		Confidence float64  `json:"confidence"`
+	} `json:"reasonableness"`
+}
+
+// readAcceptedEvidence loads .kcpos/typecalc-evidence/<objectID>.accepted.json
+// — the reviewer verdict written by typecalc_review. Returns (rec, true)
+// on success.
+func readAcceptedEvidence(cwd, objectID string) (acceptedRecord, bool) {
+	if objectID == "" {
+		return acceptedRecord{}, false
+	}
+	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".accepted.json")
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 {
+		return acceptedRecord{}, false
+	}
+	var rec acceptedRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return acceptedRecord{}, false
+	}
+	return rec, true
 }
 
 // requiresTestEvidence reports whether the language has an in-tree test

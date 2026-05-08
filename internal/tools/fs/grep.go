@@ -17,6 +17,7 @@ const maxGrepResults = 200
 
 func grepTool() llm.Tool {
 	return llm.Tool{
+		Concurrent: true,
 		Spec: llm.ToolSpec{
 			Type: "function",
 			Function: llm.ToolFunction{
