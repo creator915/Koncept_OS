@@ -1,6 +1,9 @@
 # build artifact
 /kcpos
 
+# Rust build artifacts
+/target/
+
 # runtime session data (when running kcpos inside its own repo)
 /.kcpos/
 
