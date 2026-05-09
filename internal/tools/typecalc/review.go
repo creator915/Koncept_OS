@@ -151,12 +151,17 @@ func typecalcReviewTool() llm.Tool {
 			if objectID == "" {
 				return "", fmt.Errorf("object_id required")
 			}
-			// D4: iteration cap. Block the review BEFORE running it if
-			// the agent has already used CycleCap retries. The agent
-			// must either change approach or emit typecalc_obstacle.
+			// D4: iteration cap. Compute the current "impl key" — a
+			// hash that summarizes the source state under judgment.
+			// If the impl or portObservation has changed since the
+			// last cycle was incremented, the prior failures were
+			// against a different artifact and shouldn't tax the
+			// fresh attempt: clear the counter before checking.
+			implKeyForReset := computeImplKey(objectID)
+			_ = typecalc.MaybeResetCycleOnImplChange(objectID, implKeyForReset)
 			if existing, ok := typecalc.ReadCycle(objectID); ok && existing.Count >= typecalc.CycleCap {
 				return "", fmt.Errorf(
-					"iteration cap reached: %d review cycles already consumed for %s. The cycle counter only resets when review verdict ok=true; persistent failure means the structural fix is elsewhere. Either: (a) restructure the impl / graph and try a fresh approach, or (b) call typecalc_obstacle object_id=%q reason=<...> to surface this as a human-decision point and unblock the gate flow",
+					"iteration cap reached: %d review cycles already consumed for %s. The cycle counter only resets when (a) review verdict ok=true, (b) the issue set strictly shrinks (progress detected), or (c) the impl / portObservation changed since the previous cycle. Persistent failure with no progress and no source change usually means the structural fix is elsewhere. Either: change the impl/graph and try a fresh approach, or call typecalc_obstacle object_id=%q reason=<...> to surface this as a human-decision point and unblock the gate flow",
 					existing.Count, objectID, objectID)
 			}
 			// Read test code + runner log from disk (no string args from agent).
@@ -263,11 +268,15 @@ func typecalcReviewTool() llm.Tool {
 				return "", fmt.Errorf("persist accepted evidence: %w", err)
 			}
 
-			// D4: cycle accounting. ok=true resets; otherwise increment.
+			// D4: cycle accounting. ok=true resets; otherwise increment
+			// with the issue rule names so progress detection (strict-
+			// subset shrinkage) can hold the count steady when the
+			// agent is genuinely converging. The implKey persists so
+			// the next review can detect a source change.
 			if ok2 {
 				_ = typecalc.ResetCycle(objectID)
 			} else {
-				_, _ = typecalc.IncrementCycle(objectID)
+				_, _ = typecalc.IncrementCycleWithIssues(objectID, collectIssueRules(issues, runtimeIssues, verdict), implKeyForReset)
 			}
 
 			return renderReviewResult(rec), nil
@@ -280,6 +289,51 @@ func resolveCwd(cwd, path string) string {
 		return path
 	}
 	return filepath.Join(cwd, path)
+}
+
+// computeImplKey hashes the source state under judgment so the
+// cycle counter can detect "the artifact has changed since last
+// review." Includes impl-file content + portObservation map (the
+// two things synthesizer / harness behavior depends on). Returns
+// "" if either piece is unreadable, which signals the caller to
+// skip the source-change reset (defensive: never wrongly clear).
+func computeImplKey(objectID string) string {
+	g, err := graph.LoadOrInit(graph.DefaultPath)
+	if err != nil {
+		return ""
+	}
+	obj, ok := g.Objects[objectID]
+	if !ok || obj.Impl == nil || *obj.Impl == "" {
+		return ""
+	}
+	cwd, _ := os.Getwd()
+	implBody, err := os.ReadFile(resolveCwd(cwd, *obj.Impl))
+	if err != nil {
+		return ""
+	}
+	// Stable serialization of portObservation: the JSON marshaller
+	// emits map keys in sorted order, so this is deterministic.
+	poJSON, _ := json.Marshal(obj.PortObservation)
+	return typecalc.HashSource(string(implBody) + "\x00" + string(poJSON))
+}
+
+// collectIssueRules pulls just the rule-name (Code) from each
+// static / runtime issue plus a "reasonableness" pseudo-rule when
+// the LLM verdict failed. This is the input to progress detection
+// — comparing rule sets across cycles avoids over-counting on
+// flapping issue messages while still catching genuine regressions.
+func collectIssueRules(static []typecalc.StaticIssue, runtime []typecalc.StaticIssue, verdict typecalc.ReviewVerdict) []string {
+	out := make([]string, 0, len(static)+len(runtime)+1)
+	for _, iss := range static {
+		out = append(out, iss.Code)
+	}
+	for _, iss := range runtime {
+		out = append(out, iss.Code)
+	}
+	if verdict.Verdict != "" && verdict.Verdict != "pass" {
+		out = append(out, "reasonableness")
+	}
+	return out
 }
 
 func renderReviewResult(rec *typecalc.AcceptedEvidence) string {

@@ -12,13 +12,14 @@ import (
 	"github.com/creator915/Koncept_OS/internal/typecalc"
 )
 
-// defaultMaxIterations: 60 was chosen empirically — a non-trivial web app
-// (pong / tic-tac-toe / counter) takes ~30–45 turns to design, implement,
-// and finalize through the kcpos workflow when subagents are NOT used. 25
-// (the prior default) routinely ran out mid-finalization, leaving objects
-// stuck in declared/implementing while index.html was already written.
-// Top-level callers can still tune via RunOptions.MaxIterations.
-const defaultMaxIterations = 60
+// defaultMaxIterations: 150 — v7 pong used 112/120 (93%) and a single
+// extra obstacle would have run out. With v8 routing HTML directly
+// through the harness (eliminating the dual-impl rewrite phase) we'd
+// expect runs to drop, but the safer move is a wider buffer: D4 still
+// caps per-object retries at CycleCap=5, so a 150 turn budget can't
+// be silently spent grinding on one stuck object — it can only be
+// spent on multi-object surface area.
+const defaultMaxIterations = 150
 
 // RunOptions tunes agent execution. The zero value is valid: it uses the
 // default tool set, default spec hooks, no indentation, the default

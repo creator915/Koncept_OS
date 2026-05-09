@@ -158,14 +158,37 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 			// unless paired with a waiver (which captures the human's
 			// decision to accept).
 			obstaclePath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".obstacle.json")
+			waiverPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".waiver.json")
+			hasObstacle := false
+			hasWaiver := false
 			if _, statErr := os.Stat(obstaclePath); statErr == nil {
-				waiverPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".waiver.json")
-				if _, wErr := os.Stat(waiverPath); wErr != nil {
-					r.Issues = append(r.Issues, fmt.Sprintf(
-						"[obstacle-needs-waiver] object %s has an obstacle record at .kcpos/typecalc-evidence/%s.obstacle.json — human review required. Resolve by deleting the obstacle file (after fixing the underlying issue) OR by recording typecalc_waive with reason explaining out-of-band acceptance.",
-						objID, objID))
-				}
+				hasObstacle = true
 			}
+			if _, statErr := os.Stat(waiverPath); statErr == nil {
+				hasWaiver = true
+			}
+			if hasObstacle && !hasWaiver {
+				r.Issues = append(r.Issues, fmt.Sprintf(
+					"[obstacle-needs-waiver] object %s has an obstacle record at .kcpos/typecalc-evidence/%s.obstacle.json — human review required. Resolve by deleting the obstacle file (after fixing the underlying issue) OR by recording typecalc_waive with reason explaining out-of-band acceptance.",
+					objID, objID))
+			}
+			// 2026-05-09 v8.5 — obstacle+waiver as test-evidence
+			// substitute. Previously the gate only honored
+			// (obstacle, waiver) for `kind=insufficient`. The v8 batch
+			// (pong-01) showed agents legitimately reach "tests run
+			// but a few cases fail for harness-mock reasons" and have
+			// no escape: ev.OK=false on `kind=test` was a hard fail,
+			// no matter how thorough the obstacle/waiver pair was.
+			// Now: if both an obstacle.json AND a waiver.json exist,
+			// AND the waiver is non-trivial (the typecalc_waive tool
+			// already enforces ≥30 chars + no hand-wavy phrases), the
+			// gate treats the object as having structurally-acceptable
+			// evidence and skips the OK/kind/insufficient branches.
+			// The accepted-evidence-required check still runs after,
+			// so review must still pass — this carve-out only relaxes
+			// the kind=test ok=true demand, NOT the reasonableness layer.
+			passViaWaiver := hasObstacle && hasWaiver
+			_ = passViaWaiver
 
 			// D1: kind=insufficient is the "I cannot verify this"
 			// response from the lang invokers. It's NOT a fail — it's
@@ -175,26 +198,37 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 			// the waiver, this is a structural failure: human decision
 			// required before this object can be confirmed.
 			if ev.Kind == "insufficient" {
-				waiverPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".waiver.json")
-				if _, statErr := os.Stat(waiverPath); statErr != nil {
+				if !hasWaiver {
 					r.Issues = append(r.Issues, fmt.Sprintf(
 						"[insufficient-needs-waiver] object %s has kind=insufficient evidence (kcpos cannot mechanically verify language %q) and no waiver at .kcpos/typecalc-evidence/%s.waiver.json — call typecalc_waive object_id=%q reason=<specific out-of-band verification plan>",
 						objID, ev.Lang, objID, objID))
 				}
 			} else if !ev.OK {
 				// typecalc-evidence-passing (5.1c) — existence isn't enough;
-				// the recorded run must have ok=true.
-				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[typecalc-evidence-passing] object %s evidence file records ok=false — re-run typecalc_compile/typecalc_test until it passes before confirming",
-					objID))
-				continue
+				// the recorded run must have ok=true. v8.5: an
+				// obstacle+waiver pair is an acceptable substitute —
+				// agent has explicitly admitted "tests fail for
+				// structural reasons, here's manual verification" and
+				// the human-equivalent check has been recorded. Without
+				// the pair, demand a clean ok=true.
+				if !passViaWaiver {
+					r.Issues = append(r.Issues, fmt.Sprintf(
+						"[typecalc-evidence-passing] object %s evidence file records ok=false — re-run typecalc_compile/typecalc_test until it passes, OR escalate via typecalc_obstacle + typecalc_waive describing why mechanical verification is structurally infeasible",
+						objID))
+					continue
+				}
 			} else if requiresTestEvidence(ev.Lang) && ev.Kind != "test" {
 				// For languages whose test runner kcpos can drive
-				// (Go / TS / JS / Python), confirmed objects need
-				// kind=test evidence, not just kind=compile.
-				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[typecalc-test-required] object %s has only compile evidence (kind=%q) — language %q has a test runner; run typecalc_test with object_id=%q to attest a passing test before confirming",
-					objID, ev.Kind, ev.Lang, objID))
+				// (Go / TS / JS / Python / HTML), confirmed objects
+				// need kind=test evidence, not just kind=compile.
+				// v8.5: obstacle+waiver also satisfies this — the
+				// agent demonstrated they tried and the harness/code
+				// pairing is structurally not testable in this form.
+				if !passViaWaiver {
+					r.Issues = append(r.Issues, fmt.Sprintf(
+						"[typecalc-test-required] object %s has only compile evidence (kind=%q) — language %q has a test runner; run typecalc_test with object_id=%q to attest a passing test, OR escalate via typecalc_obstacle + typecalc_waive describing why this object cannot be tested",
+						objID, ev.Kind, ev.Lang, objID))
+				}
 			} else if !requiresTestEvidence(ev.Lang) && ev.Kind == "compile" {
 				// D1: For non-testable langs (Rust / Java / HTML),
 				// kind=compile USED to be accepted as fallback. After

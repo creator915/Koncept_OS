@@ -95,20 +95,46 @@ func RuntimeCheck(g *graph.Graph, objID string) []StaticIssue {
 
 	// 2. Input port presence: every declared consumes must appear in
 	//    at least one call's inputs.
+	//
+	// Carve-out (2026-05-09 v7→v8 fix): when a port is BOTH consumed
+	// and produced by the same object, the harness's input-snapshot
+	// often returns undefined because the value lives in the return
+	// value (not args/globalThis at pre-call time). Agent in v7 hit
+	// this 10× across UpdatePaddle / UpdateBall / Render / ReadInput
+	// and accumulated the flapping into needless obstacles. The
+	// semantic resolution: a "passes-through-and-modifies" port IS
+	// observed when the output snapshot records it; demanding a
+	// separate input record on top is double-bookkeeping.
 	seenIn := map[string]bool{}
+	seenOutForThisCheck := map[string]bool{}
 	for _, c := range trace.Calls {
 		for k := range c.Inputs {
 			seenIn[k] = true
 		}
+		for k := range c.Outputs {
+			seenOutForThisCheck[k] = true
+		}
+	}
+	producedSet := map[string]bool{}
+	for _, p := range obj.Produces {
+		producedSet[p] = true
 	}
 	for _, c := range obj.Consumes {
-		if !seenIn[c] {
-			issues = append(issues, StaticIssue{
-				Code:    "runtime-input-missing",
-				Where:   objID,
-				Message: fmt.Sprintf("declares consumes %q but no recorded call read that port", c),
-			})
+		if seenIn[c] {
+			continue
 		}
+		// Pass-through carve-out: if the port is also produced AND we
+		// observed an output for it, treat the consume as covered by
+		// the output observation. The function received-and-returned
+		// the value; that's enough evidence it read it.
+		if producedSet[c] && seenOutForThisCheck[c] {
+			continue
+		}
+		issues = append(issues, StaticIssue{
+			Code:    "runtime-input-missing",
+			Where:   objID,
+			Message: fmt.Sprintf("declares consumes %q but no recorded call read that port", c),
+		})
 	}
 
 	// 3. Value range / type per port. We only enforce constraints the

@@ -112,6 +112,7 @@ func (g *Graph) Validate(cwd string) *ValidationReport {
 	checkTemporalConsistency(g, r)
 	checkOrphanAttributes(g, r)
 	checkMetadataCompleteness(g, r)
+	checkConfirmedValueSpace(g, r)
 	if cwd != "" {
 		checkImplExistence(g, r, cwd)
 		checkDefExistence(g, r, cwd)
@@ -393,6 +394,30 @@ func checkImplExistence(g *Graph, r *ValidationReport, cwd string) {
 		if _, err := os.Stat(path); err != nil {
 			r.Issues = append(r.Issues, Issue{Warn, rule, id, fmt.Sprintf("impl %q does not exist on disk", *o.Impl)})
 		}
+	}
+}
+
+// --- Rule 11: confirmed attributes must have a populated valueSpace ---
+//
+// Catches the failure mode from the 2026-05-09 pong run: an agent
+// submits a combined patch like {status:confirmed, valueSpace:{...}};
+// merge.go atomically rejects on the illegal status transition; the
+// agent retries with status alone and forgets to re-send valueSpace,
+// leaving a confirmed attribute with no value structure. The per-
+// object static_check.go rule only fires for attributes the reviewed
+// object produces/mutates, so input_keys (produced by a side-effect-
+// only object that never went through review) slipped through.
+func checkConfirmedValueSpace(g *Graph, r *ValidationReport) {
+	const rule = "confirmed-needs-value-space"
+	for id, a := range g.Attributes {
+		if a.Status != StatusConfirmed {
+			continue
+		}
+		if len(a.ValueSpace) > 0 {
+			continue
+		}
+		r.Issues = append(r.Issues, Issue{Error, rule, id,
+			"attribute is confirmed but valueSpace is empty — confirm without backfilling value structure breaks the autovalue rule (graph_merge_attribute id=" + id + " patch='{\"valueSpace\":...}')"})
 	}
 }
 

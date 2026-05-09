@@ -97,17 +97,41 @@ func SynthesizeWithInvoker(ctx context.Context, in SynthesizeInputs, invoke Invo
 	}
 	var env envelope
 	if err := json.Unmarshal([]byte(cleaned), &env); err != nil {
-		// Not valid JSON — treat the entire reply as legacy raw test code.
-		// This preserves backward-compat with prior LLM-output styles.
+		// Tighter handling (2026-05-09 v7→v8): legacy fallback was
+		// quietly accepting LLM output that "looked like raw test
+		// code" but contained JSON syntax errors. The v7 ReadInput
+		// run hit this — the fallback wrote `code.test.js` with
+		// `"objectId": "..."` at line 2 and the test runner crashed
+		// on `Unexpected token ':'`. Now: treat any reply that
+		// starts with `{` (or has internal `:` in the first 200
+		// chars) as a malformed JSON envelope and surface a hard
+		// error so the caller can decide to retry rather than
+		// silently shipping broken test source.
 		if strings.TrimSpace(cleaned) == "" {
 			return nil, fmt.Errorf("synthesize: empty response from llm")
 		}
+		looksLikeJSON := strings.HasPrefix(strings.TrimSpace(cleaned), "{") ||
+			strings.Contains(firstN(cleaned, 200), `"objectId"`) ||
+			strings.Contains(firstN(cleaned, 200), `"cases"`)
+		if looksLikeJSON {
+			return nil, fmt.Errorf("synthesize: malformed JSON envelope (%w) — output starts like JSON but failed to parse; retry typecalc_synthesize_tests for this object", err)
+		}
+		// True legacy raw test code: looks nothing like JSON envelope.
+		// Accept it but flag in the output. Caller may later refuse
+		// to run if the test runner can't make sense of it.
 		return &SynthesizeOutput{TestCode: cleaned}, nil
 	}
 	if len(env.Cases) == 0 && strings.TrimSpace(env.TestCode) == "" {
 		return nil, fmt.Errorf("synthesize: response has neither cases nor testCode")
 	}
 	return &SynthesizeOutput{Cases: env.Cases, TestCode: env.TestCode}, nil
+}
+
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 const synthesizerSystemPrompt = `You generate test suites from a function's specification (intent + description + signature + port declarations). You DO NOT see the implementation source — that is intentional. Tests must verify the *contract*, not the implementation.
@@ -124,7 +148,7 @@ Output schema (strict JSON, no Markdown fences, no prose):
       "setup": [
         { "set": "<input_port_name>", "value": <any JSON value> }
       ],
-      "call": "<one JS expression that invokes the function under test, e.g. 'InitGame()' or 'paddleX = movePaddle(5, paddleX)'>",
+      "call": "<one JS expression that invokes the function under test. ALWAYS prefix the function name with IMPL. — the harness binds the impl module to globalThis.IMPL, and bare names like 'InitGame()' will throw ReferenceError. Examples: 'IMPL.InitGame()' or 'IMPL.movePaddle(5, paddleX)'>",
       "expect": [
         { "port": "<output_port>", "equals": <value> }
         // OR { "port": "<port>", "between": [<min>, <max>] }
@@ -140,6 +164,7 @@ Rules:
 
 1. Use the EXACT port names from the consumes/produces/mutates blocks. Setup port names should appear in consumes; expect port names should appear in produces or mutates.
 2. The "call" string is a single expression in the project's primary language. For JavaScript / HTML+script projects, write valid JS; for other languages, the harness may not be available yet — in that case fall back to the legacy raw-test-code mode by setting "testCode" instead of "cases".
+2a. CRITICAL — call-expression naming: for JS/HTML, the function name in "call" MUST match the graph object id EXACTLY (same case, same spelling) and MUST be prefixed with "IMPL.". The harness binds the impl module to globalThis.IMPL and looks up IMPL.<exactObjectId>. Common failure mode: synthesizer writes "IMPL.initGame(...)" while the graph object is "InitGame" — harness throws "is not a function" and every case fails. Always copy the object id verbatim from the "Object id:" header above.
 3. Cover: a typical happy-path case, boundary cases (empty, max value, edges of declared valueSpace), and any explicit invariants from the description.
 4. Each "case" should test ONE specific behavior. Use multiple cases for multiple invariants — do not pile assertions for unrelated behaviors into one case.
 5. The harness automatically: snapshots input ports before each call, snapshots output ports after, appends to .kcpos/typecalc-runtime/<id>.json BEFORE running assertions (so traces are captured even on assertion failure), and runs the assertions. You do NOT need to write any of that.

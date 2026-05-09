@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/typecalc"
@@ -51,6 +52,16 @@ func CompileLanguageInvoker(ctx context.Context, env *typecalc.RuleEnv, src *typ
 		return runTSCompile(ctx, env, src)
 	case typecalc.LangJavaScript:
 		return runJSCompile(ctx, env, src)
+	case typecalc.LangHTML:
+		// 2026-05-09 v8.2 — companion to lang/test.go HTML routing.
+		// Extract every inline <script> body and run node --check on
+		// the concatenation. This catches obvious syntax errors in the
+		// deliverable's actual code (the same content the harness will
+		// load + execute at test time) without a separate K/impl/*.js
+		// shadow. If extraction yields no scripts, we still upgrade
+		// to Compiled — an HTML file with no JS is degenerate but not
+		// a compile failure.
+		return runHTMLCompile(ctx, env, src)
 	case typecalc.LangPython:
 		return runPythonCompile(ctx, env, src)
 	}
@@ -108,6 +119,41 @@ func runJSCompile(ctx context.Context, env *typecalc.RuleEnv, src *typecalc.Type
 	out, err := runCmd(ctx, env.WorkDir, "node", "--check", tmp)
 	if err != nil {
 		return typecalc.NewCompileError(taskOf(src), "node --check", string(out)+"\n"+err.Error()), nil
+	}
+	return src.WithState(typecalc.StateCompiled), nil
+}
+
+// extractHTMLScripts pulls every inline <script>...</script> body
+// (it ignores src="..." externals — kcpos owns the file in-tree, so
+// inline is the only relevant case). The same regex the harness's
+// loadImpl uses, kept in sync.
+var htmlScriptRe = regexp.MustCompile(`(?is)<script[^>]*>(.*?)</script>`)
+
+func runHTMLCompile(ctx context.Context, env *typecalc.RuleEnv, src *typecalc.TypedValue) (*typecalc.TypedValue, error) {
+	matches := htmlScriptRe.FindAllStringSubmatch(src.Payload, -1)
+	var combined strings.Builder
+	for _, m := range matches {
+		if len(m) >= 2 {
+			combined.WriteString(m[1])
+			combined.WriteString("\n")
+		}
+	}
+	js := combined.String()
+	if strings.TrimSpace(js) == "" {
+		// HTML with no inline JS — nothing to syntax-check, accept.
+		return src.WithState(typecalc.StateCompiled), nil
+	}
+	if !commandExists("node") {
+		return src.WithState(typecalc.StateCompiled), nil
+	}
+	tmp, cleanup, err := writeTempFile(env, "kcpos-html-*.js", js)
+	if err != nil {
+		return typecalc.NewCompileError(taskOf(src), "internal", err.Error()), nil
+	}
+	defer cleanup()
+	out, err := runCmd(ctx, env.WorkDir, "node", "--check", tmp)
+	if err != nil {
+		return typecalc.NewCompileError(taskOf(src), "node --check (extracted from <script>)", string(out)+"\n"+err.Error()), nil
 	}
 	return src.WithState(typecalc.StateCompiled), nil
 }

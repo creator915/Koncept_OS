@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/graph"
 )
@@ -35,6 +36,7 @@ func DefaultHooks() []SpecHook {
 		&rootFinishGateHook{},
 		&statusTransitionHook{},
 		&typecalcUseHook{},
+		&autoValidateHook{},
 	}
 }
 
@@ -299,8 +301,16 @@ type statusTransitionHook struct{}
 
 func (h *statusTransitionHook) Name() string { return "status-transition" }
 
-func (h *statusTransitionHook) After(toolName, argsJSON, _ string) string {
+func (h *statusTransitionHook) After(toolName, argsJSON, result string) string {
 	if toolName != "graph_merge_attribute" && toolName != "graph_merge_object" {
+		return ""
+	}
+	// merge.go is atomic and already rejects illegal status transitions;
+	// when the merge tool errors, the loop surfaces the result as
+	// "error: <message>". The agent has already seen the rejection — a
+	// duplicate hook warning was the source of the "warns but allows"
+	// confusion in the 2026-05-09 pong analysis. Stay silent on errors.
+	if strings.HasPrefix(result, "error:") {
 		return ""
 	}
 	var args struct {
@@ -336,13 +346,15 @@ func (h *statusTransitionHook) After(toolName, argsJSON, _ string) string {
 			from = obj.Status
 		}
 	}
+	// On a successful merge, the on-disk status equals `to` — so any
+	// case where they differ here means the merge actually rejected
+	// (and `from` is the unchanged pre-call status). With the error
+	// guard above this branch is unreachable in practice; keep the
+	// detection as defensive scaffolding in case a future tool path
+	// applies status without going through merge.go.
 	if from == "" || from == to {
 		return ""
 	}
-	// The patch already landed on disk. We can't strictly block the
-	// transition here (lifecycle of the merge tool decides that), so we
-	// report the violation and require the agent to undo or correct on
-	// next turn. The tool itself should also enforce — see graph.go below.
 	allowed := map[string]string{
 		graph.StatusDeclared:     graph.StatusImplementing,
 		graph.StatusImplementing: graph.StatusConfirmed,
@@ -446,6 +458,73 @@ func typecalcEvidenceExists(objectID string) bool {
 		return false
 	}
 	return rec.OK
+}
+
+// --- Hook 8: auto-validate after every graph mutation ---
+//
+// Without this, structural problems (a consume with no producer, a
+// dangling refines parent, a confirmed attribute with empty valueSpace)
+// only surface when the agent explicitly calls graph_validate — usually
+// at end-of-session. The 2026-05-09 pong run showed input_keys was
+// consumed by UpdatePaddle from session start, but the missing producer
+// was only noticed at the very end (root finalization), forcing a late
+// CaptureInput retrofit. Surfacing the imbalance immediately after each
+// mutation lets the agent fix it while context is fresh.
+//
+// We run the full validate but only emit ERRORs (warnings are noise on
+// every edit). The check is cheap — it's the same one the gate runs.
+
+type autoValidateHook struct{}
+
+func (h *autoValidateHook) Name() string { return "auto-validate" }
+
+var graphMutatingTools = map[string]bool{
+	"graph_create_attribute": true,
+	"graph_create_object":    true,
+	"graph_link_consume":     true,
+	"graph_link_produce":     true,
+	"graph_link_mutate":      true,
+	"graph_link_refine":      true,
+	"graph_unlink_consume":   true,
+	"graph_unlink_produce":   true,
+	"graph_unlink_mutate":    true,
+	"graph_unlink_refine":    true,
+	"graph_merge_attribute":  true,
+	"graph_merge_object":     true,
+}
+
+func (h *autoValidateHook) After(toolName, _ string, result string) string {
+	if !graphMutatingTools[toolName] {
+		return ""
+	}
+	// If the mutation itself failed, the on-disk graph hasn't moved —
+	// no point re-flagging integrity issues that already existed.
+	if strings.HasPrefix(result, "error:") {
+		return ""
+	}
+	g, err := graph.LoadOrInit(graph.DefaultPath)
+	if err != nil {
+		return ""
+	}
+	cwd, _ := os.Getwd()
+	report := g.Validate(cwd)
+	if !report.HasErrors() {
+		return ""
+	}
+	var errs []string
+	for _, iss := range report.Issues {
+		if iss.Severity == graph.Error {
+			errs = append(errs, fmt.Sprintf("[%s] %s — %s", iss.Rule, iss.Where, iss.Message))
+		}
+		if len(errs) >= 5 {
+			errs = append(errs, fmt.Sprintf("(... %d more — run graph_validate for full list)", len(report.Issues)-5))
+			break
+		}
+	}
+	return fmt.Sprintf(
+		"[auto-validate] graph integrity errors detected after %s. **Required next turn**: address these errors before any other graph mutation, typecalc step, or session transition. Continuing past unresolved structural errors only compounds them — a missing producer / dangling refines parent / confirmed attribute with no valueSpace will cascade into typecalc-test-required and accepted-evidence-required gate failures later. Fix list (top %d):\n  %s",
+		toolName, len(errs), strings.Join(errs, "\n  "),
+	)
 }
 
 // --- helpers ---

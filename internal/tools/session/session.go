@@ -229,7 +229,7 @@ func sessionStatusTool() llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "session_status",
-				Description: "Transition a session's status. Valid moves: waiting→active (start work), active→finished (succeeded). Other moves error — to abandon a session use session_delete.",
+				Description: "Transition a session's status. Valid moves: waiting→active (start work), active→finished (succeeded). Other moves error — to abandon a session use session_delete.\n\nFinish guard: when transitioning a ROOT session to finished, the same checks as session_gate_check run inline; gate FAIL is a hard rejection. This stops the failure mode where a stuck agent flips status to finished to escape an unsatisfied gate. Non-root sessions skip the guard (their gate enforcement happens at the root level via children-finished).",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -247,6 +247,26 @@ func sessionStatusTool() llm.Tool {
 				return "", err
 			}
 			to, _ := args["status"].(string)
+			// Gate guard (2026-05-09 v6 finding): agents reaching a sticky
+			// gate FAIL would call session_status active→finished directly,
+			// bypassing typecalc-test-required / accepted-evidence-required
+			// and shipping unverified work. The gate check is the SAME one
+			// session_gate_check exposes; we just refuse to advance status
+			// when it fails for a root session. Non-root sessions are
+			// trusted to gate at their parent level (children-finished
+			// rule already cascades to root) and skip this guard.
+			if session.Status(to) == session.StatusFinished {
+				existing, lerr := session.Load(session.DefaultDir, id)
+				if lerr == nil && existing.Parent == "" {
+					report, gerr := session.CheckGate(session.DefaultDir, graph.DefaultPath, checkpoint.DefaultPath, id)
+					if gerr == nil && report != nil && report.Status != "PASS" {
+						return "", fmt.Errorf(
+							"refusing to mark root session %s as finished: gate FAIL with %d issue(s) — fix them first or call session_gate_check for the full list. Top issues:\n  %s",
+							id, len(report.Issues), strings.Join(truncateIssues(report.Issues, 5), "\n  "),
+						)
+					}
+				}
+			}
 			s, err := session.SetStatus(session.DefaultDir, id, session.Status(to))
 			if err != nil {
 				return "", err
@@ -254,6 +274,15 @@ func sessionStatusTool() llm.Tool {
 			return fmt.Sprintf("%s status → %s", s.ID, s.Status), nil
 		},
 	}
+}
+
+func truncateIssues(issues []string, n int) []string {
+	if len(issues) <= n {
+		return issues
+	}
+	out := append([]string{}, issues[:n]...)
+	out = append(out, fmt.Sprintf("... (%d more — call session_gate_check for full list)", len(issues)-n))
+	return out
 }
 
 func sessionDeleteTool() llm.Tool {

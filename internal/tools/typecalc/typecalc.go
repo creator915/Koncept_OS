@@ -238,14 +238,28 @@ func typecalcTestTool() llm.Tool {
 			}
 			rendered, _ := renderTypedValue(out)
 			implHash := typecalc.HashSource(string(implBody))
+			effectiveLang := string(typecalc.DetectEffectiveLang(string(implBody), langTag))
 			if out.State == typecalc.StateTestedPass {
-				effectiveLang := string(typecalc.DetectEffectiveLang(string(implBody), langTag))
 				if recErr := typecalc.RecordEvidenceFull(objectID, "test", effectiveLang, true, rendered, implHash); recErr != nil {
 					return "", recErr
 				}
 			} else if out.Kind == typecalc.KindInsufficient {
-				effectiveLang := string(typecalc.DetectEffectiveLang(string(implBody), langTag))
 				if recErr := typecalc.RecordEvidenceFull(objectID, "insufficient", effectiveLang, false, out.Payload, implHash); recErr != nil {
+					return "", recErr
+				}
+			} else if out.Kind == typecalc.KindTestError {
+				// 2026-05-09 v7→v8: previously a TestError left no
+				// kind=test evidence, only the upstream kind=compile.
+				// The gate then reported "only compile evidence" even
+				// though the test runner clearly executed (just with
+				// some assertions failing). Now we always record the
+				// attempt with ok=false so the gate can distinguish
+				// "untested" from "tested but partially failed". Agent
+				// can still target Tested<Pass> for full-green objects;
+				// the TestError record just stops the misleading gate
+				// language and lets reasonableness review weigh in on
+				// borderline cases (6/8 passing is signal).
+				if recErr := typecalc.RecordEvidenceFull(objectID, "test", effectiveLang, false, out.Payload, implHash); recErr != nil {
 					return "", recErr
 				}
 			}

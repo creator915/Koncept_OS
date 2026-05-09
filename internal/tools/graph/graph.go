@@ -477,6 +477,54 @@ func graphMergeObjectTool() llm.Tool {
 			if err := json.Unmarshal([]byte(patchStr), &patch); err != nil {
 				return "", fmt.Errorf("patch must be valid JSON object: %w", err)
 			}
+			// 2026-05-09 v8.5 — typecalc-use becomes BLOCKING for the
+			// status=confirmed transition. Previously the typecalc-use
+			// hook (agent/hooks.go) only emitted an after-the-fact
+			// warning; agents would set status=confirmed, see the warn,
+			// then backfill compile evidence. The 5-instance v8.4 batch
+			// hit this 14× across all 5 instances ("先上车后买票").
+			// Now: refuse the merge before the on-disk graph mutates
+			// when patch.status=confirmed without the evidence file.
+			// The agent must run typecalc_compile (or typecalc_test)
+			// FIRST. The error message points at the exact remediation.
+			if statusVal, hasStatus := patch["status"]; hasStatus {
+				if s, _ := statusVal.(string); s == graph.StatusConfirmed {
+					if !typecalcEvidenceFileExists(id) {
+						return "", fmt.Errorf(
+							"refusing to set status=confirmed for object %q: no typecalc evidence at .kcpos/typecalc-evidence/%s.json. "+
+								"Run typecalc_compile (or typecalc_test) for this object FIRST, then re-issue the merge. "+
+								"This is the v8.5 anti-'confirm-first-evidence-later' enforcement: agents were observed flipping confirm and backfilling compile, undermining the typecalc invariant.",
+							id, id)
+					}
+				}
+			}
+			// 2026-05-09 v8.5 — dual-source prevention. The v7→v8.4
+			// fixes routed HTML through the JS harness so kcpos can
+			// test the actual deliverable, eliminating the need for
+			// shadow K/impl/*.js files. But the v8.4 batch (pong-01
+			// and pong-03) still saw agents create those shadow files
+			// out of habit. The risk: inline functions in index.html
+			// drift from the .js shadows being tested → kcpos says
+			// "all green" while the user-opened deliverable is broken.
+			// Now: when index.html exists in cwd AND the patch sets
+			// impl to a non-html path, refuse the merge with a clear
+			// remediation message pointing the agent at the v8 model.
+			if implVal, hasImpl := patch["impl"]; hasImpl {
+				if implPath, _ := implVal.(string); implPath != "" {
+					cwd, _ := os.Getwd()
+					indexExists := false
+					if _, err := os.Stat(filepath.Join(cwd, "index.html")); err == nil {
+						indexExists = true
+					}
+					ext := strings.ToLower(filepath.Ext(implPath))
+					if indexExists && ext != ".html" && ext != ".htm" {
+						return "", fmt.Errorf(
+							"refusing to set impl=%q for object %q: project root contains index.html — kcpos v8 routes HTML inline scripts directly through the JS harness, so K/impl/*.js shadow files are unnecessary AND dangerous (the inline script and the shadow can drift, leaving the deliverable broken while kcpos says 'all green'). "+
+								"Set impl=index.html instead. The harness will extract <script> blocks, install browser stubs (document/window/RAF/canvas), evaluate via indirect eval to expose function declarations on globalThis, and run synthesized tests against the same code the user opens in a browser.",
+							implPath, id)
+					}
+				}
+			}
 			restore, err := withTempFocus(sessionID)
 			if err != nil {
 				return "", err
@@ -503,6 +551,23 @@ func graphMergeObjectTool() llm.Tool {
 			return result, nil
 		},
 	}
+}
+
+// typecalcEvidenceFileExists is the cwd-relative existence check that
+// graph_merge_object uses to enforce the v8.5 confirm-needs-evidence
+// invariant. The session-finish gate runs the same check via
+// readEvidence; this duplicates the path resolution to keep the
+// dependency graph thin (tools/graph already imports graph + session
+// + checkpoint, but not typecalc — and we only need the file
+// existence, not the full record).
+func typecalcEvidenceFileExists(objectID string) bool {
+	if objectID == "" {
+		return false
+	}
+	cwd, _ := os.Getwd()
+	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".json")
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
 }
 
 // autoCompileOnImplSet runs typecalc_compile against the file referenced

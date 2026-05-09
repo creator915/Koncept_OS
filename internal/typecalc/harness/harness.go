@@ -203,7 +203,20 @@ function snapshotPorts(ports, lastReturn, callArgs) {
       const idx = dot < 0 ? rest : rest.slice(0, dot);
       const path = dot < 0 ? '' : rest.slice(dot + 1);
       const arg = callArgs ? callArgs[Number(idx)] : undefined;
-      out[p] = path ? resolvePath(arg, path) : arg;
+      let val = path ? resolvePath(arg, path) : arg;
+      // Pre-call snapshot fallback: at input-snapshot time the
+      // harness has not yet built callArgs, so args.* extractors
+      // would yield undefined and fail the runtime-input-missing
+      // check (v6 pong HandleInput: paddle never recorded). Setup
+      // writes inputs to globalThis; mirror that here as a fallback.
+      // For "args.<n>" with no path, fall back to globalThis[p];
+      // for "args.<n>.<path>", fall back to globalThis[p] as well —
+      // the synthesizer always names the setup variable to match
+      // the port id.
+      if (val === undefined && typeof globalThis[p] !== 'undefined') {
+        val = globalThis[p];
+      }
+      out[p] = val;
       continue;
     }
     out[p] = undefined;
@@ -244,6 +257,51 @@ function checkExpectation(exp, value) {
   return [true, ''];
 }
 
+// installBrowserStubs provides the minimum browser-API surface that
+// HTML deliverables touch at top level. Functions are no-ops when
+// they would otherwise trigger UI-only behavior (event listener
+// registration, RAF loop kickoff). Element-returning functions
+// return a Proxy that swallows any property access — enough that
+// inline setup like "const ctx = canvas.getContext('2d')" runs to
+// completion without crashing on later top-level references to ctx.
+function installBrowserStubs() {
+  if (typeof globalThis.document !== 'undefined') return; // already installed (e.g. jsdom)
+  const noopElement = new Proxy(function() { return noopElement; }, {
+    get(_, prop) {
+      // Every property access returns the same noop proxy / function.
+      if (prop === 'style' || prop === 'classList' || prop === 'dataset') return new Proxy({}, { get: () => '', set: () => true });
+      if (prop === 'addEventListener' || prop === 'removeEventListener') return () => {};
+      if (prop === 'getContext') return () => noopElement; // returns same proxy as canvas 2d ctx
+      if (prop === 'getBoundingClientRect') return () => ({ top: 0, left: 0, width: 0, height: 0, right: 0, bottom: 0 });
+      if (prop === 'appendChild' || prop === 'removeChild') return () => noopElement;
+      if (prop === 'querySelector' || prop === 'querySelectorAll') return () => noopElement;
+      if (prop === 'children' || prop === 'childNodes') return [];
+      if (prop === 'innerHTML' || prop === 'textContent' || prop === 'value') return '';
+      if (typeof prop === 'symbol') return undefined;
+      return noopElement; // permissive — any unknown access yields a chainable noop
+    },
+    set() { return true; },
+    apply() { return noopElement; },
+  });
+  const stubDoc = new Proxy({}, {
+    get(_, prop) {
+      if (prop === 'getElementById' || prop === 'querySelector' || prop === 'querySelectorAll' || prop === 'createElement') return () => noopElement;
+      if (prop === 'addEventListener' || prop === 'removeEventListener') return () => {};
+      if (prop === 'body' || prop === 'documentElement' || prop === 'head') return noopElement;
+      if (prop === 'readyState') return 'complete';
+      return undefined;
+    },
+  });
+  globalThis.document = stubDoc;
+  globalThis.window = globalThis;
+  globalThis.requestAnimationFrame = () => 0;     // never schedules
+  globalThis.cancelAnimationFrame = () => {};
+  globalThis.addEventListener = () => {};
+  globalThis.removeEventListener = () => {};
+  if (typeof globalThis.HTMLElement === 'undefined') globalThis.HTMLElement = function() {};
+  if (typeof globalThis.HTMLCanvasElement === 'undefined') globalThis.HTMLCanvasElement = function() {};
+}
+
 // loadImpl reads the impl file and makes its exports / globals
 // reachable to the cases. The result is exposed as globalThis.IMPL —
 // a namespace object the case "call" expression can use as IMPL.fn(...).
@@ -259,6 +317,16 @@ function checkExpectation(exp, value) {
 async function loadImpl() {
   const ext = path.extname(IMPL_PATH).toLowerCase();
   if (ext === '.html' || ext === '.htm') {
+    // 2026-05-09 v8.3: install browser-API stubs BEFORE evaluating
+    // the inline <script>. Real-world HTML deliverables routinely
+    // call document.addEventListener / requestAnimationFrame at the
+    // top level — without stubs, those throw ReferenceError on the
+    // very first line and the entire load fails. The stubs are the
+    // minimum needed: enough that imperative setup code runs to
+    // completion, while still letting individual functions be
+    // tested in isolation. Tests should NOT depend on stub
+    // behavior — they exercise function bodies, not the wiring.
+    installBrowserStubs();
     const html = fs.readFileSync(IMPL_PATH, 'utf-8');
     const re = /<script[^>]*>([\s\S]*?)<\/script>/gi;
     let m;
@@ -266,7 +334,21 @@ async function loadImpl() {
     while ((m = re.exec(html)) !== null) {
       combined += m[1] + '\n';
     }
-    new Function(combined.replace(/\b(const|let)\b/g, 'var'))();
+    // 2026-05-09 v8.4: was new Function(...)() — runs combined in
+    // FUNCTION scope, so top-level "function Foo() {}" declarations
+    // become function-locals, never reaching globalThis. The IMPL
+    // build below would then find an empty namespace and every test
+    // call IMPL.Foo(...) would throw "is not a function". Indirect
+    // eval (0, eval)(...) runs combined as a SCRIPT in global scope,
+    // matching browser behavior: function declarations and var
+    // declarations hoist to globalThis. We still mangle const/let
+    // to var so block-scoped top-level declarations also leak —
+    // browsers treat top-level const/let as script-scoped (not
+    // globalThis), but for testing purposes we want them visible.
+    // Pre-installed stubs (document/window/RAF) absorb any imperative
+    // setup the deliverable runs at module top.
+    const indirectEval = (0, eval);
+    indirectEval(combined.replace(/\b(const|let)\b/g, 'var'));
     // Scan for function declarations and bind them on IMPL too.
     const fnRe = /\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
     const ns = {};
@@ -275,12 +357,30 @@ async function loadImpl() {
       const name = fm[1];
       if (typeof globalThis[name] === 'function') ns[name] = globalThis[name];
     }
+    // Honor any IMPL the deliverable assembled itself (some agents
+    // wrote globalThis.IMPL.Foo = Foo as a defensive workaround in
+    // earlier runs). Merge our scan with whatever's already on IMPL,
+    // preferring scan results for unambiguous declarations.
+    if (typeof globalThis.IMPL === 'object' && globalThis.IMPL !== null) {
+      for (const k of Object.keys(globalThis.IMPL)) {
+        if (typeof ns[k] === 'undefined') ns[k] = globalThis.IMPL[k];
+      }
+    }
     globalThis.IMPL = ns;
     return;
   }
   if (ext === '.js' || ext === '.mjs' || ext === '.cjs' || ext === '.ts' || ext === '.tsx') {
     const mod = await import(path.resolve(IMPL_PATH));
     globalThis.IMPL = mod;
+    // Also expose each named export on globalThis. The 2026-05-09 pong v6
+    // run showed the synthesizer occasionally writes calls like
+    // "InitGame()" without the IMPL. prefix despite the prompt; without
+    // this projection, those cases throw ReferenceError. Module-level
+    // names are safe to project — the test scratch dir is fresh per
+    // call, so collisions with harness-internal globals don't happen.
+    for (const k of Object.keys(mod)) {
+      if (typeof globalThis[k] === 'undefined') globalThis[k] = mod[k];
+    }
     return;
   }
   throw new Error('harness: unsupported impl extension: ' + ext);
@@ -316,8 +416,17 @@ for (const c of CASES) {
     appendTrace(inputs, outputs);
     if (callError) throw callError;
     // 6. assertions
+    //    exp.port may be a dotted path "portName.sub.path" — the top
+    //    segment matches a key in PORT_OBSERVATION (and thus a key in
+    //    outputs), and the remainder is a sub-path drilled into the
+    //    snapshot value with resolvePath. Without this split, nested-
+    //    field assertions like "game_state.score" never resolve because
+    //    outputs is keyed by top-level port name only.
     for (const exp of (c.expect || [])) {
-      const v = outputs[exp.port];
+      const dot = exp.port.indexOf('.');
+      const top = dot < 0 ? exp.port : exp.port.slice(0, dot);
+      const rest = dot < 0 ? '' : exp.port.slice(dot + 1);
+      const v = rest ? resolvePath(outputs[top], rest) : outputs[top];
       const [pass, msg] = checkExpectation(exp, v);
       assert.ok(pass, '[' + exp.port + '] ' + msg);
     }

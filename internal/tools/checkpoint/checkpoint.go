@@ -2,12 +2,16 @@ package checkpointtools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
 	"github.com/creator915/Koncept_OS/internal/checkpoint"
+	"github.com/creator915/Koncept_OS/internal/graph"
+	"github.com/creator915/Koncept_OS/internal/llm"
 )
 
 // Checkpoint tools maintain K/checkpoint.json — the project verification
@@ -92,12 +96,73 @@ func checkpointFillTool() llm.Tool {
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			id, _ := args["id"].(string)
 			proof, _ := args["code_proof"].(string)
+			// 2026-05-09 v8.5 — checkpoint_fill must not fabricate
+			// codeProof. The 5-instance v8.4 batch caught pong-03
+			// filling 8 items 365 lines BEFORE its first Tested<Pass>
+			// (i.e. claiming "code does X" when no test had verified
+			// any X yet). The fix: require at least one graph object
+			// to be in status=confirmed with passing typecalc evidence
+			// before any fill is allowed. Once verified work exists,
+			// subsequent fills are unrestricted (item-by-item linkage
+			// is too fine-grained to enforce mechanically; the
+			// safeguard is "no fills until SOMETHING was actually
+			// verified to work").
+			if !anyConfirmedWithPassingEvidence() {
+				return "", fmt.Errorf(
+					"refusing checkpoint_fill for %q: no confirmed object on K/graph.json yet has passing typecalc evidence (kind=test ok=true OR kind=insufficient+waiver). "+
+						"Filling codeProof before any code has been verified amounts to fabricating evidence. Run typecalc_compile + typecalc_test on at least one object, get it to confirmed with passing evidence, THEN return to fill checkpoint items. CLAUDE.md §5.5 R4 places fill AFTER R3 (impl + tests passing).",
+					id)
+			}
 			if err := checkpoint.Fill(checkpoint.DefaultPath, id, proof); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("%s · codeProof = %s", id, proof), nil
 		},
 	}
+}
+
+// anyConfirmedWithPassingEvidence is the precondition for
+// checkpoint_fill: at least one graph object must be confirmed AND
+// have a typecalc evidence file recording ok=true (or kind=insufficient
+// paired with a waiver). Returns false on a fresh project, on a
+// project with all-declared objects, or when every confirmed object
+// has only ok=false evidence.
+func anyConfirmedWithPassingEvidence() bool {
+	g, err := graph.LoadOrInit(graph.DefaultPath)
+	if err != nil {
+		return false
+	}
+	cwd, _ := os.Getwd()
+	for objID, obj := range g.Objects {
+		if obj.Status != graph.StatusConfirmed {
+			continue
+		}
+		evPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".json")
+		raw, err := os.ReadFile(evPath)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		var ev struct {
+			Kind string `json:"kind"`
+			OK   bool   `json:"ok"`
+		}
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			continue
+		}
+		if ev.OK {
+			return true
+		}
+		// Insufficient + waiver also counts as "verified to the
+		// extent kcpos can": agent declared inability to mechanically
+		// test and provided a manual verification plan.
+		if ev.Kind == "insufficient" {
+			waiverPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".waiver.json")
+			if _, statErr := os.Stat(waiverPath); statErr == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func checkpointWaiveTool() llm.Tool {
