@@ -236,7 +236,7 @@ func typecalcReviewTool() llm.Tool {
 				Signature:   string(defBody),
 				Impl:        string(implBody),
 				TestCode:    testCode,
-				TestLog:     renderIssueAwareLog(testLog, issues, runtimeIssues),
+				TestLog:     renderIssueAwareLog(objectID, testLog, issues, runtimeIssues),
 			})
 			if err != nil {
 				// Don't lose the static-check effort on review error —
@@ -289,13 +289,24 @@ func typecalcReviewTool() llm.Tool {
 }
 
 // renderIssueAwareLog merges the test runner log with a brief
-// summary of static / runtime check issues. The reasonableness
-// reviewer sees both, so it can decide whether the issues are
-// real semantic defects or harness/test noise the human is likely
-// to waive. Without this context, the LLM judge would be ignorant
-// of the structural problems and produce uncalibrated verdicts.
-func renderIssueAwareLog(testLog string, static []typecalc.StaticIssue, runtime []typecalc.StaticIssue) string {
-	if len(static) == 0 && len(runtime) == 0 {
+// summary of static / runtime check issues AND a ground-truth
+// excerpt of the actual harness trace (call count + first call's
+// inputs/outputs). The reasonableness reviewer sees all three,
+// so it can decide whether the issues are real semantic defects
+// or harness/test noise the human is likely to waive.
+//
+// Without the trace excerpt (2026-05-11 v8.7), the LLM judge was
+// prone to a specific hallucination: when typecalc-evidence
+// included runtime-output-missing issues, the LLM speculated
+// "implementation is an HTML page, not a module, cannot be loaded
+// as ES module" — even though the trace recorded 27–33 successful
+// calls (pong-05 batch). With the trace excerpt the LLM literally
+// sees "harness loaded impl and made 33 calls; here's call #1's
+// inputs/outputs", which makes the module-load-failure hypothesis
+// untenable and forces it to judge actual code semantics.
+func renderIssueAwareLog(objectID string, testLog string, static []typecalc.StaticIssue, runtime []typecalc.StaticIssue) string {
+	traceSummary := summarizeRuntimeTrace(objectID)
+	if len(static) == 0 && len(runtime) == 0 && traceSummary == "" {
 		return testLog
 	}
 	var b strings.Builder
@@ -303,22 +314,70 @@ func renderIssueAwareLog(testLog string, static []typecalc.StaticIssue, runtime 
 		b.WriteString(testLog)
 		b.WriteString("\n\n")
 	}
-	b.WriteString("--- structural-check issues (consider these when judging code reasonableness) ---\n")
-	if len(static) > 0 {
-		b.WriteString("static-check:\n")
-		for _, iss := range static {
-			fmt.Fprintf(&b, "  - [%s] %s — %s\n", iss.Code, iss.Where, iss.Message)
-		}
+	if traceSummary != "" {
+		b.WriteString(traceSummary)
+		b.WriteString("\n")
 	}
-	if len(runtime) > 0 {
-		b.WriteString("runtime port-signal check:\n")
-		for _, iss := range runtime {
-			fmt.Fprintf(&b, "  - [%s] %s — %s\n", iss.Code, iss.Where, iss.Message)
+	if len(static) > 0 || len(runtime) > 0 {
+		b.WriteString("--- structural-check issues (consider these when judging code reasonableness) ---\n")
+		if len(static) > 0 {
+			b.WriteString("static-check:\n")
+			for _, iss := range static {
+				fmt.Fprintf(&b, "  - [%s] %s — %s\n", iss.Code, iss.Where, iss.Message)
+			}
 		}
+		if len(runtime) > 0 {
+			b.WriteString("runtime port-signal check:\n")
+			for _, iss := range runtime {
+				fmt.Fprintf(&b, "  - [%s] %s — %s\n", iss.Code, iss.Where, iss.Message)
+			}
+		}
+		b.WriteString("---\n")
+		b.WriteString("Note: these are structural signals. Some may be real defects (fix code), others may be harness/test artifacts (the agent will pair with obstacle+waiver). Judge the IMPLEMENTATION itself against the SPEC, not the test-runner output. In particular, if the trace summary above shows the impl WAS loaded and called, do NOT speculate about module-load or impl-not-importable issues — those are ruled out by direct observation.\n")
+	}
+	return b.String()
+}
+
+// summarizeRuntimeTrace returns a short, LLM-friendly description
+// of the harness's actual trace for this object: how many calls
+// landed, and one concrete sample (inputs/outputs). Returns "" when
+// no trace exists (typecalc_test never ran or recorded nothing).
+//
+// The sample is truncated per-port to keep prompts small (the LLM
+// only needs proof-of-execution, not full data fidelity).
+func summarizeRuntimeTrace(objectID string) string {
+	trace, ok := typecalc.ReadRuntimeTrace(objectID)
+	if !ok || trace == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("--- harness execution trace (ground truth: the impl WAS loaded and invoked) ---\n")
+	fmt.Fprintf(&b, "calls recorded: %d\n", len(trace.Calls))
+	if len(trace.Calls) > 0 {
+		c := trace.Calls[0]
+		b.WriteString("first-call inputs:  ")
+		b.WriteString(truncateMapJSON(c.Inputs, 240))
+		b.WriteString("\nfirst-call outputs: ")
+		b.WriteString(truncateMapJSON(c.Outputs, 240))
+		b.WriteString("\n")
 	}
 	b.WriteString("---\n")
-	b.WriteString("Note: these are structural signals. Some may be real defects (fix code), others may be harness/test artifacts (the agent will pair with obstacle+waiver). Judge the IMPLEMENTATION itself against the SPEC, not the test-runner output.\n")
 	return b.String()
+}
+
+// truncateMapJSON marshals a per-port map to compact JSON and clips
+// to max bytes. Used in trace excerpts where the LLM only needs to
+// confirm shape / non-emptiness, not load full call records.
+func truncateMapJSON(m map[string]json.RawMessage, max int) string {
+	if m == nil {
+		return "(nil)"
+	}
+	bytes, _ := json.Marshal(m)
+	s := string(bytes)
+	if len(s) > max {
+		return s[:max] + "...(truncated)"
+	}
+	return s
 }
 
 func resolveCwd(cwd, path string) string {

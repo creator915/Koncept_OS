@@ -82,20 +82,22 @@ func checkpointFillTool() llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "checkpoint_fill",
-				Description: "Record codeProof for an item (the file:line + key export name that satisfies it, e.g. 'src/Auth.impl.ts:42 LoginHandler'). Use this once the implementation is in place to demonstrate the requirement is met.",
+				Description: "Record codeProof and/or gameplayProof for an item. codeProof = file:line + key export (e.g. 'src/Auth.impl.ts:42 LoginHandler'). gameplayProof = runtime reproduction steps + path to K/proofs/<id>/ artifacts (e.g. 'spawn / left:30 / attack:5 → see K/proofs/CHK-001/final.png'). For root finish on projects with executable deliverables (index.html / dist bundle), CLAUDE.md §5.5 R3 requires BOTH proofs on every must item; the gate enforces this via [gameplay-proof-required]. At least one proof must be supplied per call; subsequent calls overwrite only the supplied slots.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string"},
-						"code_proof": map[string]interface{}{"type": "string", "description": "file:line + symbol, e.g. 'src/foo.ts:42 ExportName'."},
+						"id":             map[string]interface{}{"type": "string"},
+						"code_proof":     map[string]interface{}{"type": "string", "description": "file:line + symbol, e.g. 'src/foo.ts:42 ExportName'. Optional if gameplay_proof is supplied."},
+						"gameplay_proof": map[string]interface{}{"type": "string", "description": "Reproduction steps + path under K/proofs/<id>/, e.g. 'launch / move-left:30 / attack:5 — see K/proofs/CHK-001/final.png'. Required at root finish for projects with executable deliverables. Optional if code_proof is supplied."},
 					},
-					"required": []string{"id", "code_proof"},
+					"required": []string{"id"},
 				},
 			},
 		},
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			id, _ := args["id"].(string)
-			proof, _ := args["code_proof"].(string)
+			codeProof, _ := args["code_proof"].(string)
+			gameplayProof, _ := args["gameplay_proof"].(string)
 			// 2026-05-09 v8.5 — checkpoint_fill must not fabricate
 			// codeProof. The 5-instance v8.4 batch caught pong-03
 			// filling 8 items 365 lines BEFORE its first Tested<Pass>
@@ -113,10 +115,17 @@ func checkpointFillTool() llm.Tool {
 						"Filling codeProof before any code has been verified amounts to fabricating evidence. Run typecalc_compile + typecalc_test on at least one object, get it to confirmed with passing evidence, THEN return to fill checkpoint items. CLAUDE.md §5.5 R4 places fill AFTER R3 (impl + tests passing).",
 					id)
 			}
-			if err := checkpoint.Fill(checkpoint.DefaultPath, id, proof); err != nil {
+			if err := checkpoint.Fill(checkpoint.DefaultPath, id, codeProof, gameplayProof); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("%s · codeProof = %s", id, proof), nil
+			var parts []string
+			if codeProof != "" {
+				parts = append(parts, "codeProof = "+codeProof)
+			}
+			if gameplayProof != "" {
+				parts = append(parts, "gameplayProof = "+gameplayProof)
+			}
+			return fmt.Sprintf("%s · %s", id, strings.Join(parts, "; ")), nil
 		},
 	}
 }

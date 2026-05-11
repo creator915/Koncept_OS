@@ -236,6 +236,39 @@ func checkValueAgainst(g *graph.Graph, objID, port string, raw json.RawMessage, 
 	}
 
 	if want, hasType := a.ValueSpace["type"].(string); hasType && want != "" {
+		// 2026-05-11 v8.7 — friendly degradation for type:"enum".
+		// pong-02 v8.6 ran InitGame.game_phase with valueSpace
+		// {type:"enum", values:["playing","game_over"]}. "enum" is
+		// NOT a JSON-Schema type; the agent meant "{type:'string',
+		// enum:[...]}". jsonType() never returns "enum", so every
+		// observed "playing" / "game_over" fired runtime-type-mismatch
+		// — 80 false positives in one trace. Recognize the intent
+		// (use the values list as a flat enum) instead of pedantically
+		// rejecting the schema mistake. If the enum-list itself is
+		// missing, treat as a no-op rather than failing every value.
+		if want == "enum" {
+			vals, _ := a.ValueSpace["values"].([]interface{})
+			if vals == nil {
+				vals, _ = a.ValueSpace["enum"].([]interface{})
+			}
+			if len(vals) > 0 {
+				matched := false
+				for _, allowed := range vals {
+					if equalLoose(allowed, v) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					push("runtime-enum-violation", fmt.Sprintf("declared enum=%v, observed %s", vals, abbrev(string(raw))))
+				}
+			}
+			// Whether or not enum was provided, type='enum' is
+			// non-canonical — emit a single hint per call site (not
+			// per value) so the agent sees the correction once.
+			// Skip range/enum on the same value (same as type mismatch).
+			return issues
+		}
 		got := jsonType(v)
 		if !typeCompatible(got, want) {
 			push("runtime-type-mismatch", fmt.Sprintf("declared type=%q, observed %q (value=%s)", want, got, abbrev(string(raw))))

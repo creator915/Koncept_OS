@@ -109,6 +109,18 @@ func StaticCheck(cwd string, g *graph.Graph, objID string) []StaticIssue {
 			push("value-space-empty", attrID, fmt.Sprintf(
 				"attribute %s has no valueSpace declared — confirmed attributes must record their value structure (graph_merge_attribute id=%q patch='{\"valueSpace\":...}')",
 				attrID, attrID))
+		} else if t, ok := a.ValueSpace["type"].(string); ok && t == "enum" {
+			// 2026-05-11 v8.7 — emit a one-shot schema hint instead of
+			// per-value runtime-type-mismatch noise. pong-02 v8.6 had
+			// game_phase: {type:"enum", values:["playing","game_over"]}
+			// which is not a canonical JSON-Schema; the runtime check
+			// treated every observed string as type-mismatched. v8.7
+			// runtime_check now silently accepts type="enum" and uses
+			// the values list as a flat enum, but the canonical form
+			// is preferable for tooling clarity.
+			push("value-space-non-canonical-enum", attrID, fmt.Sprintf(
+				"attribute %s has valueSpace.type=\"enum\" which is not a JSON-Schema type — prefer {type:\"string\", enum:[\"v1\",\"v2\"]} or just {enum:[\"v1\",\"v2\"]}; the runtime check accepts the non-canonical form via the values/enum list but the canonical form clears this hint",
+				attrID))
 		}
 	}
 

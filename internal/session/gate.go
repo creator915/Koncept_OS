@@ -112,6 +112,21 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 	// is confirmed, has an impl path set, and that file exists & is non-empty.
 	// This rule does NOT depend on graphDiff capture; it inspects the graph
 	// state directly. Non-root sessions skip this check.
+	//
+	// 2026-05-11 v8.7 — waiver-flood throttle. The v8.6 batch (pong-05)
+	// showed that the v8.5/v8.6 obstacle+waiver carve-outs, while
+	// individually justified, can be abused at session scale: pong-05
+	// rode 4/4 confirmed objects through obstacle+waiver with reasons
+	// that the LLM reviewer had confabulated ("HTML cannot be loaded
+	// as ES module") — every object escaped via the same path. To
+	// detect this pattern we count waiver-share across the root graph
+	// and fail-gate when ≥75% of confirmed objects bypass the test
+	// pathway via obstacle+waiver. Below threshold the carve-outs
+	// remain a legitimate escape valve (pong-02 1/2, pong-03 2/4 still
+	// pass cleanly).
+	totalConfirmed := 0
+	waiveredConfirmed := 0
+	var waiverObjects []string
 	if s.Parent == "" && err == nil {
 		cwd, _ := os.Getwd()
 		// Check every object the graph contains, regardless of which session created it.
@@ -189,6 +204,16 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 			// the kind=test ok=true demand, NOT the reasonableness layer.
 			passViaWaiver := hasObstacle && hasWaiver
 			_ = passViaWaiver
+
+			// v8.7 — waiver-flood accounting. Track every confirmed
+			// object regardless of evidence path; track the subset that
+			// went through obstacle+waiver. Post-loop we apply the
+			// 75% threshold and emit [waiver-flood] if exceeded.
+			totalConfirmed++
+			if passViaWaiver {
+				waiveredConfirmed++
+				waiverObjects = append(waiverObjects, objID)
+			}
 
 			// D1: kind=insufficient is the "I cannot verify this"
 			// response from the lang invokers. It's NOT a fail — it's
@@ -325,6 +350,37 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 					attrID, producer, a.Status, attrID))
 			}
 		}
+
+		// v8.7 — waiver-flood throttle. Applied only at root finish.
+		// Threshold: ≥75% of confirmed objects via obstacle+waiver
+		// pair (3/4, 4/5, 6/8, ...). Below 75% the carve-out remains
+		// a legitimate escape valve. At/above, the pattern crosses
+		// into systematic verification-bypass and requires the agent
+		// to demonstrate diversity of obstacle reasons + ideally
+		// upgrade some objects to real test evidence before retry.
+		// Two confirmed objects with 1 waiver = 50% (below) — still
+		// passes. Four confirmed with 3 waivers = 75% — blocks.
+		const waiverFloodMin = 4
+		if totalConfirmed >= waiverFloodMin && waiveredConfirmed*4 >= totalConfirmed*3 {
+			// Quick reason-diversity probe: count distinct obstacle
+			// reasons (first 60 chars normalized lowercase). When ≤2
+			// distinct reasons cover N≥3 objects, the agent is likely
+			// pattern-pasting one confabulation across the session.
+			reasons := map[string]int{}
+			for _, objID := range waiverObjects {
+				if r := readObstacleReason(objID); r != "" {
+					key := normalizeReasonKey(r)
+					reasons[key]++
+				}
+			}
+			r.Issues = append(r.Issues, fmt.Sprintf(
+				"[waiver-flood] %d/%d (%d%%) confirmed objects pass via typecalc_obstacle+typecalc_waive — the carve-out is meant for individually-justified harness-mismatch cases, not systematic verification-bypass. Affected: %s. Resolution: (a) convert at least %d of these to real typecalc_test evidence (look for the v8.7 OUTPUT_PORTS-includes-Mutates fix that unblocks mutates-pattern impls), OR (b) demonstrate reason-diversity (each obstacle.reason should be specifically grounded in this object's signature, not a copy-pasted environmental claim); distinct-reason keys observed: %d",
+				waiveredConfirmed, totalConfirmed, (waiveredConfirmed*100)/max1(totalConfirmed),
+				strings.Join(waiverObjects, ", "),
+				waiveredConfirmed-((totalConfirmed*3)/4-1), // how many to remove from waiver path
+				len(reasons),
+			))
+		}
 	}
 
 	// checkpoint-pass — checkpoint final verdict (only meaningful when frozen)
@@ -336,6 +392,17 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 			} else if c.Summary.FinalVerdict != checkpoint.VerdictPass {
 				r.Issues = append(r.Issues, fmt.Sprintf("[checkpoint-pass] checkpoint verdict is %s (need PASS)", c.Summary.FinalVerdict))
 			}
+
+			// 2026-05-11 v8.7 — gameplayProof is a recorded field
+			// (Item.GameplayProof) and an optional checkpoint_fill
+			// parameter, but the gate does NOT force-fail when it's
+			// missing. CLAUDE.md §5.5 R3 mandates both proofs for
+			// executable-deliverable projects, but agents currently
+			// have no reliable way to capture screenshots in this
+			// environment — turning the rule on prematurely would
+			// either force fabricated proofs or mass-waivers. Observe
+			// the natural fill rate first; promote to required once
+			// snap tooling is reliable.
 		}
 	}
 
@@ -356,6 +423,48 @@ func implFileOK(implPath, cwd string) bool {
 	}
 	return info.Size() > 0
 }
+
+// readObstacleReason loads the .obstacle.json file's `reason` field
+// for waiver-flood diversity analysis. Returns "" if missing/unreadable.
+func readObstacleReason(objectID string) string {
+	cwd, _ := os.Getwd()
+	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".obstacle.json")
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 {
+		return ""
+	}
+	var rec struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return ""
+	}
+	return rec.Reason
+}
+
+// normalizeReasonKey produces a coarse signature of an obstacle reason
+// for similarity counting. Lowercased, whitespace-collapsed, first 60
+// characters. Two obstacles with the same key are very likely
+// pattern-pasted; with different keys, the agent at least varied wording.
+func normalizeReasonKey(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 60 {
+		s = s[:60]
+	}
+	return s
+}
+
+// max1 returns n when n>=1, else 1. Used as denominator-protection in
+// percentage formatting so a zero-confirmed root doesn't divide by 0
+// (defensive — the surrounding loop only fires when totalConfirmed >= 4).
+func max1(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
 
 // evidenceRecord mirrors the JSON layout written by typecalc_compile /
 // typecalc_test (see internal/tools/typecalc.go recordTypecalcEvidence).

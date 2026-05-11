@@ -560,14 +560,43 @@ func graphMergeObjectTool() llm.Tool {
 // dependency graph thin (tools/graph already imports graph + session
 // + checkpoint, but not typecalc — and we only need the file
 // existence, not the full record).
+//
+// 2026-05-11 v8.7 — obstacle+waiver pair is also accepted as
+// evidence-equivalent. The gate's accepted-evidence-required rule
+// already treats obstacle+waiver as a legitimate finish path
+// (v8.6 carve-out). The confirm-time hook was the missing
+// counterpart: pong-02 v8.6 wrote obstacle.json + waiver.json for
+// UpdateFrame, then `graph_merge_object UpdateFrame status=confirmed`
+// was blocked here because <id>.json (the canonical typecalc evidence)
+// was missing. The agent's workaround was to run an extra noisy
+// typecalc_test (which itself TestError'd, but generated the file
+// shell). Treat obstacle+waiver pair as semantically equivalent to
+// typecalc evidence at confirm time so the agent doesn't need that
+// roundabout step.
 func typecalcEvidenceFileExists(objectID string) bool {
 	if objectID == "" {
 		return false
 	}
 	cwd, _ := os.Getwd()
-	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".json")
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Size() > 0
+	dir := filepath.Join(cwd, ".kcpos", "typecalc-evidence")
+	primary := filepath.Join(dir, objectID+".json")
+	if info, err := os.Stat(primary); err == nil && !info.IsDir() && info.Size() > 0 {
+		return true
+	}
+	// Obstacle+waiver pair carve-out: both files must exist and be
+	// non-empty. A waiver without a matching obstacle is not enough
+	// (the agent must justify the escape via the obstacle reason
+	// before the waiver substitutes for evidence).
+	obstacle := filepath.Join(dir, objectID+".obstacle.json")
+	waiver := filepath.Join(dir, objectID+".waiver.json")
+	oInfo, oErr := os.Stat(obstacle)
+	wInfo, wErr := os.Stat(waiver)
+	if oErr == nil && wErr == nil &&
+		!oInfo.IsDir() && oInfo.Size() > 0 &&
+		!wInfo.IsDir() && wInfo.Size() > 0 {
+		return true
+	}
+	return false
 }
 
 // autoCompileOnImplSet runs typecalc_compile against the file referenced

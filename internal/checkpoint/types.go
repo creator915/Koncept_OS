@@ -1,9 +1,18 @@
 // Package checkpoint implements the project verification checklist:
 // each requirement is added as an item, the list is frozen, then each
-// must-item is filled with a codeProof (file:line + symbol) before the
-// project is considered done. Mechanical verification only — no
-// gameplayProof / UI / runtime-simulation requirements (those can't be
-// reliably checked by an agent).
+// must-item is filled with proofs before the project is considered done.
+//
+// Two proof slots per item:
+//   - codeProof: file:line + symbol (mechanical, always required for must)
+//   - gameplayProof: complete reproduction steps + reference to artifacts
+//     under K/proofs/<id>/ (e.g. snap-generated screenshots). Required when
+//     the project has an executable deliverable (index.html / dist bundle)
+//     and CLAUDE.md §5.5 R3 explicitly mandates both for root finish.
+//
+// The gate enforces gameplayProof at root-deliver scope (not per item) so
+// library / CLI-only projects without an interactive deliverable can still
+// finish on codeProof alone, while game/UI projects must demonstrate the
+// thing actually runs.
 //
 // Storage: K/checkpoint.json — one per project.
 //
@@ -41,14 +50,21 @@ func IsValidSeverity(s string) bool {
 }
 
 // Item is a single verification requirement.
+//
+// GameplayProof (v8.7) records the runtime-demonstration evidence:
+// reproduction steps + path to K/proofs/<id>/ artifacts. The struct
+// field is always present so the JSON layout is stable, but it's only
+// required by the gate when a deliverable is present (see
+// internal/session/gate.go [gameplay-proof-required]).
 type Item struct {
-	ID           string    `json:"id"`
-	Description  string    `json:"description"`
-	Category     string    `json:"category,omitempty"`
-	Severity     Severity  `json:"severity"`
-	CodeProof    string    `json:"codeProof,omitempty"`
-	WaiverReason string    `json:"waiverReason,omitempty"`
-	VerifiedAt   time.Time `json:"verifiedAt,omitempty"`
+	ID            string    `json:"id"`
+	Description   string    `json:"description"`
+	Category      string    `json:"category,omitempty"`
+	Severity      Severity  `json:"severity"`
+	CodeProof     string    `json:"codeProof,omitempty"`
+	GameplayProof string    `json:"gameplayProof,omitempty"`
+	WaiverReason  string    `json:"waiverReason,omitempty"`
+	VerifiedAt    time.Time `json:"verifiedAt,omitempty"`
 }
 
 // Filled reports whether this item has a codeProof (or is a waiver, which

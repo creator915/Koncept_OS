@@ -438,26 +438,36 @@ func typecalcEvidenceExists(objectID string) bool {
 	if objectID == "" {
 		return false
 	}
-	rel := filepath.Join(typecalcEvidenceDirRel, objectID+".json")
 	cwd, _ := os.Getwd()
+	rel := filepath.Join(typecalcEvidenceDirRel, objectID+".json")
 	path := filepath.Join(cwd, rel)
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) == 0 {
-		return false
+	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+		// Minimal parse — we don't need the full struct here, just the
+		// `ok` field. The gate (internal/session/gate.go) does the full
+		// inspection (kind=test enforcement, etc.). The hook is intentionally
+		// lighter: it lets a compile-only evidence file pass at merge time
+		// so the agent can still iterate, while the gate at root-finish
+		// makes the harder demand.
+		var rec struct {
+			OK bool `json:"ok"`
+		}
+		if err := json.Unmarshal(raw, &rec); err == nil && rec.OK {
+			return true
+		}
 	}
-	// Minimal parse — we don't need the full struct here, just the
-	// `ok` field. The gate (internal/session/gate.go) does the full
-	// inspection (kind=test enforcement, etc.). The hook is intentionally
-	// lighter: it lets a compile-only evidence file pass at merge time
-	// so the agent can still iterate, while the gate at root-finish
-	// makes the harder demand.
-	var rec struct {
-		OK bool `json:"ok"`
+	// 2026-05-11 v8.7 — obstacle+waiver pair counts as evidence-equivalent
+	// at the warning level too. Matches the blocking check in
+	// internal/tools/graph/graph.go typecalcEvidenceFileExists.
+	obstacle := filepath.Join(cwd, typecalcEvidenceDirRel, objectID+".obstacle.json")
+	waiver := filepath.Join(cwd, typecalcEvidenceDirRel, objectID+".waiver.json")
+	oInfo, oErr := os.Stat(obstacle)
+	wInfo, wErr := os.Stat(waiver)
+	if oErr == nil && wErr == nil &&
+		!oInfo.IsDir() && oInfo.Size() > 0 &&
+		!wInfo.IsDir() && wInfo.Size() > 0 {
+		return true
 	}
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return false
-	}
-	return rec.OK
+	return false
 }
 
 // --- Hook 8: auto-validate after every graph mutation ---

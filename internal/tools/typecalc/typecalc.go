@@ -129,6 +129,23 @@ func filepathIsAbs(p string) bool {
 	return false
 }
 
+// appendUnique appends each x to dst only if it is not already present.
+// Used to merge Produces and Mutates into the harness OUTPUT_PORTS list
+// without double-counting ports that legitimately appear in both.
+func appendUnique(dst []string, xs ...string) []string {
+	seen := make(map[string]bool, len(dst))
+	for _, d := range dst {
+		seen[d] = true
+	}
+	for _, x := range xs {
+		if !seen[x] {
+			dst = append(dst, x)
+			seen[x] = true
+		}
+	}
+	return dst
+}
+
 // typecalcTestTool is the id-only redesign: the tool reads BOTH the
 // impl (from graph) AND the test code (from <id>.tests.json) directly.
 // No `code` / `tests` / `lang` arguments — the agent has no string-arg
@@ -211,10 +228,29 @@ func typecalcTestTool() llm.Tool {
 					absImpl = cwd + string(os.PathSeparator) + absImpl
 				}
 				absTrace := cwd + string(os.PathSeparator) + typecalc.RuntimeTracePath(objectID)
+				// 2026-05-11 v8.7 — OUTPUT_PORTS must include Mutates,
+				// not just Produces. v8.6 batch (pong-01, pong-05) had
+				// objects modelled as mutates=[ball_data, score, ...]
+				// with portObservation: {ball_data: "return.ball", ...}.
+				// The function correctly returned the new value but
+				// because OutputPorts was Produces-only (which was []),
+				// the harness's snapshotPorts(OUTPUT_PORTS=[], ...) ran
+				// over an empty list and recorded outputs={} on every
+				// call. Downstream runtime-check then reported
+				// runtime-output-missing for every mutates port. Agents
+				// either spiraled into self-blame (pong-01: writing
+				// useless consume edges, then context-bombing on a 6.8MB
+				// grep) or mass-waivered with confabulated obstacle
+				// reasons (pong-05). The mutates-pattern carve-out in
+				// runtime_check.go v8.6 (mutates+consumes overlap via
+				// observed outputs) was inert until this fix because
+				// outputs was always empty for mutates ports.
+				outputPorts := append([]string{}, obj.Produces...)
+				outputPorts = appendUnique(outputPorts, obj.Mutates...)
 				rendered, ok := harness.Render(harness.RenderInputs{
 					Tests:           t,
 					InputPorts:      obj.Consumes,
-					OutputPorts:     obj.Produces,
+					OutputPorts:     outputPorts,
 					ImplPath:        absImpl,
 					TracePath:       absTrace,
 					PortObservation: obj.PortObservation,

@@ -60,10 +60,18 @@ func Freeze(path string) error {
 	return Save(path, c)
 }
 
-// Fill records codeProof for an item. Allowed at any time (pre or post
-// freeze). codeProof should reference file:line + key export, e.g.
-// "src/Op.impl.ts:42 NormalizeWeather".
-func Fill(path, id, codeProof string) error {
+// Fill records codeProof (and optionally gameplayProof) for an item.
+// Allowed at any time (pre or post freeze). codeProof should reference
+// file:line + key export, e.g. "src/Op.impl.ts:42 NormalizeWeather".
+// gameplayProof (v8.7) should reference reproduction steps + paths under
+// K/proofs/<id>/ — empty string is allowed and will trigger the
+// [gameplay-proof-required] gate rule only if the project has an
+// executable deliverable.
+//
+// Either proof can be filled independently; subsequent calls overwrite
+// only the slots that are non-empty, so the agent can fill code first
+// and gameplay later (or vice versa) without losing prior progress.
+func Fill(path, id, codeProof, gameplayProof string) error {
 	c, err := LoadOrInit(path)
 	if err != nil {
 		return err
@@ -75,10 +83,15 @@ func Fill(path, id, codeProof string) error {
 	if c.Items[idx].Severity == SeverityWaiver {
 		return fmt.Errorf("cannot fill codeProof for a waiver item — use checkpoint_unwaive first or add a fresh item")
 	}
-	if codeProof == "" {
-		return fmt.Errorf("codeProof required (e.g. 'src/foo.ts:42 ExportName')")
+	if codeProof == "" && gameplayProof == "" {
+		return fmt.Errorf("at least one of codeProof or gameplayProof required (codeProof e.g. 'src/foo.ts:42 ExportName'; gameplayProof e.g. 'spawn / move left 30 / attack 5 — see K/proofs/CHK-001/final.png')")
 	}
-	c.Items[idx].CodeProof = codeProof
+	if codeProof != "" {
+		c.Items[idx].CodeProof = codeProof
+	}
+	if gameplayProof != "" {
+		c.Items[idx].GameplayProof = gameplayProof
+	}
 	c.Items[idx].VerifiedAt = time.Now().UTC()
 	c.UpdatedAt = time.Now().UTC()
 	return Save(path, c)
