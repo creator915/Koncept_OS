@@ -235,9 +235,19 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 				// D1, compile alone is no longer enough — those langs
 				// must produce kind=insufficient + waiver, not slip
 				// through on a compile pass.
-				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[compile-not-enough] object %s has only kind=compile evidence for non-testable language %q — kcpos no longer accepts compile-only as proof. Either restructure the impl into a testable language (kind=test) or use typecalc_waive (kind=insufficient + waiver).",
-					objID, ev.Lang))
+				//
+				// v8.6 — obstacle+waiver also satisfies this. The
+				// pong-03 v8.5 case wrote 4/4 kind=compile + waiver
+				// (synthesizer returned CANNOT_SYNTHESIZE for some
+				// objects → no test ever ran, but compile succeeded
+				// and the agent paired with obstacle+waiver). With
+				// the carve-out, that pattern is now a legitimate
+				// finish path.
+				if !passViaWaiver {
+					r.Issues = append(r.Issues, fmt.Sprintf(
+						"[compile-not-enough] object %s has only kind=compile evidence for non-testable language %q — kcpos no longer accepts compile-only as proof. Either restructure the impl into a testable language (kind=test) or escalate via typecalc_obstacle + typecalc_waive describing why this object cannot produce test evidence.",
+						objID, ev.Lang))
+				}
 			}
 			// accepted-evidence-required — every confirmed object must
 			// also pass the two-tier acceptance check (typecalc_review:
@@ -247,6 +257,21 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 			// Without this, "confirmed" carries no fitness-for-purpose
 			// signal — the gate would PASS on a syntactically correct
 			// but semantically irrelevant impl.
+			//
+			// 2026-05-09 v8.6 — obstacle+waiver carve-out completion.
+			// v8.5 added the pair as a kind=test substitute but
+			// missed this branch: when typecalc_review short-circuits
+			// (static/runtime issues exist) it writes acc.OK=false
+			// with reasons "static or runtime check produced issues"
+			// — review never ran the LLM judge. The v8.5 batch
+			// (pong-01, pong-04) had complete obstacle+waiver pairs
+			// for harness-mock objects, but acc.OK=false kept the
+			// gate FAIL forever. Symmetric treatment: if the agent
+			// provided both signals (obstacle + waiver) AND the
+			// review file exists (the typecalc_review call DID
+			// happen), accept it as resolved — the human-equivalent
+			// judgment has been captured in the waiver reason.
+			// The missing-accepted branch still demands the call.
 			acc, accOK := readAcceptedEvidence(cwd, objID)
 			if !accOK {
 				r.Issues = append(r.Issues, fmt.Sprintf(
@@ -254,13 +279,13 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 					objID, objID, objID))
 				continue
 			}
-			if !acc.OK {
+			if !acc.OK && !passViaWaiver {
 				reasons := strings.Join(acc.Reasonableness.Reasons, "; ")
 				if reasons == "" {
 					reasons = "(no reason recorded)"
 				}
 				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[accepted-evidence-required] object %s review verdict failed: %s — fix and re-run typecalc_review",
+					"[accepted-evidence-required] object %s review verdict failed: %s — fix and re-run typecalc_review, OR escalate via typecalc_obstacle + typecalc_waive describing why the review issues are not code defects",
 					objID, reasons))
 			}
 		}

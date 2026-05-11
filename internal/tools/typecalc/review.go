@@ -214,38 +214,37 @@ func typecalcReviewTool() llm.Tool {
 				specDesc = spec.Description
 				specHash = spec.SourceHash
 			}
-			// Reasonableness only attempts when BOTH static and runtime
-			// checks pass — running the LLM judge against a known-broken
-			// trace would just amplify noise.
-			canReason := len(issues) == 0 && len(runtimeIssues) == 0
-			if canReason {
-				verdict, err = typecalc.ReviewReasonableness(ctx, typecalc.ReviewInputs{
-					ObjectID:    objectID,
-					Intent:      obj.Intent,
-					Description: specDesc,
-					Signature:   string(defBody),
-					Impl:        string(implBody),
-					TestCode:    testCode,
-					TestLog:     testLog,
-				})
-				if err != nil {
-					// Don't lose the static-check effort on review error —
-					// persist a fail record with the error as the reason.
-					verdict = typecalc.ReviewVerdict{
-						Verdict:    "fail",
-						Reasons:    []string{fmt.Sprintf("review invocation error: %v", err)},
-						Confidence: 0.0,
-					}
-				}
-			} else {
-				reason := "static or runtime check produced issues — fix them before reasonableness review can run"
-				if len(issues) == 0 && len(runtimeIssues) > 0 {
-					reason = "runtime port-signal check produced issues — fix them before reasonableness review can run"
-				}
+			// Reasonableness review — 2026-05-09 v8.6: previously
+			// short-circuited to a fixed "static/runtime issues exist"
+			// fail when issues != []. That made the gate's
+			// accepted-evidence-required layer impossible to satisfy
+			// even when obstacle+waiver excused the issues (v8.5
+			// batch: pong-01/04 stuck on this). Now we ALWAYS run
+			// the LLM judge so the verdict reflects code reasonableness
+			// independently of structural issues. The issue lists are
+			// surfaced to the LLM as context (so it can weigh whether
+			// the failures are real defects or known harness/test
+			// noise), and to the agent via the issue rendering — but
+			// the verdict itself is no longer hostage to them. The
+			// gate still combines acc.OK with the obstacle/waiver
+			// pair before deciding finish-eligibility.
+			cleanRun := len(issues) == 0 && len(runtimeIssues) == 0
+			verdict, err = typecalc.ReviewReasonableness(ctx, typecalc.ReviewInputs{
+				ObjectID:    objectID,
+				Intent:      obj.Intent,
+				Description: specDesc,
+				Signature:   string(defBody),
+				Impl:        string(implBody),
+				TestCode:    testCode,
+				TestLog:     renderIssueAwareLog(testLog, issues, runtimeIssues),
+			})
+			if err != nil {
+				// Don't lose the static-check effort on review error —
+				// persist a fail record with the error as the reason.
 				verdict = typecalc.ReviewVerdict{
 					Verdict:    "fail",
-					Reasons:    []string{reason},
-					Confidence: 1.0,
+					Reasons:    []string{fmt.Sprintf("review invocation error: %v", err)},
+					Confidence: 0.0,
 				}
 			}
 
@@ -253,7 +252,12 @@ func typecalcReviewTool() llm.Tool {
 			if t, ok := typecalc.ReadTests(objectID); ok {
 				testsHash = typecalc.HashSource(t.TestCode)
 			}
-			ok2 := canReason && verdict.Verdict == "pass"
+			// ok2 collapses to true only when BOTH (a) reasonableness
+			// verdict says pass AND (b) there were no static/runtime
+			// issues. That preserves the strong-signal acc.OK=true
+			// semantic; cases where the LLM judges "code is fine but
+			// trace has flapping" go through obstacle+waiver instead.
+			ok2 := cleanRun && verdict.Verdict == "pass"
 			rec := &typecalc.AcceptedEvidence{
 				ObjectID:       objectID,
 				OK:             ok2,
@@ -282,6 +286,39 @@ func typecalcReviewTool() llm.Tool {
 			return renderReviewResult(rec), nil
 		},
 	}
+}
+
+// renderIssueAwareLog merges the test runner log with a brief
+// summary of static / runtime check issues. The reasonableness
+// reviewer sees both, so it can decide whether the issues are
+// real semantic defects or harness/test noise the human is likely
+// to waive. Without this context, the LLM judge would be ignorant
+// of the structural problems and produce uncalibrated verdicts.
+func renderIssueAwareLog(testLog string, static []typecalc.StaticIssue, runtime []typecalc.StaticIssue) string {
+	if len(static) == 0 && len(runtime) == 0 {
+		return testLog
+	}
+	var b strings.Builder
+	if testLog != "" {
+		b.WriteString(testLog)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("--- structural-check issues (consider these when judging code reasonableness) ---\n")
+	if len(static) > 0 {
+		b.WriteString("static-check:\n")
+		for _, iss := range static {
+			fmt.Fprintf(&b, "  - [%s] %s — %s\n", iss.Code, iss.Where, iss.Message)
+		}
+	}
+	if len(runtime) > 0 {
+		b.WriteString("runtime port-signal check:\n")
+		for _, iss := range runtime {
+			fmt.Fprintf(&b, "  - [%s] %s — %s\n", iss.Code, iss.Where, iss.Message)
+		}
+	}
+	b.WriteString("---\n")
+	b.WriteString("Note: these are structural signals. Some may be real defects (fix code), others may be harness/test artifacts (the agent will pair with obstacle+waiver). Judge the IMPLEMENTATION itself against the SPEC, not the test-runner output.\n")
+	return b.String()
 }
 
 func resolveCwd(cwd, path string) string {

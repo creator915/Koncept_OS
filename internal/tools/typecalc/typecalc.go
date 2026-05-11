@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/creator915/Koncept_OS/internal/graph"
 	"github.com/creator915/Koncept_OS/internal/llm"
@@ -239,6 +240,13 @@ func typecalcTestTool() llm.Tool {
 			rendered, _ := renderTypedValue(out)
 			implHash := typecalc.HashSource(string(implBody))
 			effectiveLang := string(typecalc.DetectEffectiveLang(string(implBody), langTag))
+			// 2026-05-09 v8.6 — emit a short, greppable status line to
+			// stderr so test results are observable in the agent log.
+			// Previously only the tool CALL was banner-logged; the tool
+			// RESULT lived only in the transcript JSON, making it
+			// difficult to triage runs from the log alone (v8.5 audit
+			// noted "Tested<Pass>" was hard to track for some agents).
+			emitTestStatusLine(objectID, out)
 			if out.State == typecalc.StateTestedPass {
 				if recErr := typecalc.RecordEvidenceFull(objectID, "test", effectiveLang, true, rendered, implHash); recErr != nil {
 					return "", recErr
@@ -408,6 +416,38 @@ func applyFeedbackLawMissing(attrPath, newLaw string) (string, error) {
 
 // renderTypedValue is a small helper that marshals a typed value into a
 // human + machine-readable form for tool results. We emit JSON wrapped in
+// emitTestStatusLine writes a one-line ANSI-decorated marker to
+// stderr describing the typecalc_test outcome. Format is greppable
+// (the status word is always one of TestedPass / TestError /
+// Insufficient / Other) and mirrors the » tool-call banner style.
+// Without this, the actual test verdict was only visible by reading
+// the transcript JSON — every log triage required jq + transcript
+// path, which is fragile in parallel runs.
+func emitTestStatusLine(objectID string, out *typecalc.TypedValue) {
+	if out == nil {
+		return
+	}
+	status := "Other"
+	color := "\x1b[36m" // cyan default
+	if out.State == typecalc.StateTestedPass {
+		status = "TestedPass"
+		color = "\x1b[32m" // green
+	} else if out.Kind == typecalc.KindTestError {
+		status = "TestError"
+		color = "\x1b[31m" // red
+	} else if out.Kind == typecalc.KindInsufficient {
+		status = "Insufficient"
+		color = "\x1b[33m" // yellow
+	}
+	// Inline timestamp (avoid agent-package import → cycle).
+	// Matches agent/log.go's Stamp() format for log consistency.
+	ts := ""
+	if os.Getenv("KCPOS_NO_TIMESTAMP") == "" {
+		ts = "[" + time.Now().Format("15:04:05") + "] "
+	}
+	fmt.Fprintf(os.Stderr, "%s    %s↳ typecalc_test %s: %s\x1b[0m\n", ts, color, objectID, status)
+}
+
 // a banner line so the agent can both grep for the kind tag and parse
 // the body.
 func renderTypedValue(tv *typecalc.TypedValue) (string, error) {

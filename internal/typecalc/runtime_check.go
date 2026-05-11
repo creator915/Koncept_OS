@@ -119,15 +119,29 @@ func RuntimeCheck(g *graph.Graph, objID string) []StaticIssue {
 	for _, p := range obj.Produces {
 		producedSet[p] = true
 	}
+	// v8.6 extension: mutates ports are also pass-through. A function
+	// that mutates X is by definition reading X and writing X — so
+	// seeing the port show up in the output snapshot is equivalent
+	// proof of the input read. Pong-01/04 (v8.5) had UpdateBall /
+	// UpdatePaddle with args.0.* extractors that the harness couldn't
+	// snapshot pre-call (callArgs is undefined at input-snapshot time
+	// in the harness), but the same port DID appear post-call in
+	// outputs. The v8 carve-out only covered produces+consumes
+	// overlap; this adds mutates+consumes overlap.
+	mutatedSet := map[string]bool{}
+	for _, p := range obj.Mutates {
+		mutatedSet[p] = true
+	}
 	for _, c := range obj.Consumes {
 		if seenIn[c] {
 			continue
 		}
-		// Pass-through carve-out: if the port is also produced AND we
-		// observed an output for it, treat the consume as covered by
-		// the output observation. The function received-and-returned
-		// the value; that's enough evidence it read it.
-		if producedSet[c] && seenOutForThisCheck[c] {
+		// Pass-through carve-out: if the port is also produced OR
+		// mutated AND we observed an output for it, treat the
+		// consume as covered by the output observation. The function
+		// received-and-returned the value; that's enough evidence
+		// it read it.
+		if (producedSet[c] || mutatedSet[c]) && seenOutForThisCheck[c] {
 			continue
 		}
 		issues = append(issues, StaticIssue{
