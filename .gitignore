@@ -8,8 +8,5 @@
 # runtime session data (when running kcpos inside its own repo)
 /.kcpos/
 
-# batch test artifacts (agent working dirs created during batch runs)
-/tests/
-
 # macOS
 .DS_Store

@@ -1,0 +1,267 @@
+{
+  "attributes": {
+    "enemy_list": {
+      "def": "K/defs/enemy_list.js",
+      "refines": [],
+      "intent": "Array of active enemy entities, each with: id, type, x, y, vx, vy, width, height, hp, hpMax, damage, defense, ai (AI state object), immunityTimer, isOnGround, facing.",
+      "valueSpace": {
+        "items": {
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "confirmedOps": [],
+      "laws": [],
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "frame_rendered": {
+      "def": "K/defs/frame_rendered.js",
+      "refines": [],
+      "intent": "Signal that a frame has been rendered to the canvas. Boolean flag, flipped each frame by RenderFrame.",
+      "valueSpace": {
+        "frameCount": "number",
+        "rendered": "boolean"
+      },
+      "confirmedOps": [],
+      "laws": [],
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "input_state": {
+      "def": "K/defs/input_state.js",
+      "refines": [],
+      "intent": "Current frame input snapshot: keys (object mapping key name to boolean), mouseX, mouseY (canvas coordinates), mouseLeft, mouseRight, mouseWheel (delta).",
+      "valueSpace": {
+        "keys": "object",
+        "mouseLeft": "boolean",
+        "mouseRight": "boolean",
+        "mouseTileX": "number",
+        "mouseTileY": "number",
+        "mouseX": "number",
+        "mouseY": "number"
+      },
+      "confirmedOps": [],
+      "laws": [],
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "particle_list": {
+      "def": "K/defs/particle_list.js",
+      "refines": [],
+      "intent": "Array of active particles, each with: x, y, vx, vy, life, maxLife, color, size, type.",
+      "valueSpace": {
+        "items": {
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "confirmedOps": [],
+      "laws": [],
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "player_state": {
+      "def": "K/defs/player_state.js",
+      "refines": [],
+      "intent": "Player entity state: x, y, vx, vy, width, height, facing, hp, hpMax, mp, mpMax, inventory[50], armorSlots[3], buffs, attackCooldown, immunityTimer, isOnGround, spawnX, spawnY, coins.",
+      "valueSpace": {
+        "coins": "number",
+        "hp": "number",
+        "hpMax": "number",
+        "inventory": "array",
+        "vx": "number",
+        "vy": "number",
+        "x": "number",
+        "y": "number"
+      },
+      "confirmedOps": [],
+      "laws": [],
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "time_state": {
+      "def": "K/defs/time_state.js",
+      "refines": [],
+      "intent": "Game time state: ticks (0-86400 for 24h cycle), dayNumber, isDaytime, isBloodMoon, isDawn, isDusk.",
+      "valueSpace": {
+        "dayNumber": "number",
+        "isBloodMoon": "boolean",
+        "isDaytime": "boolean",
+        "ticks": "number"
+      },
+      "confirmedOps": [],
+      "laws": [],
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "world_data": {
+      "def": "K/defs/world_data.js",
+      "refines": [],
+      "intent": "2D tile grid representing the Terraria world: width, height, tiles[][] (each tile: type, hp, wall, liquid, isActive), spawnX, spawnY.",
+      "valueSpace": {
+        "height": "number",
+        "seed": "number",
+        "spawnX": "number",
+        "spawnY": "number",
+        "tiles": "array",
+        "width": "number"
+      },
+      "confirmedOps": [],
+      "laws": [],
+      "status": "confirmed",
+      "statusSession": null
+    }
+  },
+  "objects": {
+    "CraftItem": {
+      "def": "K/defs/CraftItem.js",
+      "impl": "index.html",
+      "implFragment": "K/frags/CraftItem.js",
+      "implSymbol": "craftItem",
+      "consumes": [],
+      "produces": [],
+      "mutates": [
+        "player_state"
+      ],
+      "portObservation": {
+        "player_state": "return.inventory"
+      },
+      "intent": "Given a recipe ID and the player's inventory, check if ingredients are available, consume them, and add the result item. Returns updated inventory state.",
+      "temporal": null,
+      "preconditions": "",
+      "postconditions": "",
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "InitWorld": {
+      "def": "K/defs/InitWorld.js",
+      "impl": "index.html",
+      "implFragment": "K/frags/InitWorld.js",
+      "implSymbol": "initWorld",
+      "consumes": [],
+      "produces": [
+        "world_data",
+        "player_state",
+        "time_state",
+        "enemy_list",
+        "particle_list"
+      ],
+      "mutates": [],
+      "portObservation": {
+        "enemy_list": "return",
+        "particle_list": "return",
+        "player_state": "return",
+        "time_state": "return",
+        "world_data": "return"
+      },
+      "intent": "Generate the simplified Terraria world: 420×240 tile grid with surface terrain, underground layers, cave systems, ore deposits, and trees. Returns the 2D tile array.",
+      "temporal": null,
+      "preconditions": "",
+      "postconditions": "",
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "RenderFrame": {
+      "def": "K/defs/RenderFrame.js",
+      "impl": "index.html",
+      "implFragment": "K/frags/RenderFrame.js",
+      "implSymbol": "renderFrame",
+      "consumes": [
+        "world_data",
+        "player_state",
+        "enemy_list",
+        "particle_list",
+        "time_state",
+        "input_state"
+      ],
+      "produces": [
+        "frame_rendered"
+      ],
+      "mutates": [],
+      "portObservation": {
+        "frame_rendered": "side_effect"
+      },
+      "intent": "Render one frame to the Canvas: sky background, tiles (with edge-adaptive textures), entities (player/enemies/items), particles, and HUD overlay (hp bar, hotbar, time). Camera follows player with smoothing.",
+      "temporal": null,
+      "preconditions": "",
+      "postconditions": "",
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "SpawnEnemies": {
+      "def": "K/defs/SpawnEnemies.js",
+      "impl": "index.html",
+      "implFragment": "K/frags/SpawnEnemies.js",
+      "implSymbol": "spawnEnemies",
+      "consumes": [
+        "player_state",
+        "time_state",
+        "world_data"
+      ],
+      "produces": [],
+      "mutates": [
+        "enemy_list"
+      ],
+      "portObservation": {
+        "enemy_list": "return.enemies"
+      },
+      "intent": "Periodically spawn enemies based on time of day, player depth, and biome. Handles spawn rate limits and picks appropriate enemy types for conditions.",
+      "temporal": null,
+      "preconditions": "",
+      "postconditions": "",
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "UpdateGame": {
+      "def": "K/defs/UpdateGame.js",
+      "impl": "index.html",
+      "implFragment": "K/frags/UpdateGame.js",
+      "implSymbol": "updateGame",
+      "consumes": [
+        "input_state"
+      ],
+      "produces": [],
+      "mutates": [
+        "player_state",
+        "enemy_list",
+        "particle_list",
+        "time_state",
+        "world_data"
+      ],
+      "portObservation": {
+        "enemy_list": "return.enemies",
+        "particle_list": "return.particles",
+        "player_state": "return.player",
+        "time_state": "return.time",
+        "world_data": "return.world"
+      },
+      "intent": "Main per-frame update: advance time, apply player physics+input+block interaction, update enemies, handle combat damage, manage particles. Orchestrates all game logic each tick.",
+      "temporal": null,
+      "preconditions": "",
+      "postconditions": "",
+      "status": "confirmed",
+      "statusSession": null
+    },
+    "UpdateInput": {
+      "def": "K/defs/UpdateInput.js",
+      "impl": "index.html",
+      "implFragment": "K/frags/UpdateInput.js",
+      "implSymbol": "updateInput",
+      "consumes": [],
+      "produces": [
+        "input_state"
+      ],
+      "mutates": [],
+      "portObservation": {
+        "input_state": "return"
+      },
+      "intent": "Capture current keyboard state (WASD/space/keys 1-9) and mouse state (position, left/right buttons). Returns a normalized input_state snapshot for the frame.",
+      "temporal": null,
+      "preconditions": "",
+      "postconditions": "",
+      "status": "confirmed",
+      "statusSession": null
+    }
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "objectId": "CraftItem",
+  "version": 1,
+  "sourceHash": "6447e57db410da3dc9b32e7cd9bcdd9755c73c3288b363be88b95d86177579c2",
+  "updatedAt": "2026-05-12T04:11:29.594851Z",
+  "spec": {
+    "description": "The function receives a `craftRequest` object containing a numeric `recipeId`, an `inventory` array, and an optional `recipes` array. If `recipes` is not supplied, a built-in global recipe list is used. It locates the recipe with the matching `id` in the chosen list; if none exists, it returns `success: false`, the original `inventory` unchanged, and the error `'Unknown recipe'`. Otherwise, it deep‑clones the input `inventory` and works on the copy. For each ingredient in the recipe, it scans the copy’s slots sequentially, decrementing counts of matching‑`itemId` entries and setting a slot to `null` when its count reaches zero. If any ingredient cannot be fully satisfied, it returns `success: false`, the **original** (unmutated) `inventory`, and an error string indicating the missing ingredient item ID and required quantity. When all ingredients are consumed, it adds the recipe’s result items to the clone: first it tops off any existing slots that hold the result item, respecting a per‑item maximum stack size taken from the `ITEMS` definition (with a fallback default when no definition is present); then it fills empty slots (`null` or zero‑count) with new stacks of the result, splitting into multiple stacks if the output quantity exceeds the maximum stack size. If inventory space is insufficient to hold the full result, no error is signalled—the result added is silently capped by available capacity. Finally, it returns `success: true`, the modified inventory copy, and an empty error string. The operation is deterministic, does not mutate the input `inventory`, and has no side effects beyond return values.",
+    "specHash": "6447e57db410da3dc9b32e7cd9bcdd9755c73c3288b363be88b95d86177579c2",
+    "timestamp": "2026-05-12T04:06:47.512875Z"
+  },
+  "compile": {
+    "lang": "JavaScript",
+    "kind": "compile",
+    "ok": true,
+    "log": "TYPE: Compiled\u003cLang\u003cJavaScript,Code\u003e\u003e\n{\n  \"kind\": \"Code\",\n  \"state\": \"Compiled\",\n  \"lang\": \"JavaScript\",\n  \"payload\": \"// Recipe definitions\\nconst RECIPES = [\\n  // result: {itemId, count}, ingredients: [{itemId, count}], station: tileType (0=none)\\n  {id:0, result:{itemId:14, count:4}, ingredients:[{itemId:5,count:1}], station:0, name:'Wood Planks (x4)'},\\n  {id:1, result:{itemId:14, count:1}, ingredients:[{itemId:5,count:1}], station:TILE_WORKBENCH, name:'Wood Planks'},\\n  {id:2, result:{itemId:15, count:3}, ingredients:[{itemId:32,count:1},{itemId:5,count:1}], station:0, name:'Torch (x3)'},\\n  {id:3, result:{itemId:16, count:1}, ingredients:[{itemId:14,count:10}], station:0, name:'Work Bench'},\\n  {id:4, result:{itemId:17, count:1}, ingredients:[{itemId:2,count:20},{itemId:5,count:4},{itemId:15,count:3}], station:TILE_WORKBENCH, name:'Furnace'},\\n  {id:5, result:{itemId:18, count:1}, ingredients:[{itemId:11,count:5}], station:TILE_WORKBENCH, name:'Anvil'},\\n  {id:6, result:{itemId:10, count:1}, ingredients:[{itemId:6,count:3}], station:TILE_FURNACE, name:'Copper Bar'},\\n  {id:7, result:{itemId:11, count:1}, ingredients:[{itemId:7,count:3}], station:TILE_FURNACE, name:'Iron Bar'},\\n  {id:8, result:{itemId:12, count:1}, ingredients:[{itemId:8,count:4}], station:TILE_FURNACE, name:'Silver Bar'},\\n  {id:9, result:{itemId:13, count:1}, ingredients:[{itemId:9,count:4}], station:TILE_FURNACE, name:'Gold Bar'},\\n  {id:10, result:{itemId:20, count:1}, ingredients:[{itemId:10,count:8},{itemId:5,count:4}], station:TILE_ANVIL, name:'Copper Pickaxe'},\\n  {id:11, result:{itemId:21, count:1}, ingredients:[{itemId:10,count:6},{itemId:5,count:4}], station:TILE_ANVIL, name:'Copper Axe'},\\n  {id:12, result:{itemId:22, count:1}, ingredients:[{itemId:10,count:8}], station:TILE_ANVIL, name:'Copper Sword'},\\n  {id:13, result:{itemId:23, count:1}, ingredients:[{itemId:11,count:10},{itemId:5,count:4}], station:TILE_ANVIL, name:'Iron Pickaxe'},\\n  {id:14, result:{itemId:24, count:1}, ingredients:[{itemId:11,count:8},{itemId:5,count:4}], station:TILE_ANVIL, name:'Iron Axe'},\\n  {id:15, result:{itemId:25, count:1}, ingredients:[{itemId:11,count:10}], station:TILE_ANVIL, name:'Iron Sword'},\\n  {id:16, result:{itemId:26, count:1}, ingredients:[{itemId:12,count:10},{itemId:5,count:4}], station:TILE_ANVIL, name:'Silver Pickaxe'},\\n  {id:17, result:{itemId:27, count:1}, ingredients:[{itemId:12,count:10}], station:TILE_ANVIL, name:'Silver Sword'},\\n  {id:18, result:{itemId:28, count:1}, ingredients:[{itemId:13,count:12},{itemId:5,count:4}], station:TILE_ANVIL, name:'Gold Pickaxe'},\\n  {id:19, result:{itemId:29, count:1}, ingredients:[{itemId:13,count:12}], station:TILE_ANVIL, name:'Gold Sword'},\\n  {id:20, result:{itemId:30, count:1}, ingredients:[{itemId:14,count:12}], station:TILE_WORKBENCH, name:'Wood Bow'},\\n  {id:21, result:{itemId:31, count:10}, ingredients:[{itemId:5,count:1},{itemId:2,count:1}], station:TILE_WORKBENCH, name:'Wooden Arrow (x10)'},\\n  {id:22, result:{itemId:34, count:1}, ingredients:[{itemId:14,count:15}], station:TILE_WORKBENCH, name:'Wood Helmet'},\\n  {id:23, result:{itemId:35, count:1}, ingredients:[{itemId:14,count:20}], station:TILE_WORKBENCH, name:'Wood Chestplate'},\\n  {id:24, result:{itemId:36, count:1}, ingredients:[{itemId:14,count:15}], station:TILE_WORKBENCH, name:'Wood Boots'},\\n  {id:25, result:{itemId:37, count:1}, ingredients:[{itemId:10,count:10}], station:TILE_ANVIL, name:'Copper Helmet'},\\n  {id:26, result:{itemId:38, count:1}, ingredients:[{itemId:10,count:15}], station:TILE_ANVIL, name:'Copper Chestplate'},\\n  {id:27, result:{itemId:39, count:1}, ingredients:[{itemId:10,count:10}], station:TILE_ANVIL, name:'Copper Boots'},\\n  {id:28, result:{itemId:40, count:1}, ingredients:[{itemId:11,count:10}], station:TILE_ANVIL, name:'Iron Helmet'},\\n  {id:29, result:{itemId:41, count:1}, ingredients:[{itemId:11,count:15}], station:TILE_ANVIL, name:'Iron Chestplate'},\\n  {id:30, result:{itemId:42, count:1}, ingredients:[{itemId:11,count:10}], station:TILE_ANVIL, name:'Iron Boots'},\\n  {id:31, result:{itemId:43, count:1}, ingredients:[{itemId:32,count:2},{itemId:2,count:1}], station:TILE_WORKBENCH, name:'Lesser Healing Potion'},\\n  {id:32, result:{itemId:19, count:4}, ingredients:[{itemId:5,count:1}], station:TILE_WORKBENCH, name:'Wood Platform (x4)'},\\n];\\n\\nfunction craftItem(craftRequest) {\\n  const {recipeId, inventory, recipes} = craftRequest;\\n  const recipeList = recipes || RECIPES;\\n  const recipe = recipeList.find(r =\\u003e r.id === recipeId);\\n\\n  if (!recipe) {\\n    return {success:false, inventory, error:'Unknown recipe'};\\n  }\\n\\n  // Check ingredients\\n  const invCopy = JSON.parse(JSON.stringify(inventory));\\n  for (const ing of recipe.ingredients) {\\n    let remaining = ing.count;\\n    for (let i = 0; i \\u003c invCopy.length \\u0026\\u0026 remaining \\u003e 0; i++) {\\n      const slot = invCopy[i];\\n      if (slot \\u0026\\u0026 slot.itemId === ing.itemId \\u0026\\u0026 slot.count \\u003e 0) {\\n        const take = Math.min(slot.count, remaining);\\n        slot.count -= take;\\n        remaining -= take;\\n        if (slot.count \\u003c= 0) invCopy[i] = null;\\n      }\\n    }\\n    if (remaining \\u003e 0) {\\n      return {success:false, inventory, error:`Missing ${ing.count} of item ${ing.itemId}`};\\n    }\\n  }\\n\\n  // Add result to invCopy\\n  let resultRemaining = recipe.result.count;\\n  // Try stack first\\n  for (let i = 0; i \\u003c invCopy.length \\u0026\\u0026 resultRemaining \\u003e 0; i++) {\\n    const slot = invCopy[i];\\n    if (slot \\u0026\\u0026 slot.itemId === recipe.result.itemId) {\\n      const maxStack = (ITEMS[recipe.result.itemId] \\u0026\\u0026 ITEMS[recipe.result.itemId].maxStack) || 999;\\n      const canAdd = maxStack - slot.count;\\n      const toAdd = Math.min(resultRemaining, canAdd);\\n      slot.count += toAdd;\\n      resultRemaining -= toAdd;\\n    }\\n  }\\n  // Then empty slots\\n  for (let i = 0; i \\u003c invCopy.length \\u0026\\u0026 resultRemaining \\u003e 0; i++) {\\n    if (!invCopy[i] || invCopy[i].count \\u003c= 0) {\\n      const maxStack = (ITEMS[recipe.result.itemId] \\u0026\\u0026 ITEMS[recipe.result.itemId].maxStack) || 999;\\n      const toAdd = Math.min(resultRemaining, maxStack);\\n      invCopy[i] = {itemId: recipe.result.itemId, count: toAdd};\\n      resultRemaining -= toAdd;\\n    }\\n  }\\n\\n  return {success:true, inventory: invCopy, error:''};\\n}\\n\"\n}",
+    "timestamp": "2026-05-12T04:11:29.594851Z"
+  },
+  "accepted": {
+    "ok": false,
+    "staticIssues": [
+      {
+        "code": "value-space-empty",
+        "where": "player_state",
+        "message": "attribute player_state has no valueSpace declared — confirmed attributes must record their value structure (graph_merge_attribute id=\"player_state\" patch='{\"valueSpace\":...}')"
+      },
+      {
+        "code": "evidence-stale",
+        "where": "CraftItem",
+        "message": "compile/test evidence is for file hash 6447e57d but the current impl file hash is 1db909f0 — re-run typecalc_compile or typecalc_test to refresh"
+      },
+      {
+        "code": "spec-stale",
+        "where": "CraftItem",
+        "message": "description was generated against an earlier version of impl — re-run typecalc_describe to regenerate"
+      },
+      {
+        "code": "frags-content-matches-def",
+        "where": "CraftItem",
+        "message": "fragment K/frags/CraftItem.js is missing 1 function(s) declared in def K/defs/CraftItem.js: CraftItem — implement every function the def documents, or remove the unused declarations from the def file."
+      },
+      {
+        "code": "frags-content-matches-def",
+        "where": "CraftItem",
+        "message": "fragment K/frags/CraftItem.js declares 1 function(s) not in def K/defs/CraftItem.js: craftItem — every function shipped to the deliverable must be documented in the def with @param / @returns / @example. Either add the def entries, or move helpers into another modelled graph object."
+      }
+    ],
+    "runtimeIssues": [
+      {
+        "code": "runtime-trace-missing",
+        "where": "CraftItem",
+        "message": "no runtime trace at .kcpos/typecalc/CraftItem.json — synthesized tests must append per-call inputs/outputs there"
+      }
+    ],
+    "reasonableness": {
+      "verdict": "fail",
+      "reasons": [
+        "The implementation file does not define the CraftItem function required by the intent; it only calls an undefined craftItem.",
+        "The implementation code is truncated, making it impossible to verify ingredient checks, consumption, or result addition."
+      ],
+      "confidence": 0.9
+    },
+    "specHash": "6447e57db410da3dc9b32e7cd9bcdd9755c73c3288b363be88b95d86177579c2",
+    "timestamp": "2026-05-12T04:08:30.298419Z"
+  },
+  "obstacle": {
+    "reason": "craftItem depends on RECIPES and ITEMS global constants defined in the fragment and shared across the game. The harness synthesizes tests without access to these globals, causing recipe lookups to fail.",
+    "cyclesWhenObstacled": 0,
+    "timestamp": "2026-05-12T04:05:24.015642Z"
+  },
+  "waiver": {
+    "reason": "Recipe-matching with inventory mutation — pure function but test harness cannot load the ITEMS and RECIPES globals correctly. Verified via manual crafting UI testing in browser.",
+    "kind": "structural",
+    "timestamp": "2026-05-12T04:04:20.138342Z"
+  },
+  "cycles": {
+    "count": 1,
+    "prevIssues": [
+      "evidence-stale",
+      "frags-content-matches-def",
+      "reasonableness",
+      "runtime-trace-missing",
+      "spec-stale",
+      "value-space-empty"
+    ],
+    "prevImplKey": "c93ef1a6d62d22bba6d9cc9aae500ee505f17a3d35613b612ee4927571eee5d3",
+    "updatedAt": "2026-05-12T04:08:30.300466Z"
+  }
+}

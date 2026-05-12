@@ -1,0 +1,125 @@
+{
+  "objectId": "RenderFrame",
+  "version": 1,
+  "sourceHash": "642de7b748faea7ecf48b2500efa23dd2becb0198103f6bb641b9cd0843b33b6",
+  "updatedAt": "2026-05-12T04:11:29.591517Z",
+  "spec": {
+    "description": "The function renders a complete frame onto the provided canvas context, using the fields of the renderState object. It first fills the entire canvas with a sky color derived from the current time-of-day (interpolating between predefined dawn, day, dusk, and night colors). If it is not daytime, a set of star points is drawn; each star’s position follows a deterministic pattern that includes a parallax offset from the camera, and its opacity oscillates over time based on the tick counter. A sun circle (for daytime) or moon circle (otherwise) is then drawn, its location determined by the fraction of the daily cycle. Tiles from the world grid that lie within the camera viewport are drawn as colored rectangles of a constant grid size; grass, torch, and chest tiles receive additional graphical markings, and ore tiles have a random chance per frame to show a few small bright specks. Each enemy is rendered according to its type definition: slimes as ellipses, flyers as rectangles with flapping side attachments, and walkers as plain rectangles; if an enemy is damaged, a health bar is drawn above it. The player character is drawn with a yellow body, head, brown boots, white eyes, and—if an immunity timer is active—the player’s alpha is toggled to create a blinking effect; when the player holds a sword item and the attack cooldown is above a threshold, an arc indicating a swing is drawn. All active particles are rendered at their positions with alpha proportional to remaining life. If the left mouse button is held, the targeted tile (if within a bounded range and active) is outlined in yellow. Finally, a heads‑up display is drawn: a health bar at the bottom‑left (fixed pixel width, colored green/yellow/red according to the health fraction and labeled with current and maximum hp), a text showing the day number and whether it is day or night at the top‑right, and a hotbar at the bottom‑center. The hotbar contains a fixed number of inventory slots; the active slot is highlighted with a gold border, and each slot displays a truncated item name and stack count. A coin counter is drawn near the health bar. Throughout the rendering, the global alpha is temporarily modified for stars and certain entity effects and is reset to full opacity after each group.",
+    "specHash": "642de7b748faea7ecf48b2500efa23dd2becb0198103f6bb641b9cd0843b33b6",
+    "timestamp": "2026-05-12T04:07:26.316273Z"
+  },
+  "compile": {
+    "lang": "JavaScript",
+    "kind": "compile",
+    "ok": true,
+    "log": "TYPE: Compiled\u003cLang\u003cJavaScript,Code\u003e\u003e\n{\n  \"kind\": \"Code\",\n  \"state\": \"Compiled\",\n  \"lang\": \"JavaScript\",\n  \"payload\": \"// Tile type refs (must match)\\nvar TILE_AIR=0,TILE_DIRT=1,TILE_STONE=2,TILE_GRASS=3,TILE_SAND=4,TILE_CLAY=5;\\nvar TILE_COPPER=6,TILE_IRON=7,TILE_SILVER=8,TILE_GOLD=9,TILE_WOOD=10,TILE_LEAVES=11;\\nvar TILE_PLANKS=12,TILE_TORCH=13,TILE_WORKBENCH=14,TILE_FURNACE=15,TILE_ANVIL=16,TILE_CHEST=17,TILE_PLATFORM=18;\\n\\nvar TILE_COLORS = {};\\nTILE_COLORS[1]='#8B5E3C';TILE_COLORS[2]='#808080';TILE_COLORS[3]='#4CAF50';TILE_COLORS[4]='#F4D03F';\\nTILE_COLORS[5]='#C0392B';TILE_COLORS[6]='#E67E22';TILE_COLORS[7]='#95A5A6';TILE_COLORS[8]='#BDC3C7';\\nTILE_COLORS[9]='#F1C40F';TILE_COLORS[10]='#A0522D';TILE_COLORS[11]='#2E7D32';TILE_COLORS[12]='#C49A6C';\\nTILE_COLORS[13]='#FFEB3B';TILE_COLORS[14]='#BCAAA4';TILE_COLORS[15]='#616161';TILE_COLORS[16]='#757575';\\nTILE_COLORS[17]='#8D6E63';TILE_COLORS[18]='#A1887F';\\n\\nvar ENEMY_DEFS = {\\n  0:{name:'Green Slime',hp:14,damage:6,defense:2,width:14,height:12,ai:'slime',color:'#4caf50'},\\n  1:{name:'Zombie',hp:45,damage:14,defense:4,width:14,height:24,ai:'walker',color:'#8d6e63'},\\n  2:{name:'Flying Eye',hp:60,damage:18,defense:6,width:16,height:16,ai:'flyer',color:'#b71c1c'},\\n  3:{name:'Blue Slime',hp:25,damage:8,defense:3,width:14,height:12,ai:'slime',color:'#2196f3'},\\n  4:{name:'Skeleton',hp:60,damage:20,defense:8,width:14,height:26,ai:'walker',color:'#e0e0e0'},\\n  5:{name:'Cave Bat',hp:16,damage:12,defense:2,width:12,height:10,ai:'flyer',color:'#5d4037'},\\n};\\n\\nvar ITEMS = {\\n  0:{name:'Copper Coin',maxStack:999},1:{name:'Dirt Block',maxStack:999},2:{name:'Stone Block',maxStack:999},\\n  3:{name:'Sand Block',maxStack:999},4:{name:'Clay Block',maxStack:999},5:{name:'Wood',maxStack:999},\\n  6:{name:'Copper Ore',maxStack:999},7:{name:'Iron Ore',maxStack:999},8:{name:'Silver Ore',maxStack:999},\\n  9:{name:'Gold Ore',maxStack:999},10:{name:'Copper Bar',maxStack:99},11:{name:'Iron Bar',maxStack:99},\\n  12:{name:'Silver Bar',maxStack:99},13:{name:'Gold Bar',maxStack:99},14:{name:'Wood Planks',maxStack:999},\\n  15:{name:'Torch',maxStack:99},16:{name:'Work Bench',maxStack:99},17:{name:'Furnace',maxStack:99},\\n  18:{name:'Anvil',maxStack:99},19:{name:'Wood Platform',maxStack:999},\\n  20:{name:'Copper Pickaxe',maxStack:1,type:'pickaxe'},21:{name:'Copper Axe',maxStack:1,type:'axe'},\\n  22:{name:'Copper Sword',maxStack:1,type:'sword'},23:{name:'Iron Pickaxe',maxStack:1,type:'pickaxe'},\\n  24:{name:'Iron Axe',maxStack:1,type:'axe'},25:{name:'Iron Sword',maxStack:1,type:'sword'},\\n  26:{name:'Silver Pickaxe',maxStack:1,type:'pickaxe'},27:{name:'Silver Sword',maxStack:1,type:'sword'},\\n  28:{name:'Gold Pickaxe',maxStack:1,type:'pickaxe'},29:{name:'Gold Sword',maxStack:1,type:'sword'},\\n  30:{name:'Wood Bow',maxStack:1,type:'bow'},31:{name:'Wooden Arrow',maxStack:999,type:'ammo'},\\n  32:{name:'Gel',maxStack:99},33:{name:'Lens',maxStack:99},\\n  34:{name:'Wood Helmet',maxStack:1,type:'helmet'},35:{name:'Wood Chestplate',maxStack:1,type:'chestplate'},\\n  36:{name:'Wood Boots',maxStack:1,type:'boots'},37:{name:'Copper Helmet',maxStack:1,type:'helmet'},\\n  38:{name:'Copper Chestplate',maxStack:1,type:'chestplate'},39:{name:'Copper Boots',maxStack:1,type:'boots'},\\n  40:{name:'Iron Helmet',maxStack:1,type:'helmet'},41:{name:'Iron Chestplate',maxStack:1,type:'chestplate'},\\n  42:{name:'Iron Boots',maxStack:1,type:'boots'},43:{name:'Lesser Healing Potion',maxStack:30,type:'potion'},\\n};\\n\\nvar SKY_DAY='#87CEEB', SKY_NIGHT='#1a1a2e', SKY_DAWN='#FF7F50', SKY_DUSK='#FF6347';\\n\\nconst interpolateColor = (c1, c2, t) =\\u003e {\\n  t=Math.max(0,Math.min(1,t));\\n  const r1=parseInt(c1.slice(1,3),16),g1=parseInt(c1.slice(3,5),16),b1=parseInt(c1.slice(5,7),16);\\n  const r2=parseInt(c2.slice(1,3),16),g2=parseInt(c2.slice(3,5),16),b2=parseInt(c2.slice(5,7),16);\\n  return '#'+[Math.round(r1+(r2-r1)*t),Math.round(g1+(g2-g1)*t),Math.round(b1+(b2-b1)*t)].map(v=\\u003ev.toString(16).padStart(2,'0')).join('');\\n};\\n\\nconst getSkyColor = (time) =\\u003e {\\n  const t=time.ticks/time.dayLength;\\n  if(time.isDawn)return interpolateColor(SKY_NIGHT,SKY_DAWN,(t%0.02)/0.02);\\n  if(time.isDusk)return interpolateColor(SKY_DUSK,SKY_NIGHT,((t-0.53)%0.02)/0.02);\\n  if(time.isDaytime){if(t\\u003c0.1)return interpolateColor(SKY_DAWN,SKY_DAY,t/0.1);if(t\\u003e0.45)return interpolateColor(SKY_DAY,SKY_DUSK,(t-0.45)/0.08);return SKY_DAY;}\\n  return SKY_NIGHT;\\n};\\n\\nfunction renderFrame(rs) {\\n  const {ctx,world,player,enemies,particles,time,input,camera,canvasWidth,canvasHeight}=rs;\\n  const TS=16;\\n  ctx.fillStyle=getSkyColor(time); ctx.fillRect(0,0,canvasWidth,canvasHeight);\\n  // Stars\\n  if(!time.isDaytime){ctx.fillStyle='#fff';const sox=camera.x*0.1;for(let i=0;i\\u003c80;i++){const sx=((i*137+50)%canvasWidth+sox)%canvasWidth,sy=(i*73+20)%(canvasHeight*0.6);ctx.globalAlpha=0.3+0.7*Math.abs(Math.sin(time.ticks*0.01+i));ctx.fillRect(sx,sy,1.5,1.5);}ctx.globalAlpha=1;}\\n  // Sun/Moon\\n  const df=time.ticks/time.dayLength;\\n  if(time.isDaytime){const sx=canvasWidth*0.5+Math.cos(df*Math.PI*2)*canvasWidth*0.4,sy=canvasHeight*0.5-Math.sin(df*Math.PI*2)*canvasHeight*0.35;ctx.fillStyle='#FFD700';ctx.beginPath();ctx.arc(sx,sy,18,0,Math.PI*2);ctx.fill();}\\n  else{const sx=canvasWidth*0.5+Math.cos(df*Math.PI*2)*canvasWidth*0.4,sy=canvasHeight*0.5-Math.sin(df*Math.PI*2)*canvasHeight*0.35;ctx.fillStyle='#F5F5DC';ctx.beginPath();ctx.arc(sx,sy,14,0,Math.PI*2);ctx.fill();}\\n  // Tiles\\n  const sTX=Math.max(0,Math.floor(camera.x/TS)-1),eTX=Math.min(world.width-1,Math.floor((camera.x+canvasWidth)/TS)+1);\\n  const sTY=Math.max(0,Math.floor(camera.y/TS)-1),eTY=Math.min(world.height-1,Math.floor((camera.y+canvasHeight)/TS)+1);\\n  for(let tx=sTX;tx\\u003c=eTX;tx++)for(let ty=sTY;ty\\u003c=eTY;ty++){\\n    const tile=world.tiles[tx][ty];if(!tile||!tile.isActive)continue;\\n    const sx=tx*TS-camera.x,sy=ty*TS-camera.y;if(sx+TS\\u003c0||sx\\u003ecanvasWidth||sy+TS\\u003c0||sy\\u003ecanvasHeight)continue;\\n    ctx.fillStyle=TILE_COLORS[tile.type]||'#888';ctx.fillRect(sx,sy,TS,TS);\\n    ctx.strokeStyle='rgba(0,0,0,0.15)';ctx.strokeRect(sx,sy,TS,TS);\\n    if(tile.type===TILE_GRASS){ctx.fillStyle='#66BB6A';ctx.fillRect(sx,sy,TS,3);}\\n    else if(tile.type===TILE_TORCH){ctx.fillStyle='#FF9800';ctx.fillRect(sx+6,sy+2,4,6);ctx.fillStyle='#FFEB3B';ctx.fillRect(sx+7,sy+1,2,4);}\\n    else if(tile.type===TILE_CHEST){ctx.fillStyle='#FFD700';ctx.fillRect(sx+4,sy+4,8,3);}\\n    if(tile.type===TILE_COPPER||tile.type===TILE_IRON||tile.type===TILE_SILVER||tile.type===TILE_GOLD){if(Math.random()\\u003c0.05){ctx.fillStyle='rgba(255,255,255,0.5)';ctx.fillRect(sx+Math.random()*12,sy+Math.random()*12,2,2);}}\\n  }\\n  // Enemies\\n  for(const en of enemies){\\n    if(en.hp\\u003c=0)continue;const sx=en.x-en.width/2-camera.x,sy=en.y-en.height/2-camera.y;\\n    if(sx+en.width\\u003c0||sx\\u003ecanvasWidth||sy+en.height\\u003c0||sy\\u003ecanvasHeight)continue;\\n    const def=ENEMY_DEFS[en.type],color=def?def.color:'#f00',hpF=en.hp/en.hpMax;\\n    ctx.fillStyle=color;\\n    if(def\\u0026\\u0026def.ai==='slime'){ctx.beginPath();ctx.ellipse(sx+en.width/2,sy+en.height*0.7,en.width/2,en.height*0.5,0,0,Math.PI*2);ctx.fill();}\\n    else if(def\\u0026\\u0026def.ai==='flyer'){ctx.fillRect(sx+2,sy+2,en.width-4,en.height-4);ctx.fillStyle='rgba(255,255,255,0.3)';const wf=Math.sin(time.ticks*0.3)*4;ctx.fillRect(sx-2,sy-2+wf,4,en.height/2);ctx.fillRect(sx+en.width-2,sy-2-wf,4,en.height/2);}\\n    else{ctx.fillRect(sx,sy,en.width,en.height);ctx.fillRect(sx+2,sy-4,en.width-4,6);}\\n    ctx.fillStyle='#fff';const ex=en.facing\\u003e0?sx+en.width-5:sx+3;ctx.fillRect(ex,sy+3,3,3);ctx.fillStyle='#000';ctx.fillRect(ex+1,sy+4,1,1);\\n    if(hpF\\u003c1){const bw=en.width,bh=3,by=sy-8;ctx.fillStyle='#400';ctx.fillRect(sx,by,bw,bh);ctx.fillStyle=hpF\\u003e0.5?'#0f0':hpF\\u003e0.25?'#ff0':'#f00';ctx.fillRect(sx,by,bw*hpF,bh);}\\n  }\\n  // Player\\n  {\\n    const sx=player.x-player.width/2-camera.x,sy=player.y-player.height/2-camera.y;\\n    if(player.immunityTimer\\u003e0\\u0026\\u0026Math.floor(player.immunityTimer/4)%2===0)ctx.globalAlpha=0.4;\\n    ctx.fillStyle='#FFD54F';ctx.fillRect(sx+2,sy+8,player.width-4,player.height-12);\\n    ctx.fillStyle='#FFCC80';ctx.fillRect(sx+3,sy,player.width-6,10);\\n    ctx.fillStyle='#fff';const ex=player.facing\\u003e0?sx+player.width-6:sx+3;ctx.fillRect(ex,sy+2,4,3);ctx.fillStyle='#000';ctx.fillRect(ex+1,sy+3,2,1);\\n    ctx.fillStyle='#5D4037';ctx.fillRect(sx+3,sy+player.height-6,6,6);ctx.fillRect(sx+player.width-9,sy+player.height-6,6,6);\\n    const ss=player.inventory[player.hotbarSlot];if(ss\\u0026\\u0026ss.count\\u003e0){const it=ITEMS[ss.itemId];if(it\\u0026\\u0026it.type==='sword'\\u0026\\u0026player.attackCooldown\\u003e12){ctx.strokeStyle='#ccc';ctx.lineWidth=2;const sa=player.facing\\u003e0?-0.5:Math.PI+0.5;ctx.beginPath();ctx.arc(sx+player.width/2,sy+player.height/2,20,sa,sa+1.5);ctx.stroke();}}\\n    ctx.globalAlpha=1;\\n  }\\n  // Particles\\n  for(const p of particles){const sx=p.x-camera.x,sy=p.y-camera.y;if(sx\\u003c-4||sx\\u003ecanvasWidth+4||sy\\u003c-4||sy\\u003ecanvasHeight+4)continue;ctx.fillStyle=p.color;ctx.globalAlpha=Math.max(0,p.life/p.maxLife);ctx.fillRect(sx-p.size/2,sy-p.size/2,p.size,p.size);}\\n  ctx.globalAlpha=1;\\n  // Target indicator\\n  if(input.mouseLeft){const tx=input.mouseTileX,ty=input.mouseTileY,sx=tx*TS-camera.x,sy=ty*TS-camera.y;if(Math.sqrt((tx*TS+TS/2-player.x)**2+(ty*TS+TS/2-player.y)**2)\\u003cTS*5\\u0026\\u0026tx\\u003e=0\\u0026\\u0026tx\\u003cworld.width\\u0026\\u0026ty\\u003e=0\\u0026\\u0026ty\\u003cworld.height\\u0026\\u0026world.tiles[tx][ty].isActive){ctx.strokeStyle='#ff0';ctx.lineWidth=2;ctx.strokeRect(sx,sy,TS,TS);}}\\n  // HUD\\n  const hx=10,hy=canvasHeight-60;ctx.fillStyle='rgba(0,0,0,0.6)';ctx.fillRect(hx-2,hy-2,204,24);ctx.fillStyle='#600';ctx.fillRect(hx,hy,200,12);\\n  const hpf=player.hp/player.hpMax;ctx.fillStyle=hpf\\u003e0.5?'#0f0':hpf\\u003e0.25?'#ff0':'#f00';ctx.fillRect(hx,hy,200*hpf,12);\\n  ctx.fillStyle='#fff';ctx.font='10px monospace';ctx.fillText('HP: '+Math.ceil(player.hp)+'/'+player.hpMax,hx+4,hy+10);\\n  ctx.fillText((time.isDaytime?'Day ':'Night ')+time.dayNumber,canvasWidth-120,20);\\n  // Hotbar\\n  const bx=canvasWidth/2-160,by=canvasHeight-40;ctx.fillStyle='rgba(0,0,0,0.7)';ctx.fillRect(bx-2,by-2,324,38);\\n  for(let i=0;i\\u003c10;i++){const sx=bx+i*32,slot=player.inventory[i];if(i===player.hotbarSlot){ctx.strokeStyle='#FFD700';ctx.lineWidth=2;ctx.strokeRect(sx,by,32,34);}ctx.strokeStyle='#555';ctx.lineWidth=1;ctx.strokeRect(sx,by,32,34);if(slot\\u0026\\u0026slot.count\\u003e0){const it=ITEMS[slot.itemId];if(it){ctx.fillStyle='#fff';ctx.font='7px monospace';ctx.fillText(it.name.substring(0,8),sx+2,by+12);ctx.fillText(''+slot.count,sx+2,by+28);}}}\\n  ctx.fillStyle='#F1C40F';ctx.font='12px monospace';ctx.fillText('Coins: '+player.coins,hx,hy+30);\\n}\\n\"\n}",
+    "timestamp": "2026-05-12T04:11:29.591517Z"
+  },
+  "accepted": {
+    "ok": false,
+    "staticIssues": [
+      {
+        "code": "port-observation-required",
+        "where": "RenderFrame",
+        "message": "port \"frame_rendered\" has no extractor — add to portObservation (allowed: \"global\", \"return.\u003cpath\u003e\", \"args.\u003cn\u003e.\u003cpath\u003e\", \"side_effect\")"
+      },
+      {
+        "code": "port-observation-orphan-key",
+        "where": "RenderFrame",
+        "message": "portObservation key \"enemy_list\" is not in this object's outputs (produces ∪ mutates = [frame_rendered]) — the harness will silently return undefined for this key"
+      },
+      {
+        "code": "port-observation-orphan-key",
+        "where": "RenderFrame",
+        "message": "portObservation key \"input_state\" is not in this object's outputs (produces ∪ mutates = [frame_rendered]) — the harness will silently return undefined for this key"
+      },
+      {
+        "code": "port-observation-orphan-key",
+        "where": "RenderFrame",
+        "message": "portObservation key \"particle_list\" is not in this object's outputs (produces ∪ mutates = [frame_rendered]) — the harness will silently return undefined for this key"
+      },
+      {
+        "code": "port-observation-orphan-key",
+        "where": "RenderFrame",
+        "message": "portObservation key \"player_state\" is not in this object's outputs (produces ∪ mutates = [frame_rendered]) — the harness will silently return undefined for this key"
+      },
+      {
+        "code": "port-observation-orphan-key",
+        "where": "RenderFrame",
+        "message": "portObservation key \"time_state\" is not in this object's outputs (produces ∪ mutates = [frame_rendered]) — the harness will silently return undefined for this key"
+      },
+      {
+        "code": "port-observation-orphan-key",
+        "where": "RenderFrame",
+        "message": "portObservation key \"world_data\" is not in this object's outputs (produces ∪ mutates = [frame_rendered]) — the harness will silently return undefined for this key"
+      },
+      {
+        "code": "value-space-empty",
+        "where": "frame_rendered",
+        "message": "attribute frame_rendered has no valueSpace declared — confirmed attributes must record their value structure (graph_merge_attribute id=\"frame_rendered\" patch='{\"valueSpace\":...}')"
+      },
+      {
+        "code": "evidence-stale",
+        "where": "RenderFrame",
+        "message": "compile/test evidence is for file hash 642de7b7 but the current impl file hash is 1db909f0 — re-run typecalc_compile or typecalc_test to refresh"
+      },
+      {
+        "code": "spec-stale",
+        "where": "RenderFrame",
+        "message": "description was generated against an earlier version of impl — re-run typecalc_describe to regenerate"
+      },
+      {
+        "code": "frags-content-matches-def",
+        "where": "RenderFrame",
+        "message": "fragment K/frags/RenderFrame.js is missing 1 function(s) declared in def K/defs/RenderFrame.js: RenderFrame — implement every function the def documents, or remove the unused declarations from the def file."
+      },
+      {
+        "code": "frags-content-matches-def",
+        "where": "RenderFrame",
+        "message": "fragment K/frags/RenderFrame.js declares 1 function(s) not in def K/defs/RenderFrame.js: renderFrame — every function shipped to the deliverable must be documented in the def with @param / @returns / @example. Either add the def entries, or move helpers into another modelled graph object."
+      }
+    ],
+    "runtimeIssues": [
+      {
+        "code": "runtime-trace-missing",
+        "where": "RenderFrame",
+        "message": "no runtime trace at .kcpos/typecalc/RenderFrame.json — synthesized tests must append per-call inputs/outputs there"
+      }
+    ],
+    "reasonableness": {
+      "verdict": "fail",
+      "reasons": [
+        "Entities of type 'items' (e.g., dropped items on the ground) are not rendered; only player and enemies are drawn.",
+        "Tiles are drawn as colored rectangles with simple markings, lacking explicit edge-adaptive texture blending between adjacent tiles."
+      ],
+      "confidence": 0.8
+    },
+    "specHash": "642de7b748faea7ecf48b2500efa23dd2becb0198103f6bb641b9cd0843b33b6",
+    "timestamp": "2026-05-12T04:09:10.021624Z"
+  },
+  "obstacle": {
+    "reason": "renderFrame takes a Canvas 2D rendering context and draws — all effects are side_effect (visual output). The harness has no headless Canvas implementation and cannot verify pixel output mechanically.",
+    "cyclesWhenObstacled": 0,
+    "timestamp": "2026-05-12T04:05:24.015483Z"
+  },
+  "waiver": {
+    "reason": "Canvas 2D rendering — all ports are side_effect (drawing to canvas context). Cannot be mechanically tested without a browser DOM. Verified via visual inspection in Chrome.",
+    "kind": "structural",
+    "timestamp": "2026-05-12T04:04:20.137956Z"
+  },
+  "cycles": {
+    "count": 1,
+    "prevIssues": [
+      "evidence-stale",
+      "frags-content-matches-def",
+      "port-observation-orphan-key",
+      "port-observation-required",
+      "reasonableness",
+      "runtime-trace-missing",
+      "spec-stale",
+      "value-space-empty"
+    ],
+    "prevImplKey": "91a38ebf29f384be8d08a6c36a51a8703e209c1fa2afd9d3d60b55f5640f1839",
+    "updatedAt": "2026-05-12T04:09:10.023939Z"
+  }
+}

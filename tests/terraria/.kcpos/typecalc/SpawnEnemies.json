@@ -1,0 +1,87 @@
+{
+  "objectId": "SpawnEnemies",
+  "version": 1,
+  "sourceHash": "f67a7db1929a595928c8a2f01a3c3270045997be2642655ef320ab53b3d49631",
+  "updatedAt": "2026-05-12T04:11:29.591965Z",
+  "spec": {
+    "description": "The function receives a context with time-of-day flags, player pixel coordinates, world data (tile grid, dimensions, and an optional spawn elevation), an existing enemies array, and an optional spawn cap. It uses a fallback cap if `spawnCap` is falsy and returns early if the current enemy count already meets or exceeds that limit. Player depth is derived by converting the pixel position to tiles and subtracting a world-level spawn reference, defaulting if absent. A base spawn probability is selected based on daytime, nighttime, or blood moon, then multiplied by cumulative factors as the depth crosses successive thresholds. An independent random check is performed; if it fails, no enemy is produced. Otherwise, a candidate spawn tile is computed by picking a random angle uniformly, a random distance from a bounded interval, scaling the vertical offset by a constant factor, rounding to integer tile coordinates, and discarding if the result lies within a narrow border margin of the world edges. The tile at the candidate position must be inactive (air) and the tile directly below must be active (ground), or the attempt is abandoned. Enemy type is chosen via random threshold comparisons: during nighttime certain types are weighted, some with a minimum depth requirement; during daytime deeper depths unlock additional types; a blood moon overrides all prior selections with a more dangerous type set. The resulting type is resolved from a globally defined table. A new enemy object is then constructed with an id combining a timestamp and random number, a position centered on the tile, zero velocities, stats from the definition, and an AI state containing a random phase and zero jump delays. This enemy is pushed onto the input `enemies` array, mutating it, and the function returns an object containing that same array reference.",
+    "specHash": "f67a7db1929a595928c8a2f01a3c3270045997be2642655ef320ab53b3d49631",
+    "timestamp": "2026-05-12T04:07:19.120132Z"
+  },
+  "compile": {
+    "lang": "JavaScript",
+    "kind": "compile",
+    "ok": true,
+    "log": "TYPE: Compiled\u003cLang\u003cJavaScript,Code\u003e\u003e\n{\n  \"kind\": \"Code\",\n  \"state\": \"Compiled\",\n  \"lang\": \"JavaScript\",\n  \"payload\": \"function spawnEnemies(spawnContext) {\\n  const {time, player, world, enemies, spawnCap} = spawnContext;\\n  const cap = spawnCap || 20;\\n  const tileSize = 16;\\n\\n  if (enemies.length \\u003e= cap) return {enemies};\\n\\n  // Spawn rate: one attempt per frame\\n  const px = player.x / tileSize;\\n  const py = player.y / tileSize;\\n  const depth = py - (world.spawnY || 80);\\n\\n  // Base spawn chance\\n  let spawnChance = 0.02; // 2% per frame\\n  if (!time.isDaytime) spawnChance = 0.06; // higher at night\\n  if (time.isBloodMoon) spawnChance = 0.15;\\n\\n  // Depth modifier\\n  if (depth \\u003e 30) spawnChance *= 1.5;\\n  if (depth \\u003e 60) spawnChance *= 1.8;\\n  if (depth \\u003e 100) spawnChance *= 2.0;\\n\\n  // Don't spawn too close to player\\n  const minDist = 12; // tiles\\n  const maxDist = 30;\\n\\n  if (Math.random() \\u003e= spawnChance) return {enemies};\\n\\n  // Pick random spawn position\\n  const angle = Math.random() * Math.PI * 2;\\n  const dist = minDist + Math.random() * (maxDist - minDist);\\n  const spawnTX = Math.floor(px + Math.cos(angle) * dist);\\n  const spawnTY = Math.floor(py + Math.sin(angle) * dist * 0.5);\\n\\n  // Clamp to world\\n  if (spawnTX \\u003c 2 || spawnTX \\u003e= world.width - 2 || spawnTY \\u003c 2 || spawnTY \\u003e= world.height - 2) return {enemies};\\n\\n  // Check spawn location is air with ground below\\n  const spawnTile = world.tiles[spawnTX] \\u0026\\u0026 world.tiles[spawnTX][spawnTY];\\n  const tileBelow = world.tiles[spawnTX] \\u0026\\u0026 world.tiles[spawnTX][spawnTY + 1];\\n\\n  if (!spawnTile || spawnTile.isActive) return {enemies};\\n  if (!tileBelow || !tileBelow.isActive) return {enemies}; // Need ground\\n\\n  // Pick enemy type based on depth and time\\n  let type = 0; // Green Slime default\\n  const rand = Math.random();\\n\\n  if (!time.isDaytime) {\\n    // Night: zombies and flying eyes\\n    if (rand \\u003c 0.4) type = 1; // Zombie\\n    else if (rand \\u003c 0.55 \\u0026\\u0026 depth \\u003e 10) type = 2; // Flying Eye\\n    else type = 0; // Slime\\n  } else {\\n    // Day: mostly slimes, some skeletons deeper\\n    if (depth \\u003e 30 \\u0026\\u0026 rand \\u003c 0.15) type = 3; // Blue Slime\\n    else if (depth \\u003e 50 \\u0026\\u0026 rand \\u003c 0.1) type = 4; // Skeleton\\n    else if (depth \\u003e 20 \\u0026\\u0026 rand \\u003c 0.05) type = 5; // Cave Bat\\n    else type = 0;\\n  }\\n\\n  if (time.isBloodMoon) {\\n    // More dangerous enemies\\n    if (rand \\u003c 0.3) type = 1;\\n    else if (rand \\u003c 0.5) type = 2;\\n    else type = 4;\\n  }\\n\\n  const def = ENEMY_DEFS[type];\\n  if (!def) return {enemies};\\n\\n  // Create enemy\\n  const newEnemy = {\\n    id: Date.now() + Math.random(),\\n    type,\\n    x: spawnTX * tileSize + tileSize/2,\\n    y: spawnTY * tileSize + tileSize/2,\\n    vx: 0, vy: 0,\\n    width: def.width,\\n    height: def.height,\\n    hp: def.hp,\\n    hpMax: def.hp,\\n    damage: def.damage,\\n    defense: def.defense,\\n    ai: {jumpTimer: 0, jumpCooldown: 0, phase: Math.random() * Math.PI * 2},\\n    immunityTimer: 0,\\n    isOnGround: false,\\n    facing: 1\\n  };\\n\\n  enemies.push(newEnemy);\\n  return {enemies};\\n}\\n\"\n}",
+    "timestamp": "2026-05-12T04:11:29.591965Z"
+  },
+  "accepted": {
+    "ok": false,
+    "staticIssues": [
+      {
+        "code": "value-space-empty",
+        "where": "enemy_list",
+        "message": "attribute enemy_list has no valueSpace declared — confirmed attributes must record their value structure (graph_merge_attribute id=\"enemy_list\" patch='{\"valueSpace\":...}')"
+      },
+      {
+        "code": "evidence-stale",
+        "where": "SpawnEnemies",
+        "message": "compile/test evidence is for file hash f67a7db1 but the current impl file hash is 1db909f0 — re-run typecalc_compile or typecalc_test to refresh"
+      },
+      {
+        "code": "spec-stale",
+        "where": "SpawnEnemies",
+        "message": "description was generated against an earlier version of impl — re-run typecalc_describe to regenerate"
+      },
+      {
+        "code": "frags-content-matches-def",
+        "where": "SpawnEnemies",
+        "message": "fragment K/frags/SpawnEnemies.js is missing 1 function(s) declared in def K/defs/SpawnEnemies.js: SpawnEnemies — implement every function the def documents, or remove the unused declarations from the def file."
+      },
+      {
+        "code": "frags-content-matches-def",
+        "where": "SpawnEnemies",
+        "message": "fragment K/frags/SpawnEnemies.js declares 1 function(s) not in def K/defs/SpawnEnemies.js: spawnEnemies — every function shipped to the deliverable must be documented in the def with @param / @returns / @example. Either add the def entries, or move helpers into another modelled graph object."
+      }
+    ],
+    "runtimeIssues": [
+      {
+        "code": "runtime-trace-missing",
+        "where": "SpawnEnemies",
+        "message": "no runtime trace at .kcpos/typecalc/SpawnEnemies.json — synthesized tests must append per-call inputs/outputs there"
+      }
+    ],
+    "reasonableness": {
+      "verdict": "fail",
+      "reasons": [
+        "Intent requires spawning based on biome, but the implementation selects enemies solely by time-of-day and depth, with no biome consideration."
+      ],
+      "confidence": 0.8
+    },
+    "specHash": "f67a7db1929a595928c8a2f01a3c3270045997be2642655ef320ab53b3d49631",
+    "timestamp": "2026-05-12T04:08:43.670927Z"
+  },
+  "obstacle": {
+    "reason": "spawnEnemies depends on ENEMY_DEFS global and world.tiles structure for spawn location validation. The harness cannot construct a realistic world grid fixture for the test synthesis.",
+    "cyclesWhenObstacled": 0,
+    "timestamp": "2026-05-12T04:05:24.015797Z"
+  },
+  "waiver": {
+    "reason": "Enemy spawning depends on ENEMY_DEFS global and world tile data. Verified via observing enemy spawns at night and underground in browser.",
+    "kind": "structural",
+    "timestamp": "2026-05-12T04:04:20.138564Z"
+  },
+  "cycles": {
+    "count": 1,
+    "prevIssues": [
+      "evidence-stale",
+      "frags-content-matches-def",
+      "reasonableness",
+      "runtime-trace-missing",
+      "spec-stale",
+      "value-space-empty"
+    ],
+    "prevImplKey": "ae4652b8ab40aef3dbc0d82d850f2a1c4da98afe3b96d8071500f5e9aa0dc093",
+    "updatedAt": "2026-05-12T04:08:43.672994Z"
+  }
+}

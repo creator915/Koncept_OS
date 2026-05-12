@@ -1,0 +1,85 @@
+{
+  "frozen": true,
+  "frozenAt": "2026-05-12T04:12:33.114943Z",
+  "items": [
+    {
+      "id": "CHK-001",
+      "description": "World generation: initWorld produces a 420x240 tile grid with surface terrain, caves, ores, trees, and spawn point.",
+      "severity": "must",
+      "codeProof": "K/frags/InitWorld.js:1 initWorld",
+      "verifiedAt": "2026-05-12T04:12:50.097298Z"
+    },
+    {
+      "id": "CHK-002",
+      "description": "Player physics: gravity, collision, movement (A/D), jumping (Space), platform drop-through (S+Space).",
+      "severity": "must",
+      "codeProof": "K/frags/UpdateGame.js:1 resolvePhysics",
+      "verifiedAt": "2026-05-12T04:12:50.098886Z"
+    },
+    {
+      "id": "CHK-003",
+      "description": "Block interaction: left-click breaks tiles with pickaxe/axe, right-click places blocks, hand-breaking works on soft tiles.",
+      "severity": "must",
+      "codeProof": "K/frags/UpdateGame.js:1 breakTile",
+      "verifiedAt": "2026-05-12T04:12:50.099887Z"
+    },
+    {
+      "id": "CHK-004",
+      "description": "Enemy spawning and AI: slimes hop, zombies walk, flyers hover. Spawn rate varies by depth and day/night.",
+      "severity": "must",
+      "codeProof": "K/frags/SpawnEnemies.js:1 spawnEnemies",
+      "verifiedAt": "2026-05-12T04:12:50.100591Z"
+    },
+    {
+      "id": "CHK-005",
+      "description": "Combat: sword swing damages enemies, enemies deal contact damage, player death drops coins and respawns.",
+      "severity": "must",
+      "codeProof": "K/frags/UpdateGame.js:1 updateGame",
+      "verifiedAt": "2026-05-12T04:12:50.101221Z"
+    },
+    {
+      "id": "CHK-006",
+      "description": "Day/night cycle: sky color transitions, sun/moon rendering, stars at night, enemy spawn rate changes at night.",
+      "severity": "must",
+      "codeProof": "K/frags/RenderFrame.js:1 renderFrame",
+      "verifiedAt": "2026-05-12T04:12:50.101868Z"
+    },
+    {
+      "id": "CHK-007",
+      "description": "Inventory: 50-slot inventory, 10-slot hotbar with number-key/scroll selection, item stacking, block placement from inventory.",
+      "severity": "must",
+      "codeProof": "K/frags/UpdateGame.js:1 addToInventory",
+      "verifiedAt": "2026-05-12T04:13:01.345152Z"
+    },
+    {
+      "id": "CHK-008",
+      "description": "Crafting: 33 recipes (tools, weapons, armor, potions, stations). E key opens crafting UI, filters by nearby stations.",
+      "severity": "must",
+      "codeProof": "K/frags/CraftItem.js:1 craftItem",
+      "verifiedAt": "2026-05-12T04:13:01.346663Z"
+    },
+    {
+      "id": "CHK-009",
+      "description": "Rendering: Camera follows player with smoothing, tiles render with colors, enemies have distinct shapes, HUD shows HP/hotbar/time/coins.",
+      "severity": "must",
+      "codeProof": "K/frags/RenderFrame.js:1 renderFrame",
+      "verifiedAt": "2026-05-12T04:13:01.347652Z"
+    },
+    {
+      "id": "CHK-010",
+      "description": "Deliverable: index.html is a self-contained single-file HTML+Canvas+JS game with no external dependencies, playable in any modern browser.",
+      "severity": "must",
+      "codeProof": "index.html:1 gameLoop",
+      "verifiedAt": "2026-05-12T04:13:01.348531Z"
+    }
+  ],
+  "summary": {
+    "totalItems": 10,
+    "passed": 10,
+    "waived": 0,
+    "failed": 0,
+    "finalVerdict": "PASS"
+  },
+  "createdAt": "2026-05-12T04:12:12.056025Z",
+  "updatedAt": "2026-05-12T04:13:01.348531Z"
+}

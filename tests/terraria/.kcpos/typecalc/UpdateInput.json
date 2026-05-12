@@ -1,0 +1,87 @@
+{
+  "objectId": "UpdateInput",
+  "version": 1,
+  "sourceHash": "f4527c1489bd045290c95b093058e72eb8ff8c88ca27f990b79b49b10c8fabdb",
+  "updatedAt": "2026-05-12T04:11:29.59139Z",
+  "spec": {
+    "description": "Creates a shallow copy of the raw keys object by iterating over its own enumerable properties. Extracts mouseX and mouseY from the input, substituting 0 when they are falsy or absent. Coerces mouseLeft and mouseRight to booleans, and defaults mouseWheel to 0 if not truthy. Computes mouseTileX and mouseTileY by adding the provided camera offsets (cameraX, cameraY) to the respective mouse coordinates, dividing by the tile size parameter (or a default tile size when omitted), and taking the floor of the result. Accepts any superset of these input fields and silently ignores extras. Returns a new snapshot object with the copied keys, the sanitised mouse position, the booleanised button states, the wheels value, and the derived tile indices. No side effects or state mutation occur.",
+    "specHash": "f4527c1489bd045290c95b093058e72eb8ff8c88ca27f990b79b49b10c8fabdb",
+    "timestamp": "2026-05-12T04:06:45.953259Z"
+  },
+  "compile": {
+    "lang": "JavaScript",
+    "kind": "compile",
+    "ok": true,
+    "log": "TYPE: Compiled\u003cLang\u003cJavaScript,Code\u003e\u003e\n{\n  \"kind\": \"Code\",\n  \"state\": \"Compiled\",\n  \"lang\": \"JavaScript\",\n  \"payload\": \"function updateInput(raw) {\\n  const keys = {};\\n  for (const k of Object.keys(raw.keys)) {\\n    keys[k] = raw.keys[k];\\n  }\\n\\n  // Compute mouse tile position relative to world (caller provides camera offset)\\n  const mx = raw.mouseX || 0;\\n  const my = raw.mouseY || 0;\\n\\n  const tileSize = raw.tileSize || 16;\\n  const camX = raw.cameraX || 0;\\n  const camY = raw.cameraY || 0;\\n\\n  const mouseTileX = Math.floor((mx + camX) / tileSize);\\n  const mouseTileY = Math.floor((my + camY) / tileSize);\\n\\n  return {\\n    keys,\\n    mouseX: mx,\\n    mouseY: my,\\n    mouseLeft: !!raw.mouseLeft,\\n    mouseRight: !!raw.mouseRight,\\n    mouseWheel: raw.mouseWheel || 0,\\n    mouseTileX,\\n    mouseTileY\\n  };\\n}\\n\"\n}",
+    "timestamp": "2026-05-12T04:11:29.59139Z"
+  },
+  "accepted": {
+    "ok": false,
+    "staticIssues": [
+      {
+        "code": "value-space-empty",
+        "where": "input_state",
+        "message": "attribute input_state has no valueSpace declared — confirmed attributes must record their value structure (graph_merge_attribute id=\"input_state\" patch='{\"valueSpace\":...}')"
+      },
+      {
+        "code": "evidence-stale",
+        "where": "UpdateInput",
+        "message": "compile/test evidence is for file hash f4527c14 but the current impl file hash is 1db909f0 — re-run typecalc_compile or typecalc_test to refresh"
+      },
+      {
+        "code": "spec-stale",
+        "where": "UpdateInput",
+        "message": "description was generated against an earlier version of impl — re-run typecalc_describe to regenerate"
+      },
+      {
+        "code": "frags-content-matches-def",
+        "where": "UpdateInput",
+        "message": "fragment K/frags/UpdateInput.js is missing 1 function(s) declared in def K/defs/UpdateInput.js: UpdateInput — implement every function the def documents, or remove the unused declarations from the def file."
+      },
+      {
+        "code": "frags-content-matches-def",
+        "where": "UpdateInput",
+        "message": "fragment K/frags/UpdateInput.js declares 1 function(s) not in def K/defs/UpdateInput.js: updateInput — every function shipped to the deliverable must be documented in the def with @param / @returns / @example. Either add the def entries, or move helpers into another modelled graph object."
+      }
+    ],
+    "runtimeIssues": [
+      {
+        "code": "runtime-trace-missing",
+        "where": "UpdateInput",
+        "message": "no runtime trace at .kcpos/typecalc/UpdateInput.json — synthesized tests must append per-call inputs/outputs there"
+      }
+    ],
+    "reasonableness": {
+      "verdict": "pass",
+      "reasons": [
+        "Copies the raw keys object (including WASD, space, 1-9) into the snapshot as required.",
+        "Normalizes mouse position (defaults to 0), coerces button states to booleans, and derives tile coordinates per camera."
+      ],
+      "confidence": 0.9
+    },
+    "specHash": "f4527c1489bd045290c95b093058e72eb8ff8c88ca27f990b79b49b10c8fabdb",
+    "timestamp": "2026-05-12T04:08:25.254065Z"
+  },
+  "obstacle": {
+    "reason": "updateInput depends on raw key/mouse state and computes tile coordinates using camera offset — the harness cannot simulate realistic DOM input events. Function is a thin pass-through transform verified via manual browser testing.",
+    "cyclesWhenObstacled": 0,
+    "timestamp": "2026-05-12T04:05:24.015093Z"
+  },
+  "waiver": {
+    "reason": "Thin input normalization wrapper — returns transformed key/mouse state. Verified via manual testing in browser: A/D move, space jumps, mouse clicks break/place.",
+    "kind": "structural",
+    "timestamp": "2026-05-12T04:04:20.136737Z"
+  },
+  "cycles": {
+    "count": 1,
+    "prevIssues": [
+      "evidence-stale",
+      "frags-content-matches-def",
+      "runtime-trace-missing",
+      "spec-stale",
+      "value-space-empty"
+    ],
+    "prevImplKey": "651c4c541087bc19bd1df2a17f7f5a1ea93f253a3316d3445c67cb7363cc418b",
+    "updatedAt": "2026-05-12T04:08:25.256431Z"
+  }
+}
