@@ -16,7 +16,9 @@ func Tools() map[string]llm.Tool {
 		"session_delete":           sessionDeleteTool(),
 		"session_focus":            sessionFocusTool(),
 		"session_aggregate":        sessionAggregateTool(),
+		"session_build":            sessionBuildTool(),
 		"session_set_architecture": sessionSetArchitectureTool(),
 		"session_gate_check":       sessionGateCheckTool(),
+		"gate_object":              gateObjectTool(),
 	}
 }

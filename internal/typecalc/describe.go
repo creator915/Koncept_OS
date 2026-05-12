@@ -72,10 +72,11 @@ const describerSystemPrompt = `You are a precise technical writer. Given a funct
 Strict rules:
 
 1. Describe what the code DOES, not what it SHOULD do. Do not editorialize about correctness or fitness.
-2. Use concrete types and observed value ranges where the code makes them visible (literals, asserts, range checks).
+2. **Stay at the contract level — describe shapes, types, ranges, and invariants. NEVER quote a numeric magic constant from the implementation unless that constant is a declared invariant (named global, ` + "`const X = ...`" + `, comment marking it as a contract). For derived/computed values say "a sample uniformly distributed over […]", "scaled by canvas height", "clamped to bounds" — NEVER "300" or "8 + Math.random() * (width - 16)".**
 3. Note side effects (mutation, I/O, randomness, time-dependence).
 4. Note sequencing / temporal relationships if the code has them (frame-stepping, before/after, retry loops).
 5. Do not copy the intent verbatim. Your output is the *complement* to intent — the concrete behavior that pairs with the abstract goal.
+6. **Failure mode to avoid (v9.0.2): a description that quotes implementation numbers like "ball_x = 300" or "angle uniformly sampled from [π*2/18, π*7/18]" lets downstream test synthesis re-derive those exact numbers, producing brittle ` + "`equals: 300`" + ` assertions. Tests would then verify "the code did what the code did," not "the code did what the contract says." Stay at the contract level so tests stay contract-anchored.**
 
 Output is plain text. Aim for 4–12 sentences. No JSON, no Markdown headers — just a focused descriptive paragraph (or two).`
 

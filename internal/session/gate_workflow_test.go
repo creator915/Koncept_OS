@@ -40,15 +40,12 @@ func confirmedRootFixture(t *testing.T) (root, sessionDir, graphPath string) {
 	}
 
 	// Drop typecalc evidence (kind=test, ok=true, lang=Go) so 5.1c +
-	// typecalc-test-required pass.
-	evDir := filepath.Join(root, ".kcpos", "typecalc-evidence")
-	if err := mkdirAll(evDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFile(filepath.Join(evDir, "Op.json"),
-		`{"objectId":"Op","kind":"test","lang":"Go","ok":true}`); err != nil {
-		t.Fatal(err)
-	}
+	// typecalc-test-required pass. v9.0: written as the unified bundle.
+	evDir := filepath.Join(root, ".kcpos", "typecalc")
+	writeEvidenceBundle(t, evDir, "Op", map[string]any{
+		"test":     map[string]any{"kind": "test", "lang": "Go", "ok": true},
+		"accepted": map[string]any{"ok": true, "reasonableness": map[string]any{"verdict": "pass", "reasons": []string{"fixture"}, "confidence": 1.0}},
+	})
 	// Fix 4: architecture-non-empty gate also needs satisfaction so
 	// individual gate-test cases test only the rule under each test.
 	if _, err := SetArchitecture(sessionDir, "s_root", "stub architecture for tests"); err != nil {
@@ -60,10 +57,11 @@ func confirmedRootFixture(t *testing.T) (root, sessionDir, graphPath string) {
 func TestGate_TypecalcEvidencePassing_Fails_OnOkFalse(t *testing.T) {
 	root, sessionDir, graphPath := confirmedRootFixture(t)
 	// Overwrite evidence with ok=false
-	evPath := filepath.Join(root, ".kcpos", "typecalc-evidence", "Op.json")
-	if err := writeFile(evPath, `{"objectId":"Op","kind":"test","lang":"Go","ok":false}`); err != nil {
-		t.Fatal(err)
-	}
+	evDir := filepath.Join(root, ".kcpos", "typecalc")
+	writeEvidenceBundle(t, evDir, "Op", map[string]any{
+		"test":     map[string]any{"kind": "test", "lang": "Go", "ok": false},
+		"accepted": map[string]any{"ok": true, "reasonableness": map[string]any{"verdict": "pass", "reasons": []string{"fixture"}, "confidence": 1.0}},
+	})
 	cwdRestore := mustChdir(t, root)
 	defer cwdRestore()
 
@@ -87,10 +85,13 @@ func TestGate_TypecalcTestRequired_Fails_OnCompileOnly(t *testing.T) {
 	root, sessionDir, graphPath := confirmedRootFixture(t)
 	// Replace test evidence with compile-only — Go has a runner so this
 	// should be rejected.
-	evPath := filepath.Join(root, ".kcpos", "typecalc-evidence", "Op.json")
-	if err := writeFile(evPath, `{"objectId":"Op","kind":"compile","lang":"Go","ok":true}`); err != nil {
-		t.Fatal(err)
-	}
+	evDir := filepath.Join(root, ".kcpos", "typecalc")
+	// Overwrite without an accepted section so the rule-under-test
+	// (typecalc-test-required) fires before accepted-evidence-required.
+	writeEvidenceBundle(t, evDir, "Op", map[string]any{
+		"compile":  map[string]any{"kind": "compile", "lang": "Go", "ok": true},
+		"accepted": map[string]any{"ok": true, "reasonableness": map[string]any{"verdict": "pass", "reasons": []string{"fixture"}, "confidence": 1.0}},
+	})
 	cwdRestore := mustChdir(t, root)
 	defer cwdRestore()
 
@@ -110,10 +111,11 @@ func TestGate_TypecalcTestRequired_Fails_OnCompileOnly(t *testing.T) {
 func TestGate_TypecalcTestRequired_Allows_CompileOnly_ForUntestableLang(t *testing.T) {
 	root, sessionDir, graphPath := confirmedRootFixture(t)
 	// Java has no in-tree test runner — compile-only evidence is fine.
-	evPath := filepath.Join(root, ".kcpos", "typecalc-evidence", "Op.json")
-	if err := writeFile(evPath, `{"objectId":"Op","kind":"compile","lang":"Java","ok":true}`); err != nil {
-		t.Fatal(err)
-	}
+	evDir := filepath.Join(root, ".kcpos", "typecalc")
+	writeEvidenceBundle(t, evDir, "Op", map[string]any{
+		"compile":  map[string]any{"kind": "compile", "lang": "Java", "ok": true},
+		"accepted": map[string]any{"ok": true, "reasonableness": map[string]any{"verdict": "pass", "reasons": []string{"fixture"}, "confidence": 1.0}},
+	})
 	cwdRestore := mustChdir(t, root)
 	defer cwdRestore()
 
@@ -219,10 +221,11 @@ func TestGate_OutputsTestsNonEmpty_Fails_WhenTestableConfirmedAndEmpty(t *testin
 	// Lay down compile-only evidence (kind=compile) for Op so:
 	//  - anyConfirmedTestable returns true (lang=Go is testable)
 	//  - aggregate's tests stays empty (Fix 2 only counts kind=test)
-	evPath := filepath.Join(root, ".kcpos", "typecalc-evidence", "Op.json")
-	if err := writeFile(evPath, `{"objectId":"Op","kind":"compile","lang":"Go","ok":true}`); err != nil {
-		t.Fatal(err)
-	}
+	evDir := filepath.Join(root, ".kcpos", "typecalc")
+	writeEvidenceBundle(t, evDir, "Op", map[string]any{
+		"compile":  map[string]any{"kind": "compile", "lang": "Go", "ok": true},
+		"accepted": map[string]any{"ok": true, "reasonableness": map[string]any{"verdict": "pass", "reasons": []string{"fixture"}, "confidence": 1.0}},
+	})
 	cwdRestore := mustChdir(t, root)
 	defer cwdRestore()
 
@@ -252,10 +255,11 @@ func TestGate_OutputsTestsNonEmpty_Skips_WhenAllUntestable(t *testing.T) {
 	if _, err := SetStatus(sessionDir, "s_child", StatusFinished); err != nil {
 		t.Fatal(err)
 	}
-	evPath := filepath.Join(root, ".kcpos", "typecalc-evidence", "Op.json")
-	if err := writeFile(evPath, `{"objectId":"Op","kind":"compile","lang":"Java","ok":true}`); err != nil {
-		t.Fatal(err)
-	}
+	evDir := filepath.Join(root, ".kcpos", "typecalc")
+	writeEvidenceBundle(t, evDir, "Op", map[string]any{
+		"compile":  map[string]any{"kind": "compile", "lang": "Java", "ok": true},
+		"accepted": map[string]any{"ok": true, "reasonableness": map[string]any{"verdict": "pass", "reasons": []string{"fixture"}, "confidence": 1.0}},
+	})
 	cwdRestore := mustChdir(t, root)
 	defer cwdRestore()
 

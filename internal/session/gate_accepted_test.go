@@ -37,15 +37,11 @@ func TestGate_AcceptedEvidenceRequired_FailsWhenMissing(t *testing.T) {
 	if err := saveRawGraph(graphPath, g); err != nil {
 		t.Fatal(err)
 	}
-	evidenceDir := filepath.Join(root, ".kcpos", "typecalc-evidence")
-	if err := mkdirAll(evidenceDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFile(filepath.Join(evidenceDir, "Op.json"),
-		`{"objectId":"Op","kind":"test","lang":"Go","ok":true}`); err != nil {
-		t.Fatal(err)
-	}
-	// NOT writing Op.accepted.json — the gate must FAIL.
+	evidenceDir := filepath.Join(root, ".kcpos", "typecalc")
+	writeEvidenceBundle(t, evidenceDir, "Op", map[string]any{
+		"test": map[string]any{"kind": "test", "lang": "Go", "ok": true},
+		// NOT writing accepted section — the gate must FAIL.
+	})
 
 	cwdRestore := mustChdir(t, root)
 	defer cwdRestore()
@@ -91,19 +87,14 @@ func TestGate_AcceptedEvidenceRequired_FailsOnVerdictFail(t *testing.T) {
 	if err := saveRawGraph(graphPath, g); err != nil {
 		t.Fatal(err)
 	}
-	evidenceDir := filepath.Join(root, ".kcpos", "typecalc-evidence")
-	if err := mkdirAll(evidenceDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFile(filepath.Join(evidenceDir, "Op.json"),
-		`{"objectId":"Op","kind":"test","lang":"Go","ok":true}`); err != nil {
-		t.Fatal(err)
-	}
-	// accepted record with ok=false and concrete reasons.
-	if err := writeFile(filepath.Join(evidenceDir, "Op.accepted.json"),
-		`{"objectId":"Op","kind":"accepted","ok":false,"reasonableness":{"verdict":"fail","reasons":["intent says transform input but impl returns input unchanged"],"confidence":0.9}}`); err != nil {
-		t.Fatal(err)
-	}
+	evidenceDir := filepath.Join(root, ".kcpos", "typecalc")
+	writeEvidenceBundle(t, evidenceDir, "Op", map[string]any{
+		"test": map[string]any{"kind": "test", "lang": "Go", "ok": true},
+		"accepted": map[string]any{
+			"ok":             false,
+			"reasonableness": map[string]any{"verdict": "fail", "reasons": []string{"intent says transform input but impl returns input unchanged"}, "confidence": 0.9},
+		},
+	})
 
 	cwdRestore := mustChdir(t, root)
 	defer cwdRestore()

@@ -9,25 +9,37 @@ import (
 	"github.com/creator915/Koncept_OS/internal/graph"
 )
 
-// writeTrace puts a RuntimeTrace at the canonical path inside the
-// already-tempdir-cd'd test environment.
+// writeTrace puts a RuntimeTrace section into the unified bundle at
+// the canonical path inside the already-tempdir-cd'd test environment.
+// Merges into any existing bundle (preserves other sections like Tests
+// when both writeTrace and WriteTests are called in the same test).
 func writeTrace(t *testing.T, objID string, calls []map[string]any) {
 	t.Helper()
-	dir := filepath.Join(".kcpos", "typecalc-runtime")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rawCalls := make([]map[string]any, 0, len(calls))
+	rtCalls := make([]RuntimeCall, 0, len(calls))
 	for _, c := range calls {
-		rawCalls = append(rawCalls, c)
+		var rc RuntimeCall
+		if in, ok := c["inputs"].(map[string]any); ok {
+			rc.Inputs = map[string]json.RawMessage{}
+			for k, v := range in {
+				raw, _ := json.Marshal(v)
+				rc.Inputs[k] = raw
+			}
+		}
+		if out, ok := c["outputs"].(map[string]any); ok {
+			rc.Outputs = map[string]json.RawMessage{}
+			for k, v := range out {
+				raw, _ := json.Marshal(v)
+				rc.Outputs[k] = raw
+			}
+		}
+		rtCalls = append(rtCalls, rc)
 	}
-	body, _ := json.Marshal(map[string]any{
-		"objectId": objID,
-		"calls":    rawCalls,
-	})
-	if err := os.WriteFile(filepath.Join(dir, objID+".json"), body, 0o644); err != nil {
+	if err := SetRuntimeTrace(objID, rtCalls); err != nil {
 		t.Fatal(err)
 	}
+	// Silence unused-import warnings if tests no longer need these.
+	_ = os.MkdirAll
+	_ = filepath.Join
 }
 
 func newGraphWithRangeAttrs() *graph.Graph {

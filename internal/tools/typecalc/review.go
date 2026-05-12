@@ -61,22 +61,44 @@ func typecalcDescribeTool() llm.Tool {
 			if obj.Impl == nil || *obj.Impl == "" {
 				return "", fmt.Errorf("object %q has no impl path set — set impl before describing", objectID)
 			}
-			implBody, err := os.ReadFile(*obj.Impl)
+			// v9.0.5: describe per-object source (the fragment) when set
+			// rather than the shared deliverable (which is empty / not-yet-
+			// built during child confirm_object). For multi-file projects
+			// where ImplFragment is unset, this falls back to obj.Impl.
+			describeTarget := *obj.Impl
+			if obj.ImplFragment != nil && *obj.ImplFragment != "" {
+				describeTarget = *obj.ImplFragment
+			}
+			implBody, err := os.ReadFile(describeTarget)
 			if err != nil {
-				return "", fmt.Errorf("read impl %s: %w", *obj.Impl, err)
+				return "", fmt.Errorf("read impl %s: %w", describeTarget, err)
 			}
 			implHash := typecalc.HashSource(string(implBody))
+			symbolHash := computeSymbolHash(string(implBody), describeTarget, obj.ImplSymbol, objectID)
 			// Hash cache: if a fresh spec exists for this exact impl, the
 			// description is still valid — skip the LLM call. The agent
 			// often re-runs describe redundantly during fix loops; this
 			// is the cheapest way to drop those costs.
-			if existing, ok := typecalc.ReadSpec(objectID); ok && existing.SourceHash == implHash {
-				return fmt.Sprintf(
-					"described %s [cache hit, no LLM call] — kept %s\n\n--- description ---\n%s",
-					objectID,
-					typecalc.SpecEvidencePath(objectID),
-					existing.Description,
-				), nil
+			// v9.0.2: prefer SymbolHash match (per-object) over SourceHash
+			// match — single-file-impl projects regenerate the description
+			// only when THIS object's function body actually changed.
+			if existing, ok := typecalc.ReadSpec(objectID); ok {
+				if symbolHash != "" && existing.SymbolHash != "" && existing.SymbolHash == symbolHash {
+					return fmt.Sprintf(
+						"described %s [cache hit on symbolHash, no LLM call] — kept %s\n\n--- description ---\n%s",
+						objectID,
+						typecalc.SpecEvidencePath(objectID),
+						existing.Description,
+					), nil
+				}
+				if existing.SourceHash == implHash {
+					return fmt.Sprintf(
+						"described %s [cache hit on sourceHash, no LLM call] — kept %s\n\n--- description ---\n%s",
+						objectID,
+						typecalc.SpecEvidencePath(objectID),
+						existing.Description,
+					), nil
+				}
 			}
 			defBody := []byte{}
 			if obj.Def != "" {
@@ -95,6 +117,7 @@ func typecalcDescribeTool() llm.Tool {
 				ObjectID:    objectID,
 				Description: desc,
 				SourceHash:  implHash,
+				SymbolHash:  symbolHash,
 			}
 			if err := typecalc.WriteSpec(rec); err != nil {
 				return "", fmt.Errorf("persist spec evidence: %w", err)
@@ -236,7 +259,7 @@ func typecalcReviewTool() llm.Tool {
 				Signature:   string(defBody),
 				Impl:        string(implBody),
 				TestCode:    testCode,
-				TestLog:     renderIssueAwareLog(objectID, testLog, issues, runtimeIssues),
+				TestLog:     renderTestLogForReview(testLog),
 			})
 			if err != nil {
 				// Don't lose the static-check effort on review error —
@@ -288,96 +311,25 @@ func typecalcReviewTool() llm.Tool {
 	}
 }
 
-// renderIssueAwareLog merges the test runner log with a brief
-// summary of static / runtime check issues AND a ground-truth
-// excerpt of the actual harness trace (call count + first call's
-// inputs/outputs). The reasonableness reviewer sees all three,
-// so it can decide whether the issues are real semantic defects
-// or harness/test noise the human is likely to waive.
+// renderTestLogForReview prepares the test runner log for the
+// reasonableness reviewer. v8.8: the reviewer's job is semantic-only
+// ("does impl satisfy intent?"), not test-mechanic judgment. So we
+// keep the log itself (the LLM may glean useful signal) but no
+// longer paste in issue lists / trace summaries — those used to
+// dominate the prompt and dragged the LLM into judging testability
+// (pong-05 v8.7: "Implementation is an HTML script, not a module
+// exporting updatePhysics as required"). The system prompt now
+// explicitly forbids that class of reasoning; this helper keeps
+// the prompt narrow.
 //
-// Without the trace excerpt (2026-05-11 v8.7), the LLM judge was
-// prone to a specific hallucination: when typecalc-evidence
-// included runtime-output-missing issues, the LLM speculated
-// "implementation is an HTML page, not a module, cannot be loaded
-// as ES module" — even though the trace recorded 27–33 successful
-// calls (pong-05 batch). With the trace excerpt the LLM literally
-// sees "harness loaded impl and made 33 calls; here's call #1's
-// inputs/outputs", which makes the module-load-failure hypothesis
-// untenable and forces it to judge actual code semantics.
-func renderIssueAwareLog(objectID string, testLog string, static []typecalc.StaticIssue, runtime []typecalc.StaticIssue) string {
-	traceSummary := summarizeRuntimeTrace(objectID)
-	if len(static) == 0 && len(runtime) == 0 && traceSummary == "" {
-		return testLog
+// When the log is empty we return "(no test runner output — judge
+// semantics from impl + intent alone)" so the LLM doesn't try to
+// fabricate test-side reasoning.
+func renderTestLogForReview(testLog string) string {
+	if strings.TrimSpace(testLog) == "" {
+		return "(no test runner output — judge semantics from impl + intent alone)"
 	}
-	var b strings.Builder
-	if testLog != "" {
-		b.WriteString(testLog)
-		b.WriteString("\n\n")
-	}
-	if traceSummary != "" {
-		b.WriteString(traceSummary)
-		b.WriteString("\n")
-	}
-	if len(static) > 0 || len(runtime) > 0 {
-		b.WriteString("--- structural-check issues (consider these when judging code reasonableness) ---\n")
-		if len(static) > 0 {
-			b.WriteString("static-check:\n")
-			for _, iss := range static {
-				fmt.Fprintf(&b, "  - [%s] %s — %s\n", iss.Code, iss.Where, iss.Message)
-			}
-		}
-		if len(runtime) > 0 {
-			b.WriteString("runtime port-signal check:\n")
-			for _, iss := range runtime {
-				fmt.Fprintf(&b, "  - [%s] %s — %s\n", iss.Code, iss.Where, iss.Message)
-			}
-		}
-		b.WriteString("---\n")
-		b.WriteString("Note: these are structural signals. Some may be real defects (fix code), others may be harness/test artifacts (the agent will pair with obstacle+waiver). Judge the IMPLEMENTATION itself against the SPEC, not the test-runner output. In particular, if the trace summary above shows the impl WAS loaded and called, do NOT speculate about module-load or impl-not-importable issues — those are ruled out by direct observation.\n")
-	}
-	return b.String()
-}
-
-// summarizeRuntimeTrace returns a short, LLM-friendly description
-// of the harness's actual trace for this object: how many calls
-// landed, and one concrete sample (inputs/outputs). Returns "" when
-// no trace exists (typecalc_test never ran or recorded nothing).
-//
-// The sample is truncated per-port to keep prompts small (the LLM
-// only needs proof-of-execution, not full data fidelity).
-func summarizeRuntimeTrace(objectID string) string {
-	trace, ok := typecalc.ReadRuntimeTrace(objectID)
-	if !ok || trace == nil {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("--- harness execution trace (ground truth: the impl WAS loaded and invoked) ---\n")
-	fmt.Fprintf(&b, "calls recorded: %d\n", len(trace.Calls))
-	if len(trace.Calls) > 0 {
-		c := trace.Calls[0]
-		b.WriteString("first-call inputs:  ")
-		b.WriteString(truncateMapJSON(c.Inputs, 240))
-		b.WriteString("\nfirst-call outputs: ")
-		b.WriteString(truncateMapJSON(c.Outputs, 240))
-		b.WriteString("\n")
-	}
-	b.WriteString("---\n")
-	return b.String()
-}
-
-// truncateMapJSON marshals a per-port map to compact JSON and clips
-// to max bytes. Used in trace excerpts where the LLM only needs to
-// confirm shape / non-emptiness, not load full call records.
-func truncateMapJSON(m map[string]json.RawMessage, max int) string {
-	if m == nil {
-		return "(nil)"
-	}
-	bytes, _ := json.Marshal(m)
-	s := string(bytes)
-	if len(s) > max {
-		return s[:max] + "...(truncated)"
-	}
-	return s
+	return testLog
 }
 
 func resolveCwd(cwd, path string) string {

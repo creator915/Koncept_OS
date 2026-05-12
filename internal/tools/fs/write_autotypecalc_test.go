@@ -27,7 +27,8 @@ func chdirToFreshProject(t *testing.T) string {
 }
 
 func evidencePath(dir, id string) string {
-	return filepath.Join(dir, ".kcpos", "typecalc-evidence", id+".json")
+	// v9.0: unified bundle path
+	return filepath.Join(dir, ".kcpos", "typecalc", id+".json")
 }
 
 func TestWriteFile_AutoTypecalc_ImplPattern_GoOK(t *testing.T) {
@@ -44,20 +45,23 @@ func TestWriteFile_AutoTypecalc_ImplPattern_GoOK(t *testing.T) {
 	if !strings.Contains(out, "[auto-typecalc]") {
 		t.Errorf("expected auto-typecalc banner in output: %s", out)
 	}
-	// Evidence should exist for "Foo"
+	// Evidence should exist for "Foo" — v9.0 unified bundle with a
+	// Compile section.
 	raw, err := os.ReadFile(evidencePath(dir, "Foo"))
 	if err != nil {
 		t.Fatalf("evidence file missing: %v", err)
 	}
 	var rec struct {
 		ObjectID string `json:"objectId"`
-		Kind     string `json:"kind"`
-		OK       bool   `json:"ok"`
+		Compile  *struct {
+			Kind string `json:"kind"`
+			OK   bool   `json:"ok"`
+		} `json:"compile"`
 	}
 	if err := json.Unmarshal(raw, &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.ObjectID != "Foo" || rec.Kind != "compile" || !rec.OK {
+	if rec.ObjectID != "Foo" || rec.Compile == nil || rec.Compile.Kind != "compile" || !rec.Compile.OK {
 		t.Errorf("evidence wrong: %+v", rec)
 	}
 }
@@ -100,8 +104,8 @@ func TestWriteFile_AutoTypecalc_NonImplPath_NoOp(t *testing.T) {
 	if strings.Contains(out, "[auto-typecalc]") {
 		t.Errorf("docs files should NOT auto-trigger: %s", out)
 	}
-	// No evidence dir created at all.
-	if _, err := os.Stat(filepath.Join(dir, ".kcpos", "typecalc-evidence")); err == nil {
+	// No evidence dir created at all (v9.0 bundle dir).
+	if _, err := os.Stat(filepath.Join(dir, ".kcpos", "typecalc")); err == nil {
 		t.Errorf("evidence dir should not exist for docs writes")
 	}
 }

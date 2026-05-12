@@ -81,40 +81,53 @@ func ReviewWithInvoker(ctx context.Context, in ReviewInputs, invoke Invoker) (Re
 	return verdict, nil
 }
 
-const reviewerSystemPrompt = `You are a senior code reviewer evaluating whether an implementation is *reasonable* given the stated design intent. You judge fitness for purpose, not test correctness — tests pass or fail by themselves; you decide whether the tested behavior is what the user actually needed.
+const reviewerSystemPrompt = `You are a senior code reviewer judging ONE narrow question:
 
-Your verdict has only two possible values:
-- "pass" — the implementation broadly meets the intent. Minor stylistic concerns are fine.
-- "fail" — the implementation either contradicts the intent, omits a load-bearing requirement, or is correct-but-irrelevant.
+  "Does the implementation, read against the stated design intent, do
+   what the intent describes?"
+
+You judge SEMANTIC FIT only. You do NOT judge:
+- whether the test harness can call the function (that's the test runner's job; its output is given to you only as context)
+- whether the file is an ES module, importable, exported, etc. (those are mechanical facts handled by the harness; do not speculate)
+- whether the test cases themselves are well-designed
+- whether tests are passing or failing (the harness reports that; your job is the orthogonal question of whether the implementation is the RIGHT implementation for the intent)
+
+If the test runner reports failures BUT the implementation clearly satisfies the intent, your verdict is "pass" — explain in reasons that the failures are test-side concerns and the impl is semantically correct. The agent will route mismatches between test-harness signal and review verdict through the obstacle/waiver path; that's not your concern.
+
+Your verdict has only two values:
+- "pass" — the implementation broadly accomplishes the intent.
+- "fail" — the implementation contradicts the intent, omits a load-bearing requirement from the intent, or solves a different problem than the intent describes.
+
+NEVER use phrases like "not a module", "cannot be imported", "not exported", "test harness cannot", "browser environment required", "DOM not available". Those are mechanical observations belonging to the test runner, not semantic judgments. If you find yourself reaching for such reasons, your verdict is wrong — the intent doesn't ask for export-ability, it asks for behavior, and you can read behavior straight from the implementation source.
 
 Reply with strict JSON only. No prose before or after. Schema:
 
 {
   "verdict": "pass" | "fail",
-  "reasons": ["one short sentence", "another short sentence"],
+  "reasons": ["one short sentence about semantic fit to intent", "..."],
   "confidence": 0.0..1.0
 }
 
-reasons MUST be 1–4 items, each ≤ 120 characters, plain English. confidence is your self-stated certainty; use 0.5 when genuinely unsure.`
+reasons MUST be 1–4 items, each ≤ 120 characters, plain English, each grounded in a specific clause of the intent (or a specific line of the impl). confidence is your self-stated certainty; use 0.5 when the intent itself is ambiguous.`
 
 func buildReviewPrompt(in ReviewInputs) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Object id: %s\n\n", in.ObjectID)
-	fmt.Fprintf(&b, "## Original design intent (immutable user contract)\n%s\n\n", nonEmpty(in.Intent, "(empty)"))
+	fmt.Fprintf(&b, "## Original design intent (immutable user contract — JUDGE THE IMPL AGAINST THIS)\n%s\n\n", nonEmpty(in.Intent, "(empty)"))
 	fmt.Fprintf(&b, "## Auto-generated description (post-hoc, what the impl actually does)\n%s\n\n", nonEmpty(in.Description, "(none yet)"))
 	if in.Signature != "" {
 		fmt.Fprintf(&b, "## Signature (def file)\n```\n%s\n```\n\n", clip(in.Signature, 4000))
 	}
 	if in.Impl != "" {
-		fmt.Fprintf(&b, "## Implementation (impl file)\n```\n%s\n```\n\n", clip(in.Impl, 8000))
+		fmt.Fprintf(&b, "## Implementation (impl file — read this to judge semantic fit)\n```\n%s\n```\n\n", clip(in.Impl, 8000))
 	}
 	if in.TestCode != "" {
-		fmt.Fprintf(&b, "## Test cases\n```\n%s\n```\n\n", clip(in.TestCode, 4000))
+		fmt.Fprintf(&b, "## Test cases (advisory only — they may or may not match what the intent really requires)\n```\n%s\n```\n\n", clip(in.TestCode, 4000))
 	}
 	if in.TestLog != "" {
-		fmt.Fprintf(&b, "## Test runner output\n```\n%s\n```\n\n", clip(in.TestLog, 4000))
+		fmt.Fprintf(&b, "## Test runner output (advisory only — failures here do NOT necessarily mean the impl is wrong; they may mean the test was wrong, or the harness can't model this object)\n```\n%s\n```\n\n", clip(in.TestLog, 4000))
 	}
-	b.WriteString("Reply with strict JSON only.")
+	b.WriteString("Now judge: does the IMPL satisfy the INTENT? Answer in strict JSON only.")
 	return b.String()
 }
 

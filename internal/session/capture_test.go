@@ -334,23 +334,14 @@ func TestGate_RootDeliverPassesWhenAllConfirmed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// typecalc evidence — every confirmed object on a root graph must have
-	// a recorded typecalc compile/test (post-2026-05-07 enforcement; see
-	// internal/agent/hooks.go typecalcUseHook).
-	evidenceDir := filepath.Join(root, ".kcpos", "typecalc-evidence")
-	if err := mkdirAll(evidenceDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFile(filepath.Join(evidenceDir, "Op.json"), `{"objectId":"Op","kind":"test","lang":"Go","ok":true}`); err != nil {
-		t.Fatal(err)
-	}
-	// post-2026-05-08: accepted evidence (typecalc_review verdict) is now
-	// also required for root-finish. Lay it down with ok=true so this
-	// fixture continues to test the OK path.
-	if err := writeFile(filepath.Join(evidenceDir, "Op.accepted.json"),
-		`{"objectId":"Op","kind":"accepted","ok":true,"reasonableness":{"verdict":"pass","reasons":["fixture"],"confidence":1.0}}`); err != nil {
-		t.Fatal(err)
-	}
+	// typecalc evidence — every confirmed object on a root graph must
+	// have a recorded compile/test plus an accepted reviewer verdict.
+	// v9.0: both live in the unified bundle at .kcpos/typecalc/<id>.json.
+	evidenceDir := filepath.Join(root, ".kcpos", "typecalc")
+	writeEvidenceBundle(t, evidenceDir, "Op", map[string]any{
+		"test":     map[string]any{"kind": "test", "lang": "Go", "ok": true},
+		"accepted": map[string]any{"ok": true, "reasonableness": map[string]any{"verdict": "pass", "reasons": []string{"fixture"}, "confidence": 1.0}},
+	})
 
 	// Fix 4: architecture must be set for root finish gate.
 	if _, err := SetArchitecture(sessionDir, "s_root", "Sub-modules: Op. Intermediate vars: a."); err != nil {
@@ -598,6 +589,30 @@ func mkdirAll(dir string) error {
 
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// writeEvidenceBundle is the v9.0 fixture writer for tests that need a
+// canonical-shape evidence bundle on disk. Sections is a sparse map:
+// only the named sections are populated. Supported keys: "compile",
+// "test" — value must be a map with at least kind/lang/ok; "accepted" —
+// value must be a map with verdict/ok.
+func writeEvidenceBundle(t *testing.T, evidenceDir, objID string, sections map[string]any) {
+	t.Helper()
+	if err := mkdirAll(evidenceDir); err != nil {
+		t.Fatal(err)
+	}
+	bundle := map[string]any{
+		"objectId":  objID,
+		"version":   1,
+		"updatedAt": "1970-01-01T00:00:00Z",
+	}
+	for k, v := range sections {
+		bundle[k] = v
+	}
+	raw, _ := json.Marshal(bundle)
+	if err := writeFile(filepath.Join(evidenceDir, objID+".json"), string(raw)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func mustChdir(t *testing.T, dir string) func() {

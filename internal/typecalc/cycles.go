@@ -1,102 +1,64 @@
 package typecalc
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 )
 
-// CycleEvidencePath is the per-object review-cycle counter file.
-// Each typecalc_review invocation increments .Count; a successful
-// review (ok=true) resets it. Once .Count exceeds CycleCap the
-// agent is forced to either change approach or emit an obstacle —
-// no more silent grinding.
-func CycleEvidencePath(objectID string) string {
-	return filepath.Join(EvidenceDir, objectID+".cycles.json")
-}
+// CycleEvidencePath returns the bundle path; v9.0 stores the cycle
+// counter as the bundle's Cycles section, not a separate file.
+func CycleEvidencePath(objectID string) string { return BundlePath(objectID) }
 
-// CycleCap is the maximum number of review attempts on the same
-// object before the agent must escalate to an obstacle. 3 was the
-// empirical baseline; 5 gives breathing room for the multi-axis
-// failure pattern observed in v6 (each review can return static +
-// runtime + reasonableness issues independently — agent sometimes
-// needs distinct turns to address each axis). Combined with the
-// progress-detection logic in IncrementCycleWithIssues and the
-// graph-diff reset in MaybeResetCycleOnImplChange, the effective
-// budget is "5 stalls" not "5 attempts" — genuine progress no
-// longer burns counter.
+// CycleCap is the maximum number of review attempts on the same object
+// before the agent must escalate to an obstacle. See bundle.go's
+// CyclesSection for the on-disk schema.
 const CycleCap = 5
 
-// CycleEvidence is the on-disk counter. Tracks the issue rules from
-// the previous failed review so IncrementCycleWithIssues can detect
-// progress (issue set strictly shrunk). Also tracks the impl-hash of
-// the source the previous review judged, so a graph_merge_object
-// changing impl/portObservation can trigger a reset on the next call.
+// CycleEvidence is the v8.x flat shape. Kept for callers; v9.0 reads
+// and writes via the bundle's Cycles section.
 type CycleEvidence struct {
 	ObjectID    string    `json:"objectId"`
 	Count       int       `json:"count"`
-	PrevIssues  []string  `json:"prevIssues,omitempty"`  // rule names from the last failed review
-	PrevImplKey string    `json:"prevImplKey,omitempty"` // impl-hash + portObservation hash from last review
+	PrevIssues  []string  `json:"prevIssues,omitempty"`
+	PrevImplKey string    `json:"prevImplKey,omitempty"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
-// IncrementCycle bumps the per-object review-cycle counter and
-// returns the new count. Use IncrementCycleWithIssues when issue
-// rule names are available — that variant detects progress and
-// avoids over-counting when the agent is genuinely fixing things.
+// IncrementCycle bumps the per-object review-cycle counter.
 func IncrementCycle(objectID string) (int, error) {
 	return IncrementCycleWithIssues(objectID, nil, "")
 }
 
-// IncrementCycleWithIssues bumps the counter unless the new
-// issues are a strict subset of the previous run's issues — in
-// which case the agent has demonstrably converged some failures
-// and the count is held steady. Always updates PrevIssues to the
-// new list. Pass implKey to remember the source state so a later
-// MaybeResetCycleOnImplChange can detect structural changes.
+// IncrementCycleWithIssues bumps the counter unless the new issues are
+// a strict subset of the previous run's — in which case the agent has
+// converged some failures and the count holds steady.
 func IncrementCycleWithIssues(objectID string, currentIssues []string, implKey string) (int, error) {
 	if objectID == "" {
 		return 0, nil
 	}
-	if err := os.MkdirAll(EvidenceDir, 0o755); err != nil {
-		return 0, fmt.Errorf("mkdir evidence dir: %w", err)
-	}
-	rec := &CycleEvidence{ObjectID: objectID}
-	if existing, ok := ReadCycle(objectID); ok {
-		rec.Count = existing.Count
-		// Progress detection: if the set of failing rule names is a
-		// strict subset of the previous run, the agent fixed at least
-		// one issue and didn't introduce new ones — that's progress,
-		// not stalling. Don't burn cycle budget.
-		if isStrictSubset(currentIssues, existing.PrevIssues) {
-			// hold count
+	b := LoadOrInitBundle(objectID)
+	current := &CyclesSection{UpdatedAt: time.Now().UTC()}
+	if b.Cycles != nil {
+		current.Count = b.Cycles.Count
+		if isStrictSubset(currentIssues, b.Cycles.PrevIssues) {
+			// hold count — progress detected
 		} else {
-			rec.Count++
+			current.Count++
 		}
 	} else {
-		rec.Count = 1
+		current.Count = 1
 	}
-	rec.PrevIssues = dedupSorted(currentIssues)
-	rec.PrevImplKey = implKey
-	rec.UpdatedAt = time.Now().UTC()
-	raw, _ := json.MarshalIndent(rec, "", "  ")
-	if err := os.WriteFile(CycleEvidencePath(objectID), raw, 0o644); err != nil {
-		return 0, err
+	current.PrevIssues = dedupSorted(currentIssues)
+	current.PrevImplKey = implKey
+	b.Cycles = current
+	if err := SaveBundle(b); err != nil {
+		return 0, fmt.Errorf("save bundle cycles: %w", err)
 	}
-	return rec.Count, nil
+	return current.Count, nil
 }
 
-// MaybeResetCycleOnImplChange clears the counter when the source
-// state has changed since the last review (different impl-hash or
-// portObservation). The intuition: if the artifact under judgment
-// has structurally changed, the previous failure record is
-// historical — the agent deserves a fresh budget on the new
-// artifact, not a head start of "you already burned 3 cycles on
-// the OLD code."
-//
-// Returns true if the counter was reset.
+// MaybeResetCycleOnImplChange clears the counter when the source state
+// has changed since the last review.
 func MaybeResetCycleOnImplChange(objectID, currentImplKey string) bool {
 	if objectID == "" || currentImplKey == "" {
 		return false
@@ -112,12 +74,6 @@ func MaybeResetCycleOnImplChange(objectID, currentImplKey string) bool {
 	return true
 }
 
-// isStrictSubset returns true when every element of `a` is also in
-// `b`, AND `a` is shorter than `b` (so at least one element was
-// removed). Empty `a` with non-empty `b` qualifies (full
-// resolution counts as progress; the caller is expected to mark
-// success via ResetCycle in that case rather than using this
-// function, but the semantics still hold).
 func isStrictSubset(a, b []string) bool {
 	if len(a) >= len(b) {
 		return false
@@ -137,8 +93,6 @@ func isStrictSubset(a, b []string) bool {
 	return true
 }
 
-// dedupSorted normalizes a slice for stable comparison: dedup,
-// sort lexicographically. Empty in → empty out.
 func dedupSorted(xs []string) []string {
 	if len(xs) == 0 {
 		return nil
@@ -168,77 +122,81 @@ func ResetCycle(objectID string) error {
 	if objectID == "" {
 		return nil
 	}
-	rec := &CycleEvidence{ObjectID: objectID, Count: 0, UpdatedAt: time.Now().UTC()}
-	raw, _ := json.MarshalIndent(rec, "", "  ")
-	if err := os.MkdirAll(EvidenceDir, 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(CycleEvidencePath(objectID), raw, 0o644)
+	b := LoadOrInitBundle(objectID)
+	b.Cycles = &CyclesSection{Count: 0, UpdatedAt: time.Now().UTC()}
+	return SaveBundle(b)
 }
 
-// ReadCycle loads the counter. Returns (zero, false) on missing.
+// ReadCycle loads the counter from the bundle's Cycles section,
+// reshaped as the v8.x flat CycleEvidence.
 func ReadCycle(objectID string) (*CycleEvidence, bool) {
-	if objectID == "" {
+	b, ok := ReadBundle(objectID)
+	if !ok || b.Cycles == nil {
 		return nil, false
 	}
-	raw, err := os.ReadFile(CycleEvidencePath(objectID))
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
-	var rec CycleEvidence
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false
-	}
-	return &rec, true
+	return &CycleEvidence{
+		ObjectID:    objectID,
+		Count:       b.Cycles.Count,
+		PrevIssues:  b.Cycles.PrevIssues,
+		PrevImplKey: b.Cycles.PrevImplKey,
+		UpdatedAt:   b.Cycles.UpdatedAt,
+	}, true
 }
 
-// ObstacleEvidencePath is where an explicit "I cannot continue"
-// signal lands. Once written, the gate refuses to confirm the object
-// until a human inspects and either resolves the obstacle (deletes
-// the file) or upgrades to a waiver.
-func ObstacleEvidencePath(objectID string) string {
-	return filepath.Join(EvidenceDir, objectID+".obstacle.json")
-}
+// ObstacleEvidencePath returns the bundle path; obstacle lives as the
+// bundle's Obstacle section.
+func ObstacleEvidencePath(objectID string) string { return BundlePath(objectID) }
 
-// ObstacleEvidence captures why the agent gave up on this object.
+// ObstacleEvidence is the v8.x flat shape.
 type ObstacleEvidence struct {
-	ObjectID    string    `json:"objectId"`
-	Kind        string    `json:"kind"` // always "obstacle"
-	Reason      string    `json:"reason"`
-	Cycles      int       `json:"cyclesWhenObstacled"`
-	Timestamp   time.Time `json:"timestamp"`
+	ObjectID  string    `json:"objectId"`
+	Kind      string    `json:"kind"`
+	Reason    string    `json:"reason"`
+	Cycles    int       `json:"cyclesWhenObstacled"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
-// WriteObstacle persists an obstacle record. When file exists, the
-// gate fails the object — only a human (or explicit waiver) can
-// proceed.
+// WriteObstacle persists an obstacle as the bundle's Obstacle section.
 func WriteObstacle(rec *ObstacleEvidence) error {
 	if rec == nil || rec.ObjectID == "" {
 		return nil
-	}
-	if err := os.MkdirAll(EvidenceDir, 0o755); err != nil {
-		return err
 	}
 	rec.Kind = "obstacle"
 	if rec.Timestamp.IsZero() {
 		rec.Timestamp = time.Now().UTC()
 	}
-	raw, _ := json.MarshalIndent(rec, "", "  ")
-	return os.WriteFile(ObstacleEvidencePath(rec.ObjectID), raw, 0o644)
+	b := LoadOrInitBundle(rec.ObjectID)
+	b.Obstacle = &ObstacleSection{
+		Reason:              rec.Reason,
+		CyclesWhenObstacled: rec.Cycles,
+		Timestamp:           rec.Timestamp,
+	}
+	return SaveBundle(b)
 }
 
-// ReadObstacle returns the obstacle record if present.
+// ReadObstacle returns the Obstacle section as the v8.x flat shape.
 func ReadObstacle(objectID string) (*ObstacleEvidence, bool) {
+	b, ok := ReadBundle(objectID)
+	if !ok || b.Obstacle == nil {
+		return nil, false
+	}
+	return &ObstacleEvidence{
+		ObjectID:  objectID,
+		Kind:      "obstacle",
+		Reason:    b.Obstacle.Reason,
+		Cycles:    b.Obstacle.CyclesWhenObstacled,
+		Timestamp: b.Obstacle.Timestamp,
+	}, true
+}
+
+// DeleteObstacle clears the Obstacle section (the v8.x equivalent
+// removed the standalone obstacle.json file; v9.0 nils out the field
+// and rewrites the bundle).
+func DeleteObstacle(objectID string) error {
 	if objectID == "" {
-		return nil, false
+		return nil
 	}
-	raw, err := os.ReadFile(ObstacleEvidencePath(objectID))
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
-	var rec ObstacleEvidence
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false
-	}
-	return &rec, true
+	b := LoadOrInitBundle(objectID)
+	b.Obstacle = nil
+	return SaveBundle(b)
 }

@@ -3,6 +3,7 @@ package sessiontools
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -442,7 +443,7 @@ func sessionGateCheckTool() llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "session_gate_check",
-				Description: "Verify a session is ready to be finished. Checks: all children finished or deleted; every object in graphDiff.added is confirmed with impl file on disk (non-empty); session has aggregated outputs if it has children; checkpoint (if any) is frozen with FinalVerdict=PASS. For root sessions, additionally walks the entire graph and requires every object to be confirmed with a real impl file. Returns a PASS/FAIL report listing each violation. Mechanical verification only — no UI/runtime simulation.",
+				Description: "Verify a SESSION is ready to be finished. Cross-object scope: children finished or deleted; aggregated outputs; attribute backfill; checkpoint PASS; waiver-flood threshold; root architecture set. Per-object rules (impl-on-disk, evidence-pass, accepted-evidence-required) are delegated to gate_object — check individual objects with that tool for finer-grained feedback. Mechanical verification only.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -470,6 +471,57 @@ func sessionGateCheckTool() llm.Tool {
 			}
 			for _, iss := range r.Issues {
 				fmt.Fprintf(&b, "  ✗ %s\n", iss)
+			}
+			return b.String(), nil
+		},
+	}
+}
+
+// gateObjectTool is the v8.8 per-object early-feedback gate. Same
+// rules as the per-object branch of session_gate_check, exposed as a
+// standalone tool so the agent can verify one object at a time without
+// running the full root walk. Also automatically invoked by the
+// graph_merge_object after-hook on status=confirmed transitions so the
+// agent sees object-level issues immediately rather than discovering
+// them at root-finish time.
+func gateObjectTool() llm.Tool {
+	return llm.Tool{
+		Spec: llm.ToolSpec{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "gate_object",
+				Description: "Run the gate's per-object checks against ONE graph object: confirmed status, impl on disk, produces-or-mutates non-empty, typecalc evidence present and passing (or substituted by obstacle+waiver), reasonableness review accepted (or waived). Use this for early feedback while iterating on a single object — the same rules that the root-finish gate runs at the end. The graph_merge_object hook also auto-calls this on status=confirmed transitions, so most usage is reactive (read the hook output) rather than ad-hoc.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"object_id": map[string]interface{}{"type": "string", "description": "Graph object id to check."},
+					},
+					"required": []string{"object_id"},
+				},
+			},
+		},
+		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			objID, _ := args["object_id"].(string)
+			if objID == "" {
+				return "", fmt.Errorf("object_id is required")
+			}
+			g, err := graph.LoadOrInit(graph.DefaultPath)
+			if err != nil {
+				return "", err
+			}
+			cwd, _ := os.Getwd()
+			issues, info := session.CheckObjectGate(g, objID, cwd)
+			var b strings.Builder
+			status := "PASS"
+			if len(issues) > 0 {
+				status = "FAIL"
+			}
+			fmt.Fprintf(&b, "gate_object: %s · %s (has_evidence=%v, pass_via_waiver=%v)\n", status, objID, info.HasEvidence, info.PassViaWaiver)
+			for _, iss := range issues {
+				fmt.Fprintf(&b, "  ✗ %s\n", iss)
+			}
+			if len(issues) == 0 {
+				fmt.Fprintln(&b, "  (no per-object issues — object passes the object-level gate)")
 			}
 			return b.String(), nil
 		},

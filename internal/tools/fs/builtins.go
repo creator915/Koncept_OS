@@ -11,12 +11,15 @@ import "github.com/creator915/Koncept_OS/internal/llm"
 // the global tools registry by tools.Builtins().
 func Tools() map[string]llm.Tool {
 	return map[string]llm.Tool{
-		"read_file":  readFileTool(),
-		"write_file": writeFileTool(),
-		"edit":       editTool(),
-		"list_dir":   listDirTool(),
-		"bash":       bashTool(),
-		"grep":       grepTool(),
-		"glob":       globTool(),
+		"read_file":         readFileTool(),
+		"write_file":        writeFileTool(),
+		"edit":              editTool(),
+		"list_dir":          listDirTool(),
+		"bash":              bashTool(),
+		"grep":              grepTool(),
+		"glob":              globTool(),
+		"markdown_outline":  markdownOutlineTool(),
+		"markdown_section":  markdownSectionTool(),
+		"markdown_validate": markdownValidateTool(),
 	}
 }

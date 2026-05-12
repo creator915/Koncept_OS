@@ -105,11 +105,10 @@ func runCheckpointFill(args []string) int {
 	fs := flag.NewFlagSet("kcpos checkpoint fill", flag.ExitOnError)
 	id := fs.String("id", "", "CHK-XXX")
 	proof := fs.String("proof", "", "code proof: file:line + symbol")
-	gameplay := fs.String("gameplay", "", "gameplay proof: reproduction steps + K/proofs/<id>/ path")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if err := checkpoint.Fill(checkpoint.DefaultPath, *id, *proof, *gameplay); err != nil {
+	if err := checkpoint.Fill(checkpoint.DefaultPath, *id, *proof); err != nil {
 		return printErr(err)
 	}
 	fmt.Printf("%s filled\n", *id)

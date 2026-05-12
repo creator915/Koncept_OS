@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/creator915/Koncept_OS/internal/graph"
@@ -15,6 +17,39 @@ import (
 	"github.com/creator915/Koncept_OS/internal/typecalc/lang"
 	"github.com/creator915/Koncept_OS/internal/typecalc/probe"
 )
+
+// buildIsolatedTestBundle (v9.0.5) wraps a fragment .js file in a
+// minimal HTML scaffold so the existing harness HTML extraction path
+// can load it. This lets a child agent test its own fragment in
+// isolation, without depending on session_build to have assembled the
+// final deliverable.
+//
+// Returns (path, cleanup, err). The caller MUST defer cleanup() so
+// the temp file is removed after the test runner finishes.
+func buildIsolatedTestBundle(objectID, fragmentPath string) (string, func(), error) {
+	body, err := os.ReadFile(fragmentPath)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("read fragment %s: %w", fragmentPath, err)
+	}
+	tmp, err := os.CreateTemp("", "kcpos-test-bundle-"+objectID+"-*.html")
+	if err != nil {
+		return "", func() {}, err
+	}
+	defer tmp.Close()
+	html := "<!doctype html><html><body>\n<script>\n" + string(body) + "\n</script>\n</body></html>\n"
+	if _, err := tmp.WriteString(html); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", func() {}, err
+	}
+	path := tmp.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	return path, cleanup, nil
+}
+
+// _ silences unused-import detection for filepath when no other site
+// in this file uses it. Used inside buildIsolatedTestBundle in some
+// branches.
+var _ = filepath.Separator
 
 // Evidence-write logic and HTML/JS detection live in
 // internal/typecalc/evidence.go and are reused here as
@@ -78,13 +113,24 @@ func typecalcCompileTool() llm.Tool {
 			if obj.Impl == nil || *obj.Impl == "" {
 				return "", fmt.Errorf("object %q has no impl path set", objectID)
 			}
-			implBody, err := os.ReadFile(*obj.Impl)
-			if err != nil {
-				return "", fmt.Errorf("read impl %s: %w", *obj.Impl, err)
+			// v9.0.5: when implFragment is set, the per-object code lives
+			// there (e.g. K/frags/Foo.js), and obj.Impl is the assembled
+			// deliverable (e.g. index.html) which won't have THIS object's
+			// code until session_build runs in R2. Compile against the
+			// fragment so child sessions get meaningful evidence during
+			// their confirm_object loop, not against an empty / not-yet-
+			// built deliverable.
+			compileTarget := *obj.Impl
+			if obj.ImplFragment != nil && *obj.ImplFragment != "" {
+				compileTarget = *obj.ImplFragment
 			}
-			langTag := typecalc.LangFromExt(extOf(*obj.Impl))
+			implBody, err := os.ReadFile(compileTarget)
+			if err != nil {
+				return "", fmt.Errorf("read impl %s: %w", compileTarget, err)
+			}
+			langTag := typecalc.LangFromExt(extOf(compileTarget))
 			if langTag == typecalc.LangNone {
-				return "", fmt.Errorf("cannot infer language from impl extension %q", *obj.Impl)
+				return "", fmt.Errorf("cannot infer language from impl extension %q", compileTarget)
 			}
 			tv := typecalc.New(typecalc.KindCode, string(implBody)).
 				WithState(typecalc.StateUncompiled).
@@ -96,20 +142,38 @@ func typecalcCompileTool() llm.Tool {
 			}
 			rendered, _ := renderTypedValue(out)
 			implHash := typecalc.HashSource(string(implBody))
+			symbolHash := computeSymbolHash(string(implBody), compileTarget, obj.ImplSymbol, objectID)
 			if out.State == typecalc.StateCompiled {
 				effectiveLang := string(typecalc.DetectEffectiveLang(string(implBody), langTag))
-				if recErr := typecalc.RecordEvidenceFull(objectID, "compile", effectiveLang, true, rendered, implHash); recErr != nil {
+				if recErr := typecalc.RecordEvidenceWithSymbol(objectID, "compile", effectiveLang, true, rendered, implHash, symbolHash); recErr != nil {
 					return "", recErr
 				}
 			} else if out.Kind == typecalc.KindInsufficient {
 				effectiveLang := string(typecalc.DetectEffectiveLang(string(implBody), langTag))
-				if recErr := typecalc.RecordEvidenceFull(objectID, "insufficient", effectiveLang, false, out.Payload, implHash); recErr != nil {
+				if recErr := typecalc.RecordEvidenceWithSymbol(objectID, "insufficient", effectiveLang, false, out.Payload, implHash, symbolHash); recErr != nil {
 					return "", recErr
 				}
 			}
 			return rendered, nil
 		},
 	}
+}
+
+// computeSymbolHash returns the per-object fragment hash (v9.0.2). When
+// implSymbol is unset on the graph object we default to objectID — the
+// harness uses the same fallback. Returns "" when fragment extraction
+// fails (non-HTML impl, symbol not present) so callers can let the
+// bundle keep whatever SymbolHash it already had instead of overwriting
+// with a noisy default.
+func computeSymbolHash(implContent, implPath, implSymbol, objectID string) string {
+	symbol := implSymbol
+	if symbol == "" {
+		symbol = objectID
+	}
+	if h, ok := typecalc.SymbolFragmentHash(implContent, implPath, symbol); ok {
+		return h
+	}
+	return ""
 }
 
 // extOf is defined in synthesize.go; reuse from there.
@@ -196,17 +260,34 @@ func typecalcTestTool() llm.Tool {
 			if obj.Impl == nil || *obj.Impl == "" {
 				return "", fmt.Errorf("object %q has no impl path set", objectID)
 			}
-			implBody, err := os.ReadFile(*obj.Impl)
+			// v9.0.5: when implFragment is set on an HTML-deliverable
+			// project, build an isolated test bundle from the fragment
+			// so the harness exercises just THIS object's code, not the
+			// not-yet-built deliverable. The bundle is a minimal
+			// <script>-wrapped HTML so the existing HTML extraction
+			// path in harness.go works without changes.
+			testTarget := *obj.Impl
+			cleanupTempHTML := func() {}
+			if obj.ImplFragment != nil && *obj.ImplFragment != "" && strings.HasSuffix(strings.ToLower(*obj.Impl), ".html") {
+				bundlePath, cleanup, ferr := buildIsolatedTestBundle(objectID, *obj.ImplFragment)
+				if ferr != nil {
+					return "", fmt.Errorf("build isolated test bundle for %s: %w", objectID, ferr)
+				}
+				testTarget = bundlePath
+				cleanupTempHTML = cleanup
+			}
+			defer cleanupTempHTML()
+			implBody, err := os.ReadFile(testTarget)
 			if err != nil {
-				return "", fmt.Errorf("read impl %s: %w", *obj.Impl, err)
+				return "", fmt.Errorf("read impl %s: %w", testTarget, err)
 			}
 			t, ok := typecalc.ReadTests(objectID)
 			if !ok || (len(t.Cases) == 0 && len(t.TestCode) == 0) {
 				return "", fmt.Errorf("no synthesized tests for %s — call typecalc_synthesize_tests object_id=%q first", objectID, objectID)
 			}
-			langTag := typecalc.LangFromExt(extOf(*obj.Impl))
+			langTag := typecalc.LangFromExt(extOf(testTarget))
 			if langTag == typecalc.LangNone {
-				return "", fmt.Errorf("cannot infer language from impl extension %q", *obj.Impl)
+				return "", fmt.Errorf("cannot infer language from impl extension %q", testTarget)
 			}
 			// Schema-driven (harness) path: if the synthesizer produced
 			// structured Cases AND a harness exists for this language,
@@ -223,7 +304,7 @@ func typecalcTestTool() llm.Tool {
 			usingHarness := false
 			if len(t.Cases) > 0 {
 				cwd, _ := os.Getwd()
-				absImpl := *obj.Impl
+				absImpl := testTarget
 				if !filepathIsAbs(absImpl) && cwd != "" {
 					absImpl = cwd + string(os.PathSeparator) + absImpl
 				}
@@ -254,6 +335,7 @@ func typecalcTestTool() llm.Tool {
 					ImplPath:        absImpl,
 					TracePath:       absTrace,
 					PortObservation: obj.PortObservation,
+					ImplSymbol:      obj.ImplSymbol,
 				})
 				if ok {
 					testSource = rendered
@@ -275,6 +357,18 @@ func typecalcTestTool() llm.Tool {
 			}
 			rendered, _ := renderTypedValue(out)
 			implHash := typecalc.HashSource(string(implBody))
+			// v9.0.5: hash the FRAGMENT (per-object source) when present,
+			// not the temp test bundle (whose <script>-wrap noise would
+			// drift on every test run).
+			hashTarget := testTarget
+			hashContent := string(implBody)
+			if obj.ImplFragment != nil && *obj.ImplFragment != "" {
+				if fbody, err := os.ReadFile(*obj.ImplFragment); err == nil {
+					hashTarget = *obj.ImplFragment
+					hashContent = string(fbody)
+				}
+			}
+			symbolHash := computeSymbolHash(hashContent, hashTarget, obj.ImplSymbol, objectID)
 			effectiveLang := string(typecalc.DetectEffectiveLang(string(implBody), langTag))
 			// 2026-05-09 v8.6 — emit a short, greppable status line to
 			// stderr so test results are observable in the agent log.
@@ -284,11 +378,11 @@ func typecalcTestTool() llm.Tool {
 			// noted "Tested<Pass>" was hard to track for some agents).
 			emitTestStatusLine(objectID, out)
 			if out.State == typecalc.StateTestedPass {
-				if recErr := typecalc.RecordEvidenceFull(objectID, "test", effectiveLang, true, rendered, implHash); recErr != nil {
+				if recErr := typecalc.RecordEvidenceWithSymbol(objectID, "test", effectiveLang, true, rendered, implHash, symbolHash); recErr != nil {
 					return "", recErr
 				}
 			} else if out.Kind == typecalc.KindInsufficient {
-				if recErr := typecalc.RecordEvidenceFull(objectID, "insufficient", effectiveLang, false, out.Payload, implHash); recErr != nil {
+				if recErr := typecalc.RecordEvidenceWithSymbol(objectID, "insufficient", effectiveLang, false, out.Payload, implHash, symbolHash); recErr != nil {
 					return "", recErr
 				}
 			} else if out.Kind == typecalc.KindTestError {
@@ -303,7 +397,7 @@ func typecalcTestTool() llm.Tool {
 				// the TestError record just stops the misleading gate
 				// language and lets reasonableness review weigh in on
 				// borderline cases (6/8 passing is signal).
-				if recErr := typecalc.RecordEvidenceFull(objectID, "test", effectiveLang, false, out.Payload, implHash); recErr != nil {
+				if recErr := typecalc.RecordEvidenceWithSymbol(objectID, "test", effectiveLang, false, out.Payload, implHash, symbolHash); recErr != nil {
 					return "", recErr
 				}
 			}

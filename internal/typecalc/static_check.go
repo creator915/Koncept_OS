@@ -1,10 +1,11 @@
 package typecalc
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/graph"
 )
@@ -82,6 +83,10 @@ func StaticCheck(cwd string, g *graph.Graph, objID string) []StaticIssue {
 	{
 		need := append([]string{}, obj.Produces...)
 		need = append(need, obj.Mutates...)
+		needSet := map[string]bool{}
+		for _, p := range need {
+			needSet[p] = true
+		}
 		for _, port := range need {
 			if obj.PortObservation == nil {
 				push("port-observation-required", objID, fmt.Sprintf(
@@ -94,6 +99,32 @@ func StaticCheck(cwd string, g *graph.Graph, objID string) []StaticIssue {
 					"port %q has no extractor — add to portObservation (allowed: \"global\", \"return.<path>\", \"args.<n>.<path>\", \"side_effect\")",
 					port))
 			}
+		}
+
+		// 4.6 F (v9.0.1): port-observation-orphan-key. Every KEY in
+		//     portObservation must be a declared output (produces ∪
+		//     mutates). v9.0 pong-01 burned 70 minutes on the inverse
+		//     blindspot: the agent wrote portObservation keys in
+		//     camelCase ("gameStatus") while the attribute id was
+		//     snake_case ("game_status"). port-observation-required
+		//     fired correctly ("game_status missing extractor"), but
+		//     the orphan key sat there silently and the harness
+		//     returned undefined for the lookup — agent went down 3
+		//     wrong inference paths before stumbling on the real cause.
+		//     Catching it here turns a silent ~5-call retry loop into a
+		//     write-time error with a concrete suggestion.
+		for key := range obj.PortObservation {
+			if needSet[key] {
+				continue
+			}
+			msg := fmt.Sprintf(
+				"portObservation key %q is not in this object's outputs (produces ∪ mutates = [%s]) — the harness will silently return undefined for this key",
+				key, strings.Join(need, ", "))
+			if guess := suggestPortKey(key, need); guess != "" {
+				msg += fmt.Sprintf("; did you mean %q? (graph attribute IDs are snake_case; portObservation KEYS must match those IDs, only the EXTRACTOR value tracks the JS-side identifier — e.g. portObservation:{%q:\"return.%s\"})",
+					guess, guess, key)
+			}
+			push("port-observation-orphan-key", objID, msg)
 		}
 	}
 
@@ -144,17 +175,38 @@ func StaticCheck(cwd string, g *graph.Graph, objID string) []StaticIssue {
 	//         The ONLY fix is to re-run typecalc_compile or
 	//         typecalc_test (which captures the new hash). Any attempt
 	//         to make the gate pass without re-running fails.
+	// v9.0.2: per-object SymbolHash takes precedence over file-level
+	// SourceHash. Single-file HTML projects use SymbolHash so editing
+	// one object's function doesn't invalidate all other objects'
+	// evidence (4.3 spec-stale storm). Fall back to SourceHash when
+	// SymbolHash isn't available (non-HTML impl, symbol extraction
+	// failure, evidence from a pre-v9.0.2 run).
 	if obj.Impl != nil && *obj.Impl != "" && rec != nil {
 		path := *obj.Impl
 		if cwd != "" && !filepath.IsAbs(path) {
 			path = filepath.Join(cwd, path)
 		}
 		if body, err := os.ReadFile(path); err == nil {
-			currentHash := HashSource(string(body))
-			if rec.ImplHash != "" && rec.ImplHash != currentHash {
+			fileHash := HashSource(string(body))
+			b, hasBundle := ReadBundle(objID)
+			stored := rec.ImplHash
+			current := fileHash
+			scope := "file"
+			if hasBundle && b.SymbolHash != "" {
+				symbol := obj.ImplSymbol
+				if symbol == "" {
+					symbol = objID
+				}
+				if curSymbolHash, ok := SymbolFragmentHash(string(body), *obj.Impl, symbol); ok {
+					stored = b.SymbolHash
+					current = curSymbolHash
+					scope = "symbol"
+				}
+			}
+			if stored != "" && stored != current {
 				push("evidence-stale", objID, fmt.Sprintf(
-					"compile/test evidence is for impl hash %s but the current impl is %s — re-run typecalc_compile or typecalc_test to refresh",
-					shortHash(rec.ImplHash), shortHash(currentHash)))
+					"compile/test evidence is for %s hash %s but the current impl %s hash is %s — re-run typecalc_compile or typecalc_test to refresh",
+					scope, shortHash(stored), scope, shortHash(current)))
 			}
 		}
 	}
@@ -175,8 +227,11 @@ func StaticCheck(cwd string, g *graph.Graph, objID string) []StaticIssue {
 		}
 	}
 
-	// 6. Spec description present and not stale. Stale = SHA-256 of impl
-	//    content differs from the spec's recorded SourceHash.
+	// 6. Spec description present and not stale.
+	// v9.0.2: stale = the per-object fragment hash drift if SymbolHash
+	// is recorded, else fall back to whole-file SourceHash drift. This
+	// is the staleness-storm fix from 4.3 — single-file HTML projects
+	// won't re-describe every object on every edit.
 	spec, specOK := ReadSpec(objID)
 	if !specOK {
 		push("spec-missing", objID, fmt.Sprintf(
@@ -188,14 +243,349 @@ func StaticCheck(cwd string, g *graph.Graph, objID string) []StaticIssue {
 			path = filepath.Join(cwd, path)
 		}
 		if body, err := os.ReadFile(path); err == nil {
-			if HashSource(string(body)) != spec.SourceHash {
+			stale := false
+			if spec.SymbolHash != "" {
+				symbol := obj.ImplSymbol
+				if symbol == "" {
+					symbol = objID
+				}
+				if curSym, ok := SymbolFragmentHash(string(body), *obj.Impl, symbol); ok {
+					stale = curSym != spec.SymbolHash
+				} else {
+					// fragment extraction failed — fall back to file hash
+					stale = HashSource(string(body)) != spec.SourceHash
+				}
+			} else {
+				stale = HashSource(string(body)) != spec.SourceHash
+			}
+			if stale {
 				push("spec-stale", objID,
 					"description was generated against an earlier version of impl — re-run typecalc_describe to regenerate")
 			}
 		}
 	}
 
+	// 7. v9.0.5 defs-must-throw — JavaScript signature files at
+	//    `<obj.Def>` must NOT contain real implementations. TS defs
+	//    use declaration-only syntax that can't carry executable
+	//    bodies; JS defs HAVE to give every function a body (parse
+	//    error otherwise), so the only safe pattern is a stub that
+	//    `throw new Error(...)`-s immediately. Without this rule,
+	//    agents can write `function Foo(){return 0;}` in defs/ and
+	//    use that as fake "impl" evidence (the kcpos chain would
+	//    happily compile-pass it). The rule fires when defs/<id>.js
+	//    contains any function body whose first non-comment statement
+	//    is not `throw`.
+	if cwd != "" && obj.Def != "" {
+		defPath := obj.Def
+		if !filepath.IsAbs(defPath) {
+			defPath = filepath.Join(cwd, defPath)
+		}
+		if ext := strings.ToLower(filepath.Ext(defPath)); ext == ".js" {
+			if body, err := os.ReadFile(defPath); err == nil {
+				if nonThrow := findNonThrowFunctionBodies(string(body)); len(nonThrow) > 0 {
+					push("defs-must-throw", objID, fmt.Sprintf(
+						"JS def file %s contains %d function(s) whose body does not immediately `throw new Error(...)`: %s — defs are contract-only stubs in JS (TS uses declaration syntax instead). Replace each body with `throw new Error(\"<name>: contract-only; implement in K/frags/<ObjectId>.js\")` so the def cannot be mistaken for a real implementation.",
+						obj.Def, len(nonThrow), strings.Join(nonThrow, ", ")))
+				}
+			}
+		}
+	}
+
+	// 8. v9.0.5 frags-non-trivial — the fragment file an object
+	//    declares via ImplFragment must contain a non-trivial body for
+	//    each function it defines. Trivial = body is one line of
+	//    `return <literal>` / empty / pure-return-of-arg with no
+	//    branching, no loops, no side effects. The check is approximate
+	//    but catches the common "agent wrote `function Foo(){return 0;}`
+	//    in frags/ to pass compile" cheat. Real implementations have
+	//    AT LEAST one `if` / `for` / `while` / multi-statement body or
+	//    a `return` with a non-literal expression.
+	if obj.ImplFragment != nil && *obj.ImplFragment != "" {
+		fragPath := *obj.ImplFragment
+		if cwd != "" && !filepath.IsAbs(fragPath) {
+			fragPath = filepath.Join(cwd, fragPath)
+		}
+		if body, err := os.ReadFile(fragPath); err == nil {
+			if trivial := findTrivialFunctionBodies(string(body)); len(trivial) > 0 {
+				push("frags-non-trivial", objID, fmt.Sprintf(
+					"fragment file %s contains %d function(s) with a trivial body: %s — agents must not satisfy the frags requirement with `return 0` / `return {}` stubs. Implement the real logic per the def's @param / @returns / @example.",
+					*obj.ImplFragment, len(trivial), strings.Join(trivial, ", ")))
+			}
+		}
+	}
+
+	// 9. v9.0.6 defs-entity-1to1 — every function declared inside
+	//    `K/defs/<id>.js` must have a name that is either the object
+	//    id itself or its declared ImplSymbol. This blocks the v9.0.5
+	//    bypass where an agent writes an unmodeled helper function
+	//    inside a def file (so it gets shipped into index.html via
+	//    fragment concat but never reaches confirm_object). When the
+	//    function set in the def doesn't 1:1 match the graph entity,
+	//    declare it as a separate graph object first.
+	if cwd != "" && obj.Def != "" {
+		defPath := obj.Def
+		if !filepath.IsAbs(defPath) {
+			defPath = filepath.Join(cwd, defPath)
+		}
+		if strings.HasSuffix(strings.ToLower(defPath), ".js") {
+			if body, err := os.ReadFile(defPath); err == nil {
+				allowed := map[string]bool{objID: true}
+				if obj.ImplSymbol != "" {
+					allowed[obj.ImplSymbol] = true
+				}
+				if extras := findExtraFunctionNames(string(body), allowed); len(extras) > 0 {
+					push("defs-entity-1to1", objID, fmt.Sprintf(
+						"def file %s declares function(s) outside the object's id/implSymbol mapping: %s — each function in a JS def must correspond to a graph object (its name must equal %q%s). Either model these as separate graph objects (graph_create_object), or move them out of the def file into a properly-modeled location.",
+						obj.Def, strings.Join(extras, ", "), objID,
+						func() string {
+							if obj.ImplSymbol != "" {
+								return " or " + obj.ImplSymbol
+							}
+							return ""
+						}()))
+				}
+			}
+		}
+	}
+
+	// 10. v9.0.6 frags-content-matches-def — the set of function
+	//     names in `K/frags/<id>.js` must equal the set in
+	//     `K/defs/<id>.js`. Mismatch means either (a) the agent wrote
+	//     helper functions in the fragment that aren't documented in
+	//     the def — these go unverified by the synthesizer (which
+	//     reads defs for ground truth), or (b) the agent forgot to
+	//     implement a function declared in the def — meaning the
+	//     fragment ships incomplete code. Both states are caught here.
+	if obj.ImplFragment != nil && *obj.ImplFragment != "" && cwd != "" && obj.Def != "" {
+		defPath := obj.Def
+		fragPath := *obj.ImplFragment
+		if !filepath.IsAbs(defPath) {
+			defPath = filepath.Join(cwd, defPath)
+		}
+		if !filepath.IsAbs(fragPath) {
+			fragPath = filepath.Join(cwd, fragPath)
+		}
+		defLow := strings.ToLower(defPath)
+		fragLow := strings.ToLower(fragPath)
+		if strings.HasSuffix(defLow, ".js") && strings.HasSuffix(fragLow, ".js") {
+			defNames := readFunctionNames(defPath)
+			fragNames := readFunctionNames(fragPath)
+			if len(defNames) > 0 && len(fragNames) > 0 {
+				missing := setDiff(defNames, fragNames)
+				extra := setDiff(fragNames, defNames)
+				if len(missing) > 0 {
+					push("frags-content-matches-def", objID, fmt.Sprintf(
+						"fragment %s is missing %d function(s) declared in def %s: %s — implement every function the def documents, or remove the unused declarations from the def file.",
+						*obj.ImplFragment, len(missing), obj.Def, strings.Join(missing, ", ")))
+				}
+				if len(extra) > 0 {
+					push("frags-content-matches-def", objID, fmt.Sprintf(
+						"fragment %s declares %d function(s) not in def %s: %s — every function shipped to the deliverable must be documented in the def with @param / @returns / @example. Either add the def entries, or move helpers into another modelled graph object.",
+						*obj.ImplFragment, len(extra), obj.Def, strings.Join(extra, ", ")))
+				}
+			}
+		}
+	}
+
 	return issues
+}
+
+// findExtraFunctionNames returns the names of function declarations
+// in src that are NOT in the allowed set. Used by defs-entity-1to1.
+func findExtraFunctionNames(src string, allowed map[string]bool) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, body := range scanFunctionBodies(src) {
+		if allowed[body.name] {
+			continue
+		}
+		if seen[body.name] {
+			continue
+		}
+		seen[body.name] = true
+		out = append(out, body.name)
+	}
+	return out
+}
+
+// readFunctionNames returns the set of function declaration names in
+// the file at path. Returns nil on read error so caller can decide
+// whether to report.
+func readFunctionNames(path string) []string {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, fb := range scanFunctionBodies(string(body)) {
+		if seen[fb.name] {
+			continue
+		}
+		seen[fb.name] = true
+		out = append(out, fb.name)
+	}
+	return out
+}
+
+// setDiff returns elements in `a` that are not in `b`.
+func setDiff(a, b []string) []string {
+	bSet := map[string]bool{}
+	for _, v := range b {
+		bSet[v] = true
+	}
+	var out []string
+	for _, v := range a {
+		if !bSet[v] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// fnDeclRe matches a `function Name(...)` declaration. The argument
+// list (m[2]) is captured but unused; m[1] is the function name. We
+// use this to walk the source and locate brace-balanced bodies.
+var fnDeclRe = regexp.MustCompile(`function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([^)]*)\)\s*\{`)
+
+// findNonThrowFunctionBodies returns the names of functions whose
+// body's first non-comment, non-blank statement is NOT `throw`.
+// Used by the defs-must-throw rule.
+func findNonThrowFunctionBodies(src string) []string {
+	var out []string
+	for _, body := range scanFunctionBodies(src) {
+		stmt := firstNonCommentStatement(body.body)
+		if !strings.HasPrefix(stmt, "throw") {
+			out = append(out, body.name)
+		}
+	}
+	return out
+}
+
+// findTrivialFunctionBodies returns the names of functions whose body
+// is "trivial" by the rule above (single return-of-literal, empty,
+// pass-through). Used by the frags-non-trivial rule.
+func findTrivialFunctionBodies(src string) []string {
+	var out []string
+	for _, body := range scanFunctionBodies(src) {
+		if isTrivialBody(body.body) {
+			out = append(out, body.name)
+		}
+	}
+	return out
+}
+
+type fnBody struct {
+	name string
+	body string // text between the opening { and matching }
+}
+
+// scanFunctionBodies parses `function Name(...){...}` declarations and
+// returns each one's body text. Naive: doesn't handle method
+// definitions inside classes or arrow functions — defs/frags files in
+// kcpos are conventionally script-style function declarations, so
+// that's the only shape we need to inspect.
+func scanFunctionBodies(src string) []fnBody {
+	var out []fnBody
+	matches := fnDeclRe.FindAllStringSubmatchIndex(src, -1)
+	for _, m := range matches {
+		name := src[m[2]:m[3]]
+		// Body starts at the `{` we matched; find its balanced `}`.
+		openIdx := m[1] - 1 // position of `{`
+		depth := 0
+		end := -1
+		for i := openIdx; i < len(src); i++ {
+			switch src[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = i
+					goto found
+				}
+			}
+		}
+		continue
+	found:
+		body := src[openIdx+1 : end]
+		out = append(out, fnBody{name: name, body: body})
+	}
+	return out
+}
+
+// firstNonCommentStatement returns the first non-whitespace,
+// non-comment line of body (stripped). Empty string if body is all
+// whitespace / comments.
+func firstNonCommentStatement(body string) string {
+	lines := strings.Split(body, "\n")
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "//") || strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*") {
+			continue
+		}
+		return t
+	}
+	return ""
+}
+
+// trivialBodyRe matches function bodies that consist of a single
+// `return <literal>` statement (with optional surrounding whitespace).
+// Literals checked: number, string, bool, null, undefined, [], {},
+// or simple identifier (which catches `return x;` pass-throughs).
+var trivialBodyRe = regexp.MustCompile(`^\s*(?:return\s+(?:-?[0-9]+(?:\.[0-9]+)?|"[^"]*"|'[^']*'|true|false|null|undefined|\[\s*\]|\{\s*\}|[A-Za-z_$][A-Za-z0-9_$]*)\s*;?\s*|return\s*;?\s*)$`)
+
+// isTrivialBody returns true when the function body matches one of
+// the well-known stub shapes that should not satisfy frags-non-trivial.
+func isTrivialBody(body string) bool {
+	// Strip comments line-by-line so `// docstring` inside a body
+	// doesn't fool the regex.
+	var cleaned []string
+	for _, ln := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "//") || strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*") {
+			continue
+		}
+		cleaned = append(cleaned, t)
+	}
+	if len(cleaned) == 0 {
+		return true // empty body
+	}
+	if len(cleaned) > 1 {
+		return false // multi-statement bodies are non-trivial by length
+	}
+	return trivialBodyRe.MatchString(cleaned[0])
+}
+
+// suggestPortKey returns the best candidate output for an orphan
+// portObservation key by comparing case-folded / non-alnum-stripped
+// normalizations ("gameStatus" → "gamestatus" matches "game_status").
+// Returns "" when nothing is close enough.
+func suggestPortKey(orphan string, candidates []string) string {
+	target := normalizePortName(orphan)
+	if target == "" {
+		return ""
+	}
+	for _, c := range candidates {
+		if normalizePortName(c) == target {
+			return c
+		}
+	}
+	return ""
+}
+
+func normalizePortName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // shortHash truncates a SHA-256 hex string for human-readable error
@@ -207,24 +597,24 @@ func shortHash(s string) string {
 	return s
 }
 
-// readBaseEvidence is a lightweight reader for the existing
-// <id>.json compile/test record (kind=compile|test). Returns
-// (rec, ok) — false if the file is missing or unparseable.
+// readBaseEvidence is a thin wrapper around ReadEvidence (v9.0: bundle
+// reader). Kept as a function for the cwd parameter — callers pass cwd
+// so they can run static checks against fixture trees that aren't the
+// process's working directory. We chdir-in, ReadEvidence, chdir-back.
 func readBaseEvidence(cwd, objectID string) (*EvidenceRecord, bool) {
 	if objectID == "" {
 		return nil, false
 	}
-	path := filepath.Join(EvidenceDir, objectID+".json")
-	if cwd != "" && !filepath.IsAbs(path) {
-		path = filepath.Join(cwd, path)
+	if cwd == "" || cwd == "." {
+		return ReadEvidence(objectID)
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) == 0 {
+	prev, err := os.Getwd()
+	if err != nil {
 		return nil, false
 	}
-	var rec EvidenceRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
+	defer func() { _ = os.Chdir(prev) }()
+	if err := os.Chdir(cwd); err != nil {
 		return nil, false
 	}
-	return &rec, true
+	return ReadEvidence(objectID)
 }

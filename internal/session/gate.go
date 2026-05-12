@@ -1,7 +1,6 @@
 package session
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/creator915/Koncept_OS/internal/checkpoint"
 	"github.com/creator915/Koncept_OS/internal/graph"
+	"github.com/creator915/Koncept_OS/internal/typecalc"
 )
 
 // GateReport summarizes the result of a session-finish gate check.
@@ -129,189 +129,31 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 	var waiverObjects []string
 	if s.Parent == "" && err == nil {
 		cwd, _ := os.Getwd()
-		// Check every object the graph contains, regardless of which session created it.
+		// v8.8 refactor: delegate per-object checks to CheckObjectGate
+		// so the same logic powers both the root finish gate AND the
+		// per-object early-feedback path (the new gate_object tool +
+		// graph_merge_object hook). The aggregated per-object issues
+		// remain part of the root report; cross-object checks
+		// (attrs-backfilled, waiver-flood, checkpoint-pass) follow.
 		for objID, obj := range g.Objects {
-			if obj.Status != graph.StatusConfirmed {
-				r.Issues = append(r.Issues, fmt.Sprintf("[root-deliver] object %s status=%s (root finish requires every graph object to be confirmed)", objID, obj.Status))
-				continue
-			}
-			if obj.Impl == nil || *obj.Impl == "" {
-				r.Issues = append(r.Issues, fmt.Sprintf("[root-deliver] object %s confirmed but no impl path set", objID))
-				continue
-			}
-			if !implFileOK(*obj.Impl, cwd) {
-				r.Issues = append(r.Issues, fmt.Sprintf("[root-deliver] object %s impl %q missing or empty on disk", objID, *obj.Impl))
-				continue
-			}
-			// produces-or-mutates-non-empty (5.1d + 5.3) — a confirmed
-			// object must EITHER produce at least one attribute (fresh
-			// output) OR mutate at least one (in-place write). The agent
-			// has been observed to remove `produces` edges to break
-			// cycles, leaving the object claiming no effects at all;
-			// this rule blocks that. With mutates now available, the
-			// agent should re-link as graph_link_mutate instead of just
-			// deleting the edge.
-			if len(obj.Produces) == 0 && len(obj.Mutates) == 0 {
-				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[produces-or-mutates-non-empty] confirmed object %s has produces=[] AND mutates=[]; "+
-						"a confirmed function must declare at least one effect — use graph_link_produce for fresh output OR graph_link_mutate for in-place mutation",
-					objID))
-			}
-			// typecalc evidence — every confirmed object on the root graph
-			// must have a passing typecalc-compile/test record on disk. The
-			// hook already flags individual merges that skipped evidence;
-			// the gate makes this load-bearing for finish.
-			ev, ok := readEvidence(cwd, objID)
-			if !ok {
-				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[root-deliver] object %s confirmed but no typecalc evidence at .kcpos/typecalc-evidence/%s.json — run typecalc_compile/typecalc_test with object_id=%q before finishing root",
-					objID, objID, objID))
-				continue
-			}
-			// D4: obstacle evidence — agent has explicitly given up on
-			// automated convergence for this object. Gate refuses
-			// unless paired with a waiver (which captures the human's
-			// decision to accept).
-			obstaclePath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".obstacle.json")
-			waiverPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".waiver.json")
-			hasObstacle := false
-			hasWaiver := false
-			if _, statErr := os.Stat(obstaclePath); statErr == nil {
-				hasObstacle = true
-			}
-			if _, statErr := os.Stat(waiverPath); statErr == nil {
-				hasWaiver = true
-			}
-			if hasObstacle && !hasWaiver {
-				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[obstacle-needs-waiver] object %s has an obstacle record at .kcpos/typecalc-evidence/%s.obstacle.json — human review required. Resolve by deleting the obstacle file (after fixing the underlying issue) OR by recording typecalc_waive with reason explaining out-of-band acceptance.",
-					objID, objID))
-			}
-			// 2026-05-09 v8.5 — obstacle+waiver as test-evidence
-			// substitute. Previously the gate only honored
-			// (obstacle, waiver) for `kind=insufficient`. The v8 batch
-			// (pong-01) showed agents legitimately reach "tests run
-			// but a few cases fail for harness-mock reasons" and have
-			// no escape: ev.OK=false on `kind=test` was a hard fail,
-			// no matter how thorough the obstacle/waiver pair was.
-			// Now: if both an obstacle.json AND a waiver.json exist,
-			// AND the waiver is non-trivial (the typecalc_waive tool
-			// already enforces ≥30 chars + no hand-wavy phrases), the
-			// gate treats the object as having structurally-acceptable
-			// evidence and skips the OK/kind/insufficient branches.
-			// The accepted-evidence-required check still runs after,
-			// so review must still pass — this carve-out only relaxes
-			// the kind=test ok=true demand, NOT the reasonableness layer.
-			passViaWaiver := hasObstacle && hasWaiver
-			_ = passViaWaiver
-
-			// v8.7 — waiver-flood accounting. Track every confirmed
-			// object regardless of evidence path; track the subset that
-			// went through obstacle+waiver. Post-loop we apply the
-			// 75% threshold and emit [waiver-flood] if exceeded.
-			totalConfirmed++
-			if passViaWaiver {
-				waiveredConfirmed++
-				waiverObjects = append(waiverObjects, objID)
-			}
-
-			// D1: kind=insufficient is the "I cannot verify this"
-			// response from the lang invokers. It's NOT a fail — it's
-			// a signal that mechanical verification is impossible for
-			// this language/situation. The gate accepts it ONLY when a
-			// matching waiver evidence exists (typecalc_waive). Without
-			// the waiver, this is a structural failure: human decision
-			// required before this object can be confirmed.
-			if ev.Kind == "insufficient" {
-				if !hasWaiver {
-					r.Issues = append(r.Issues, fmt.Sprintf(
-						"[insufficient-needs-waiver] object %s has kind=insufficient evidence (kcpos cannot mechanically verify language %q) and no waiver at .kcpos/typecalc-evidence/%s.waiver.json — call typecalc_waive object_id=%q reason=<specific out-of-band verification plan>",
-						objID, ev.Lang, objID, objID))
+			issues, info := CheckObjectGate(g, objID, cwd)
+			r.Issues = append(r.Issues, issues...)
+			// Track confirmed/waiver accounting for the post-loop
+			// waiver-flood probe. Only confirmed objects with passing
+			// evidence existence count; status-issues are reported
+			// already inline.
+			if obj.Status == graph.StatusConfirmed && info.HasEvidence {
+				totalConfirmed++
+				// v9.0.1 G — structural waivers don't count toward
+				// flood. HTML-single-file projects legitimately need
+				// many of those (DOM I/O, Canvas, side-effect-only
+				// objects) and the flood gate would otherwise block
+				// a correct project. Only pragmatic-or-empty waivers
+				// count.
+				if info.PassViaWaiver && info.WaiverKind != typecalc.WaiverKindStructural {
+					waiveredConfirmed++
+					waiverObjects = append(waiverObjects, objID)
 				}
-			} else if !ev.OK {
-				// typecalc-evidence-passing (5.1c) — existence isn't enough;
-				// the recorded run must have ok=true. v8.5: an
-				// obstacle+waiver pair is an acceptable substitute —
-				// agent has explicitly admitted "tests fail for
-				// structural reasons, here's manual verification" and
-				// the human-equivalent check has been recorded. Without
-				// the pair, demand a clean ok=true.
-				if !passViaWaiver {
-					r.Issues = append(r.Issues, fmt.Sprintf(
-						"[typecalc-evidence-passing] object %s evidence file records ok=false — re-run typecalc_compile/typecalc_test until it passes, OR escalate via typecalc_obstacle + typecalc_waive describing why mechanical verification is structurally infeasible",
-						objID))
-					continue
-				}
-			} else if requiresTestEvidence(ev.Lang) && ev.Kind != "test" {
-				// For languages whose test runner kcpos can drive
-				// (Go / TS / JS / Python / HTML), confirmed objects
-				// need kind=test evidence, not just kind=compile.
-				// v8.5: obstacle+waiver also satisfies this — the
-				// agent demonstrated they tried and the harness/code
-				// pairing is structurally not testable in this form.
-				if !passViaWaiver {
-					r.Issues = append(r.Issues, fmt.Sprintf(
-						"[typecalc-test-required] object %s has only compile evidence (kind=%q) — language %q has a test runner; run typecalc_test with object_id=%q to attest a passing test, OR escalate via typecalc_obstacle + typecalc_waive describing why this object cannot be tested",
-						objID, ev.Kind, ev.Lang, objID))
-				}
-			} else if !requiresTestEvidence(ev.Lang) && ev.Kind == "compile" {
-				// D1: For non-testable langs (Rust / Java / HTML),
-				// kind=compile USED to be accepted as fallback. After
-				// D1, compile alone is no longer enough — those langs
-				// must produce kind=insufficient + waiver, not slip
-				// through on a compile pass.
-				//
-				// v8.6 — obstacle+waiver also satisfies this. The
-				// pong-03 v8.5 case wrote 4/4 kind=compile + waiver
-				// (synthesizer returned CANNOT_SYNTHESIZE for some
-				// objects → no test ever ran, but compile succeeded
-				// and the agent paired with obstacle+waiver). With
-				// the carve-out, that pattern is now a legitimate
-				// finish path.
-				if !passViaWaiver {
-					r.Issues = append(r.Issues, fmt.Sprintf(
-						"[compile-not-enough] object %s has only kind=compile evidence for non-testable language %q — kcpos no longer accepts compile-only as proof. Either restructure the impl into a testable language (kind=test) or escalate via typecalc_obstacle + typecalc_waive describing why this object cannot produce test evidence.",
-						objID, ev.Lang))
-				}
-			}
-			// accepted-evidence-required — every confirmed object must
-			// also pass the two-tier acceptance check (typecalc_review:
-			// static structural filter + LLM reasonableness review).
-			// Compile/test evidence proves the code runs; the accepted
-			// evidence proves the code does what intent says it should.
-			// Without this, "confirmed" carries no fitness-for-purpose
-			// signal — the gate would PASS on a syntactically correct
-			// but semantically irrelevant impl.
-			//
-			// 2026-05-09 v8.6 — obstacle+waiver carve-out completion.
-			// v8.5 added the pair as a kind=test substitute but
-			// missed this branch: when typecalc_review short-circuits
-			// (static/runtime issues exist) it writes acc.OK=false
-			// with reasons "static or runtime check produced issues"
-			// — review never ran the LLM judge. The v8.5 batch
-			// (pong-01, pong-04) had complete obstacle+waiver pairs
-			// for harness-mock objects, but acc.OK=false kept the
-			// gate FAIL forever. Symmetric treatment: if the agent
-			// provided both signals (obstacle + waiver) AND the
-			// review file exists (the typecalc_review call DID
-			// happen), accept it as resolved — the human-equivalent
-			// judgment has been captured in the waiver reason.
-			// The missing-accepted branch still demands the call.
-			acc, accOK := readAcceptedEvidence(cwd, objID)
-			if !accOK {
-				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[accepted-evidence-required] object %s confirmed but no review evidence at .kcpos/typecalc-evidence/%s.accepted.json — run typecalc_describe + typecalc_review with object_id=%q before finishing root",
-					objID, objID, objID))
-				continue
-			}
-			if !acc.OK && !passViaWaiver {
-				reasons := strings.Join(acc.Reasonableness.Reasons, "; ")
-				if reasons == "" {
-					reasons = "(no reason recorded)"
-				}
-				r.Issues = append(r.Issues, fmt.Sprintf(
-					"[accepted-evidence-required] object %s review verdict failed: %s — fix and re-run typecalc_review, OR escalate via typecalc_obstacle + typecalc_waive describing why the review issues are not code defects",
-					objID, reasons))
 			}
 		}
 		// attrs-backfilled (5.1b) — every attribute produced by a confirmed
@@ -392,17 +234,6 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 			} else if c.Summary.FinalVerdict != checkpoint.VerdictPass {
 				r.Issues = append(r.Issues, fmt.Sprintf("[checkpoint-pass] checkpoint verdict is %s (need PASS)", c.Summary.FinalVerdict))
 			}
-
-			// 2026-05-11 v8.7 — gameplayProof is a recorded field
-			// (Item.GameplayProof) and an optional checkpoint_fill
-			// parameter, but the gate does NOT force-fail when it's
-			// missing. CLAUDE.md §5.5 R3 mandates both proofs for
-			// executable-deliverable projects, but agents currently
-			// have no reliable way to capture screenshots in this
-			// environment — turning the rule on prematurely would
-			// either force fabricated proofs or mass-waivers. Observe
-			// the natural fill rate first; promote to required once
-			// snap tooling is reliable.
 		}
 	}
 
@@ -410,6 +241,165 @@ func CheckGate(sessionDir, graphPath, checkpointPath, id string) (*GateReport, e
 		r.Status = "FAIL"
 	}
 	return r, nil
+}
+
+// ObjectGateInfo carries the side-data CheckObjectGate produces that
+// the caller (typically the session gate) needs for cross-object
+// accounting like waiver-flood detection.
+type ObjectGateInfo struct {
+	// HasEvidence is true when typecalc evidence (kind=test|compile|
+	// insufficient) exists on disk for this object. Used by callers
+	// to filter waiver-flood denominator to "objects that actually
+	// finished the verification pathway".
+	HasEvidence bool
+	// PassViaWaiver is true when both obstacle.json and waiver.json
+	// exist for this object — the v8.5+ escape pathway. Independent
+	// of HasEvidence so callers can detect waiver-only configurations.
+	PassViaWaiver bool
+	// WaiverKind (v9.0.1) is the discriminator on the waiver section
+	// (typecalc.WaiverKindStructural / WaiverKindPragmatic / ""). The
+	// session-level waiver-flood probe uses this to skip structural
+	// waivers (they're a property of the deliverable, not a bypass).
+	WaiverKind string
+}
+
+// CheckObjectGate runs the per-object portion of the gate: every
+// rule that judges a single object's confirmed status (impl exists,
+// evidence present, review accepted, obstacle/waiver pair correctness,
+// etc.). Pre-v8.8 this logic lived inline in CheckGate; the extraction
+// lets the same rules drive (a) root finish, (b) the gate_object tool
+// for explicit per-object queries, and (c) the graph_merge_object
+// hook that auto-runs on status=confirmed transitions for early
+// feedback.
+//
+// Cross-object rules (attrs-backfilled, waiver-flood, checkpoint-pass,
+// architecture-non-empty) remain in CheckGate — they require the full
+// graph context, not a single object.
+//
+// Returns issues plus side-data for the caller's accounting.
+func CheckObjectGate(g *graph.Graph, objID string, cwd string) ([]string, ObjectGateInfo) {
+	var issues []string
+	var info ObjectGateInfo
+
+	obj, present := g.Objects[objID]
+	if !present {
+		issues = append(issues, fmt.Sprintf("[root-deliver] object %s not in graph", objID))
+		return issues, info
+	}
+	if obj.Status != graph.StatusConfirmed {
+		issues = append(issues, fmt.Sprintf("[root-deliver] object %s status=%s (root finish requires every graph object to be confirmed)", objID, obj.Status))
+		return issues, info
+	}
+	if obj.Impl == nil || *obj.Impl == "" {
+		issues = append(issues, fmt.Sprintf("[root-deliver] object %s confirmed but no impl path set", objID))
+		return issues, info
+	}
+	if !implFileOK(*obj.Impl, cwd) {
+		issues = append(issues, fmt.Sprintf("[root-deliver] object %s impl %q missing or empty on disk", objID, *obj.Impl))
+		return issues, info
+	}
+	// produces-or-mutates-non-empty (5.1d + 5.3) — confirmed object
+	// must declare at least one effect (produce a fresh value OR
+	// mutate state in place). Re-link as graph_link_mutate instead
+	// of deleting produces edges to break cycles.
+	if len(obj.Produces) == 0 && len(obj.Mutates) == 0 {
+		issues = append(issues, fmt.Sprintf(
+			"[produces-or-mutates-non-empty] confirmed object %s has produces=[] AND mutates=[]; "+
+				"a confirmed function must declare at least one effect — use graph_link_produce for fresh output OR graph_link_mutate for in-place mutation",
+			objID))
+	}
+
+	// v9.0: single ObjectState load replaces the v8.x ad-hoc file probes
+	// + readEvidence + readAcceptedEvidence sequence. State carries all
+	// flags this rule cluster needs.
+	st := typecalc.LoadObjectState(objID, cwd)
+	if !st.HasCompileEvidence && !st.HasTestEvidence {
+		issues = append(issues, fmt.Sprintf(
+			"[root-deliver] object %s confirmed but no typecalc evidence at %s — run typecalc_compile/typecalc_test with object_id=%q before finishing root",
+			objID, typecalc.BundlePath(objID), objID))
+		return issues, info
+	}
+	info.HasEvidence = true
+
+	if st.HasObstacle && !st.HasWaiver {
+		issues = append(issues, fmt.Sprintf(
+			"[obstacle-needs-waiver] object %s has an obstacle record in %s — human review required. Resolve by clearing the obstacle (after fixing the underlying issue) OR by recording typecalc_waive with reason explaining out-of-band acceptance.",
+			objID, typecalc.BundlePath(objID)))
+	}
+	passViaWaiver := st.PassViaWaiver()
+	info.PassViaWaiver = passViaWaiver
+	info.WaiverKind = st.WaiverKind
+
+	// Pick the most-recent kind for downstream rule selection. v9.0
+	// stores compile/test as separate sections; the gate's existing
+	// "kind=test required for testable langs" rule still maps cleanly:
+	// if the Test section is present we use its Kind, else fall back to
+	// Compile.
+	kind := ""
+	lang := st.Lang
+	overallOK := false
+	switch {
+	case st.HasTestEvidence:
+		kind = st.TestKind
+		overallOK = st.TestOK
+	case st.HasCompileEvidence:
+		kind = st.CompileKind
+		overallOK = st.CompileOK
+	}
+
+	switch {
+	case kind == "insufficient":
+		if !st.HasWaiver {
+			issues = append(issues, fmt.Sprintf(
+				"[insufficient-needs-waiver] object %s has kind=insufficient evidence (kcpos cannot mechanically verify language %q) — call typecalc_waive object_id=%q reason=<specific out-of-band verification plan>",
+				objID, lang, objID))
+		}
+	case !overallOK:
+		if !passViaWaiver {
+			issues = append(issues, fmt.Sprintf(
+				"[typecalc-evidence-passing] object %s evidence records ok=false — re-run typecalc_compile/typecalc_test until it passes, OR escalate via typecalc_obstacle + typecalc_waive describing why mechanical verification is structurally infeasible",
+				objID))
+			return issues, info
+		}
+	case requiresTestEvidence(lang) && kind != "test":
+		if !passViaWaiver {
+			issues = append(issues, fmt.Sprintf(
+				"[typecalc-test-required] object %s has only compile evidence (kind=%q) — language %q has a test runner; run typecalc_test with object_id=%q to attest a passing test, OR escalate via typecalc_obstacle + typecalc_waive describing why this object cannot be tested",
+				objID, kind, lang, objID))
+		}
+	case !requiresTestEvidence(lang) && kind == "compile":
+		if !passViaWaiver {
+			issues = append(issues, fmt.Sprintf(
+				"[compile-not-enough] object %s has only kind=compile evidence for non-testable language %q — kcpos no longer accepts compile-only as proof. Either restructure the impl into a testable language (kind=test) or escalate via typecalc_obstacle + typecalc_waive describing why this object cannot produce test evidence.",
+				objID, lang))
+		}
+	}
+
+	// accepted-evidence-required — every confirmed object must pass
+	// reasonableness review (or substitute via obstacle+waiver).
+	if !st.HasAccepted {
+		issues = append(issues, fmt.Sprintf(
+			"[accepted-evidence-required] object %s confirmed but no review evidence in %s — run typecalc_describe + typecalc_review with object_id=%q before finishing root",
+			objID, typecalc.BundlePath(objID), objID))
+		return issues, info
+	}
+	if !st.AcceptedOK && !passViaWaiver {
+		// Load the bundle once more for the reasons list (cheap; LRU
+		// could be added but a single read is fine on the gate path).
+		acc, _ := typecalc.ReadAccepted(objID)
+		reasons := ""
+		if acc != nil {
+			reasons = strings.Join(acc.Reasonableness.Reasons, "; ")
+		}
+		if reasons == "" {
+			reasons = "(no reason recorded)"
+		}
+		issues = append(issues, fmt.Sprintf(
+			"[accepted-evidence-required] object %s review verdict failed: %s — fix and re-run typecalc_review, OR escalate via typecalc_obstacle + typecalc_waive describing why the review issues are not code defects",
+			objID, reasons))
+	}
+
+	return issues, info
 }
 
 func implFileOK(implPath, cwd string) bool {
@@ -424,19 +414,15 @@ func implFileOK(implPath, cwd string) bool {
 	return info.Size() > 0
 }
 
-// readObstacleReason loads the .obstacle.json file's `reason` field
-// for waiver-flood diversity analysis. Returns "" if missing/unreadable.
+// readObstacleReason loads the bundle's Obstacle section reason for
+// waiver-flood diversity analysis. Returns "" if missing/unreadable.
+// v9.0.1: reads the unified bundle at .kcpos/typecalc/<id>.json (the
+// previous v8.x path .kcpos/typecalc-evidence/<id>.obstacle.json was
+// stale dead code and silently returned "" for every v9.0 object,
+// defeating the diversity probe).
 func readObstacleReason(objectID string) string {
-	cwd, _ := os.Getwd()
-	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".obstacle.json")
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) == 0 {
-		return ""
-	}
-	var rec struct {
-		Reason string `json:"reason"`
-	}
-	if err := json.Unmarshal(raw, &rec); err != nil {
+	rec, ok := typecalc.ReadObstacle(objectID)
+	if !ok || rec == nil {
 		return ""
 	}
 	return rec.Reason
@@ -466,81 +452,13 @@ func max1(n int) int {
 }
 
 
-// evidenceRecord mirrors the JSON layout written by typecalc_compile /
-// typecalc_test (see internal/tools/typecalc.go recordTypecalcEvidence).
-// Kept private to this file — the canonical writer is tools/typecalc.go.
-type evidenceRecord struct {
-	ObjectID  string `json:"objectId"`
-	Kind      string `json:"kind"` // "compile" | "test"
-	Lang      string `json:"lang"`
-	OK        bool   `json:"ok"`
-	Timestamp string `json:"timestamp"`
-}
-
-// readEvidence loads .kcpos/typecalc-evidence/<objectID>.json. Returns
-// (record, true) on success; (zero, false) if the file is missing or
-// malformed. Callers should prefer this over typecalcEvidenceExistsAt
-// when they need to inspect kind/ok.
-func readEvidence(cwd, objectID string) (evidenceRecord, bool) {
-	if objectID == "" {
-		return evidenceRecord{}, false
-	}
-	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".json")
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) == 0 {
-		return evidenceRecord{}, false
-	}
-	var rec evidenceRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return evidenceRecord{}, false
-	}
-	return rec, true
-}
-
-// typecalcEvidenceExistsAt is preserved for callers that just need the
-// existence check. New gate code uses readEvidence to also inspect ok/kind.
-func typecalcEvidenceExistsAt(cwd, objectID string) bool {
-	_, ok := readEvidence(cwd, objectID)
-	return ok
-}
-
-// acceptedRecord mirrors typecalc.AcceptedEvidence — kept here to avoid
-// the gate package importing tools/typecalc (which would create a cycle
-// via the agent layer). The shape MUST stay in sync with the canonical
-// writer in internal/typecalc/evidence.go.
-type acceptedRecord struct {
-	ObjectID       string `json:"objectId"`
-	Kind           string `json:"kind"`
-	OK             bool   `json:"ok"`
-	Reasonableness struct {
-		Verdict    string   `json:"verdict"`
-		Reasons    []string `json:"reasons"`
-		Confidence float64  `json:"confidence"`
-	} `json:"reasonableness"`
-}
-
-// readAcceptedEvidence loads .kcpos/typecalc-evidence/<objectID>.accepted.json
-// — the reviewer verdict written by typecalc_review. Returns (rec, true)
-// on success.
-func readAcceptedEvidence(cwd, objectID string) (acceptedRecord, bool) {
-	if objectID == "" {
-		return acceptedRecord{}, false
-	}
-	path := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objectID+".accepted.json")
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) == 0 {
-		return acceptedRecord{}, false
-	}
-	var rec acceptedRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return acceptedRecord{}, false
-	}
-	return rec, true
-}
-
 // requiresTestEvidence reports whether the language has an in-tree test
 // runner kcpos can drive (so test evidence is achievable). Mirrors the
 // language switch in internal/typecalc/test.go TestRunInvoker.
+//
+// v9.0: the gate's per-object rules pull this from
+// typecalc.ObjectState.Lang via CheckObjectGate; this helper stays here
+// as the shared definition both old and new code paths can call.
 func requiresTestEvidence(lang string) bool {
 	switch lang {
 	case "Go", "TypeScript", "JavaScript", "Python":
@@ -565,11 +483,11 @@ func anyConfirmedTestable(graphPath string) bool {
 		if obj.Status != graph.StatusConfirmed {
 			continue
 		}
-		ev, ok := readEvidence(cwd, objID)
-		if !ok {
+		st := typecalc.LoadObjectState(objID, cwd)
+		if st.Lang == "" {
 			continue
 		}
-		if requiresTestEvidence(ev.Lang) {
+		if requiresTestEvidence(st.Lang) {
 			return true
 		}
 	}

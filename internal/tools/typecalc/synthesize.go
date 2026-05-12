@@ -94,6 +94,12 @@ func typecalcSynthesizeTestsTool() llm.Tool {
 			if obj.Def != "" {
 				defBody, _ = os.ReadFile(obj.Def)
 			}
+			// v9.0.5.4: extract any `@example` JSDoc blocks from the def
+			// body and surface them prominently to the LLM. Concrete I/O
+			// pairs are a far stronger grounding signal than @param /
+			// @returns alone — the synthesized cases will inherit the
+			// shape of the examples instead of inventing it from scratch.
+			examples := extractJSDocExamples(string(defBody))
 
 			// Language: argument > impl extension > "unknown".
 			lang := langArg
@@ -123,6 +129,7 @@ func typecalcSynthesizeTestsTool() llm.Tool {
 				Mutates:         obj.Mutates,
 				ValueSpace:      vs,
 				PortObservation: poJSON,
+				Examples:        examples,
 			})
 			if err != nil {
 				return "", err
@@ -164,6 +171,75 @@ func ifThenElse(cond bool, a, b string) string {
 		return a
 	}
 	return b
+}
+
+// extractJSDocExamples parses JSDoc-style `@example` blocks from a
+// .js def file. Each block starts with `* @example` and runs until
+// the next `@tag`, the JSDoc-closing `*/`, or another `@example`.
+// Returns the bodies (lines after `@example` up to the next marker)
+// with leading `*` decoration and indentation stripped, so each
+// element is ready to drop verbatim into the synthesizer prompt.
+//
+// Empty bodies are dropped (`@example` with no following content
+// would just be noise for the LLM).
+func extractJSDocExamples(src string) []string {
+	if src == "" {
+		return nil
+	}
+	var out []string
+	lines := strings.Split(src, "\n")
+	in := false
+	cur := []string{}
+	flush := func() {
+		if len(cur) == 0 {
+			return
+		}
+		body := strings.TrimRight(strings.Join(cur, "\n"), " \t\n")
+		if body != "" {
+			out = append(out, body)
+		}
+		cur = cur[:0]
+	}
+	stripStar := func(ln string) string {
+		t := strings.TrimSpace(ln)
+		t = strings.TrimPrefix(t, "*")
+		t = strings.TrimLeft(t, " \t")
+		return t
+	}
+	for _, ln := range lines {
+		trim := strings.TrimSpace(ln)
+		if strings.HasPrefix(trim, "*/") {
+			flush()
+			in = false
+			continue
+		}
+		if strings.Contains(trim, "@example") {
+			flush()
+			in = true
+			// optional trailing label after @example: "@example boundary" — keep it as the first line context.
+			afterTag := trim
+			if i := strings.Index(afterTag, "@example"); i >= 0 {
+				afterTag = strings.TrimSpace(afterTag[i+len("@example"):])
+			}
+			afterTag = strings.TrimLeft(afterTag, "* \t")
+			if afterTag != "" {
+				cur = append(cur, afterTag)
+			}
+			continue
+		}
+		if !in {
+			continue
+		}
+		// Stop collecting when we hit ANOTHER @tag.
+		if strings.HasPrefix(strings.TrimLeft(trim, "* \t"), "@") {
+			flush()
+			in = false
+			continue
+		}
+		cur = append(cur, stripStar(ln))
+	}
+	flush()
+	return out
 }
 
 func extOf(path string) string {

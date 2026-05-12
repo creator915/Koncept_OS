@@ -20,6 +20,8 @@ var mergeableAttrFields = map[string]bool{
 var mergeableObjectFields = map[string]bool{
 	"intent":          true,
 	"impl":            true,
+	"implFragment":    true,
+	"implSymbol":      true,
 	"status":          true,
 	"statusSession":   true,
 	"temporal":        true,
@@ -102,7 +104,7 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 	}
 	for k := range patch {
 		if !mergeableObjectFields[k] {
-			return fmt.Errorf("object merge: field %q is not mergeable (allowed: intent/impl/status/statusSession/temporal/preconditions/postconditions)", k)
+			return fmt.Errorf("object merge: field %q is not mergeable (allowed: intent/impl/implFragment/implSymbol/status/statusSession/temporal/preconditions/postconditions/portObservation)", k)
 		}
 	}
 	if v, has := patch["intent"]; has {
@@ -118,6 +120,24 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 			return err
 		}
 		o.Impl = ptr
+	}
+	if v, has := patch["implFragment"]; has {
+		ptr, err := stringPtrOrNil(v, "implFragment")
+		if err != nil {
+			return err
+		}
+		o.ImplFragment = ptr
+	}
+	if v, has := patch["implSymbol"]; has {
+		if v == nil {
+			o.ImplSymbol = ""
+		} else {
+			s, ok := v.(string)
+			if !ok {
+				return fmt.Errorf("implSymbol must be string or null")
+			}
+			o.ImplSymbol = s
+		}
 	}
 	if v, has := patch["status"]; has {
 		s, ok := v.(string)

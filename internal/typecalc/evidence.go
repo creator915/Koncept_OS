@@ -10,115 +10,197 @@ import (
 	"time"
 )
 
-// EvidenceDir is the on-disk record of which graph entities have been
-// mechanically validated via typecalc compile/test. The agent-side
-// `typecalc-use` enforcement hook checks for the presence of
-// <objectID>.json before allowing graph_merge_object status=confirmed —
-// without this trail, "confirmed" is just a string the LLM typed, not a
-// verified state.
+// EvidenceDir is the v8.x split-per-kind directory. v9.0 unified the
+// schema into a single bundle under BundleDir (.kcpos/typecalc/<id>.json,
+// see bundle.go). EvidenceDir is kept only as a constant for any
+// remaining legacy references; new code paths use BundlePath.
 //
-// Layout (one file per kind so newer evidence does not clobber older):
+// 2026-05-11 v9.0 — split files (.spec.json, .tests.json, etc.) no
+// longer exist; ReadSpec / WriteSpec / ReadEvidence etc. now load and
+// store sections of the unified bundle.
+const EvidenceDir = ".kcpos/typecalc"
+
+// Path helpers — v9.0 returns the unified bundle path for all kinds.
+// External tooling that wants to inspect a single section should
+// just read the bundle and pick the section.
+func SpecEvidencePath(objectID string) string     { return BundlePath(objectID) }
+func AcceptedEvidencePath(objectID string) string { return BundlePath(objectID) }
+func WaiverEvidencePath(objectID string) string   { return BundlePath(objectID) }
+func TestsEvidencePath(objectID string) string    { return BundlePath(objectID) }
+func EvidenceRecordPath(objectID string) string   { return BundlePath(objectID) }
+
+// RuntimeTracePath is kept for backward-compatible API surface but
+// now resolves to the same bundle path; the trace lives under the
+// RuntimeTrace section of the bundle.
+func RuntimeTracePath(objectID string) string { return BundlePath(objectID) }
+
+// HashSource returns the canonical SHA-256 (hex) of a content blob.
+// Used to detect when impl or spec has drifted out from under an
+// existing accepted record.
+func HashSource(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%x", h)
+}
+
+// SymbolFragmentHash returns the SHA-256 of the function-body fragment
+// belonging to `symbol` within `content`. v9.0.2 introduced per-object
+// staleness scoping: when the impl is HTML and multiple graph objects
+// share one index.html, hashing the whole file means editing one
+// function invalidates every object's evidence — the spec-stale storm.
+// Hashing just the relevant fragment lets unrelated edits leave this
+// object's spec intact.
 //
-//	<id>.json           kind=compile | kind=test  (existing schema)
-//	<id>.spec.json      auto-generated description (kind=spec)
-//	<id>.accepted.json  reviewer verdict           (kind=accepted)
-const EvidenceDir = ".kcpos/typecalc-evidence"
-
-// SpecEvidencePath returns the path to the auto-generated description
-// record for objectID. The file may or may not exist; callers should
-// treat absence as "not yet described".
-func SpecEvidencePath(objectID string) string {
-	return filepath.Join(EvidenceDir, objectID+".spec.json")
+// Returns (hash, true) when extraction succeeds. Returns
+// (HashSource(content), false) when extraction fails (non-HTML impl,
+// symbol not found, etc.) so callers can fall back to the whole-file
+// hash without branching.
+//
+// Extraction strategy (deliberately narrow): regex match of
+// `function <symbol>(...)` followed by a brace-balanced body. Misses
+// arrow-function definitions, methods on objects, and other styles —
+// those keep the whole-file fallback, which is correct (over-conservative)
+// rather than silently wrong.
+func SymbolFragmentHash(content, implPath, symbol string) (string, bool) {
+	frag, ok := ExtractSymbolFragment(content, implPath, symbol)
+	if !ok {
+		return HashSource(content), false
+	}
+	return HashSource(frag), true
 }
 
-// AcceptedEvidencePath returns the path to the reviewer-verdict record.
-func AcceptedEvidencePath(objectID string) string {
-	return filepath.Join(EvidenceDir, objectID+".accepted.json")
+// ExtractSymbolFragment locates the JS function body for `symbol`
+// inside `content`. Returns ("", false) when not applicable or not
+// found.
+func ExtractSymbolFragment(content, implPath, symbol string) (string, bool) {
+	if symbol == "" || content == "" {
+		return "", false
+	}
+	if !isHTMLPath(implPath) {
+		return "", false
+	}
+	// Find `function <symbol>(` — must be at a word boundary on the
+	// left so we don't match `myfunction`.
+	target := "function " + symbol
+	idx := strings.Index(content, target)
+	if idx < 0 {
+		return "", false
+	}
+	// Validate the character after `target` is `(` or whitespace then `(`.
+	rest := content[idx+len(target):]
+	i := 0
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+		i++
+	}
+	if i >= len(rest) || rest[i] != '(' {
+		return "", false
+	}
+	// Walk to the `)` matching the opening `(` (no nesting expected
+	// in argument list, but be defensive).
+	depth := 0
+	end := i
+	for end < len(rest) {
+		switch rest[end] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				goto foundParenEnd
+			}
+		}
+		end++
+	}
+	return "", false
+foundParenEnd:
+	// Skip whitespace until the opening `{` of the body.
+	body := rest[end+1:]
+	j := 0
+	for j < len(body) && (body[j] == ' ' || body[j] == '\t' || body[j] == '\n' || body[j] == '\r') {
+		j++
+	}
+	if j >= len(body) || body[j] != '{' {
+		return "", false
+	}
+	// Balance braces. Naive (no string/comment handling) — good enough
+	// for hashing; a false-positive matching `}` inside a string would
+	// just stop the fragment early, producing a different hash than
+	// `}`'s real owner — that's still stable across reads of the same
+	// content, so it doesn't break staleness logic.
+	depth = 0
+	k := j
+	for k < len(body) {
+		switch body[k] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return target + rest[:end+1] + body[j:k+1], true
+			}
+		}
+		k++
+	}
+	return "", false
 }
 
-// WaiverEvidencePath returns the path to a per-object waiver record.
-// Waivers exist to acknowledge that mechanical verification is not
-// possible (kind=insufficient evidence) and capture why we accept the
-// object anyway. The gate refuses to confirm an Insufficient object
-// without a matching waiver.
-func WaiverEvidencePath(objectID string) string {
-	return filepath.Join(EvidenceDir, objectID+".waiver.json")
+func isHTMLPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	lower := strings.ToLower(p)
+	return strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm")
 }
 
-// WaiverEvidence is the human-decision record that lets an Insufficient
-// object pass the gate. It MUST contain a Reason explaining how the
-// object will be verified out-of-band (manual review, screenshot,
-// downstream integration test, etc.). Auto-generated waivers are
-// rejected — the field is checked for non-emptiness against a
-// stop-list of hand-wavy phrases.
+// --- Section types (shared with bundle.go) ---
+
+// WaiverEvidence is the v8.x flat struct. Kept for callers that
+// construct waivers procedurally; v9.0 also accepts a *WaiverSection
+// directly via WriteWaiverSection.
+//
+// WaiverKind is the v9.0.1 discriminator — see WaiverSection. Empty
+// behaves as WaiverKindPragmatic (the v9.0 default before the field
+// existed). The legacy "Kind" field on this flat struct historically
+// held the literal "waiver" marker and is unrelated; the two fields
+// are kept independent on the v8.x facade.
 type WaiverEvidence struct {
-	ObjectID  string    `json:"objectId"`
-	Kind      string    `json:"kind"` // always "waiver"
-	Reason    string    `json:"reason"`
-	Verifier  string    `json:"verifier,omitempty"` // who/what does the out-of-band check
-	Timestamp time.Time `json:"timestamp"`
+	ObjectID   string    `json:"objectId"`
+	Kind       string    `json:"kind"`
+	Reason     string    `json:"reason"`
+	Verifier   string    `json:"verifier,omitempty"`
+	WaiverKind string    `json:"waiverKind,omitempty"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
-// TestsEvidencePath returns the path to the spec-synthesized test
-// suite. When the agent calls typecalc_synthesize_tests, the generated
-// suite is stored here so a later review can verify the tests came from
-// the spec (not the impl) and detect drift via TestsHash.
-func TestsEvidencePath(objectID string) string {
-	return filepath.Join(EvidenceDir, objectID+".tests.json")
-}
-
-// RuntimeTracePath is the per-object runtime call log produced by the
-// instrumented test suite. Tests synthesized by typecalc_synthesize_tests
-// are instructed to append every call's inputs and outputs here so the
-// runtime check (B-side: "ports / value range / timing") can compare
-// observed values against the graph's valueSpace / produces / temporal
-// declarations.
-func RuntimeTracePath(objectID string) string {
-	return filepath.Join(".kcpos", "typecalc-runtime", objectID+".json")
-}
-
-// SpecEvidence is the post-implementation description an LLM produces
-// after reading the impl + signature. It supplements (does not replace)
-// the original `intent` field on the graph; downstream review compares
-// the two.
-//
-// SourceHash is a SHA-256 of the impl content — if the impl changes
-// after the description was written, callers should consider the
-// description stale and regenerate.
+// SpecEvidence is the v8.x flat struct.
+// SymbolHash (v9.0.2): per-object fragment hash for single-file-impl
+// projects — see EvidenceBundle.SymbolHash. Optional.
 type SpecEvidence struct {
 	ObjectID    string    `json:"objectId"`
-	Kind        string    `json:"kind"` // always "spec"
+	Kind        string    `json:"kind"`
 	Description string    `json:"description"`
 	SourceHash  string    `json:"sourceHash"`
+	SymbolHash  string    `json:"symbolHash,omitempty"`
 	Timestamp   time.Time `json:"timestamp"`
 }
 
-// StaticIssue is one finding from the mechanical (non-LLM) check that
-// runs before the reasonableness review. Examples: produces declared
-// but never returned, valueSpace empty on a confirmed attribute, impl
-// missing.
+// StaticIssue is one finding from the mechanical (non-LLM) checker.
 type StaticIssue struct {
 	Code    string `json:"code"`
 	Where   string `json:"where"`
 	Message string `json:"message"`
 }
 
-// ReviewVerdict is the LLM's reasonableness judgement. `Verdict` is
-// "pass" | "fail"; `Confidence` is a self-stated 0–1.
+// ReviewVerdict is the LLM's reasonableness verdict.
 type ReviewVerdict struct {
 	Verdict    string   `json:"verdict"`
 	Reasons    []string `json:"reasons"`
 	Confidence float64  `json:"confidence"`
 }
 
-// AcceptedEvidence is the combined output of the static check + the
-// reasonableness review. `OK` is true iff there are no static issues
-// AND the LLM verdict is "pass". RuntimeIssues, when non-empty, also
-// flips OK to false — runtime port-signal mismatches are mechanical
-// failures, not opinions.
+// AcceptedEvidence is the v8.x flat struct.
 type AcceptedEvidence struct {
 	ObjectID       string        `json:"objectId"`
-	Kind           string        `json:"kind"` // always "accepted"
+	Kind           string        `json:"kind"`
 	OK             bool          `json:"ok"`
 	StaticIssues   []StaticIssue `json:"staticIssues"`
 	RuntimeIssues  []StaticIssue `json:"runtimeIssues,omitempty"`
@@ -129,275 +211,59 @@ type AcceptedEvidence struct {
 	Timestamp      time.Time     `json:"timestamp"`
 }
 
-// TestsEvidence is the spec-derived test suite produced by
-// typecalc_synthesize_tests. It is stored separately from the
-// description (SpecEvidence) so the reviewer can confirm tests came
-// from intent + description, not from the impl source.
-//
-// SpecHash is the source hash that was current at synthesis time; if
-// the impl drifts, the test suite is also (likely) stale.
-//
-// Two encodings supported:
-//
-//   - **Cases (preferred, schema-driven)**: structured test cases the
-//     language harness renders into runtime test code. The LLM only
-//     declares what to call and what to expect; the harness handles
-//     trace logging, assertion ordering ("appendTrace BEFORE assert"),
-//     port snapshotting, etc. This eliminates the class of issues
-//     where each LLM-written test framework differs and trace logging
-//     is lost on assertion failure.
-//   - **TestCode (legacy fallback)**: raw test source the LLM wrote
-//     directly. Used for languages without a harness implementation.
+// TestsEvidence is the v8.x flat struct.
 type TestsEvidence struct {
 	ObjectID  string     `json:"objectId"`
-	Kind      string     `json:"kind"` // always "tests"
+	Kind      string     `json:"kind"`
 	Lang      string     `json:"lang"`
 	SpecHash  string     `json:"specHash"`
 	Timestamp time.Time  `json:"timestamp"`
-	Cases     []TestCase `json:"cases,omitempty"`    // schema-driven (preferred)
-	TestCode  string     `json:"testCode,omitempty"` // legacy raw source
+	Cases     []TestCase `json:"cases,omitempty"`
+	TestCode  string     `json:"testCode,omitempty"`
 }
 
-// TestCase is one entry in a schema-driven test suite. The harness
-// renders setup → call → snapshot ports → appendTrace → assertions in
-// that fixed order, so trace logging cannot be skipped by an
-// assertion-throwing-first bug.
+// TestCase is one entry in a schema-driven test suite.
 type TestCase struct {
-	Name   string         `json:"name"`
-	Setup  []SetupOp      `json:"setup,omitempty"`
-	Call   string         `json:"call"`
-	Expect []Expectation  `json:"expect,omitempty"`
+	Name   string        `json:"name"`
+	Setup  []SetupOp     `json:"setup,omitempty"`
+	Call   string        `json:"call"`
+	Expect []Expectation `json:"expect,omitempty"`
 }
 
-// SetupOp is a pre-call port assignment. For JS, it sets globalThis[Set]
-// to Value; analogous semantics for other harnessed languages.
+// SetupOp is a pre-call port assignment.
 type SetupOp struct {
 	Set   string          `json:"set"`
 	Value json.RawMessage `json:"value"`
 }
 
-// Expectation is one assertion against an output port. Exactly one of
-// the comparator fields should be set; behaviour is undefined when
-// multiple are provided.
+// Expectation is one assertion against an output port.
 type Expectation struct {
-	Port    string          `json:"port"`
-	Equals  json.RawMessage `json:"equals,omitempty"`
-	Between *[2]float64     `json:"between,omitempty"`
-	Type    string          `json:"type,omitempty"` // number|string|boolean|object|array
+	Port    string            `json:"port"`
+	Equals  json.RawMessage   `json:"equals,omitempty"`
+	Between *[2]float64       `json:"between,omitempty"`
+	Type    string            `json:"type,omitempty"`
 	Enum    []json.RawMessage `json:"enum,omitempty"`
-	Truthy  *bool           `json:"truthy,omitempty"`
+	Truthy  *bool             `json:"truthy,omitempty"`
 }
 
 // RuntimeCall is one observed invocation of the impl during testing.
-// Inputs and outputs are arbitrary JSON values keyed by attribute name
-// (the synthesized test code is taught to use port names matching the
-// graph's consumes/produces lists).
 type RuntimeCall struct {
-	// Frame is optional — only meaningful for objects with a temporal
-	// declaration. Empty string means "non-temporal".
 	Frame   string                     `json:"frame,omitempty"`
 	Inputs  map[string]json.RawMessage `json:"inputs"`
 	Outputs map[string]json.RawMessage `json:"outputs"`
 }
 
-// RuntimeTrace is the JSON layout the synthesized tests append to
-// .kcpos/typecalc-runtime/<id>.json. Each call records the function's
-// inputs and outputs so the static-check pass can verify port presence
-// and values against the graph's declarations.
-//
-// ImplHash (D3) records which impl version produced this trace.
-// evidence-stale rule fails the object when the current impl hash
-// differs — preventing the leftover-trace bug where old runs pass for
-// a new impl.
+// RuntimeTrace mirrors the v8.x flat layout. v9.0 stores this as the
+// RuntimeTrace section inside the bundle; this type is kept for callers
+// that work with the snapshot directly.
 type RuntimeTrace struct {
 	ObjectID string        `json:"objectId"`
 	ImplHash string        `json:"implHash,omitempty"`
 	Calls    []RuntimeCall `json:"calls"`
 }
 
-// HashSource returns the canonical SHA-256 (hex) of a content blob.
-// Used to detect when impl or spec has drifted out from under an
-// existing accepted record.
-func HashSource(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", h)
-}
-
-// WriteSpec persists a SpecEvidence under EvidenceDir. Empty objectID
-// is a no-op (returns nil) — symmetric with RecordEvidence.
-func WriteSpec(rec *SpecEvidence) error {
-	if rec == nil || rec.ObjectID == "" {
-		return nil
-	}
-	if err := os.MkdirAll(EvidenceDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir evidence dir: %w", err)
-	}
-	rec.Kind = "spec"
-	if rec.Timestamp.IsZero() {
-		rec.Timestamp = time.Now().UTC()
-	}
-	raw, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(SpecEvidencePath(rec.ObjectID), raw, 0o644)
-}
-
-// ReadSpec loads a previously-written SpecEvidence. Returns (nil, false)
-// for missing or malformed files.
-func ReadSpec(objectID string) (*SpecEvidence, bool) {
-	if objectID == "" {
-		return nil, false
-	}
-	raw, err := os.ReadFile(SpecEvidencePath(objectID))
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
-	var rec SpecEvidence
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false
-	}
-	return &rec, true
-}
-
-// WriteAccepted persists an AcceptedEvidence under EvidenceDir.
-func WriteAccepted(rec *AcceptedEvidence) error {
-	if rec == nil || rec.ObjectID == "" {
-		return nil
-	}
-	if err := os.MkdirAll(EvidenceDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir evidence dir: %w", err)
-	}
-	rec.Kind = "accepted"
-	if rec.Timestamp.IsZero() {
-		rec.Timestamp = time.Now().UTC()
-	}
-	raw, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(AcceptedEvidencePath(rec.ObjectID), raw, 0o644)
-}
-
-// ReadAccepted loads a previously-written AcceptedEvidence.
-func ReadAccepted(objectID string) (*AcceptedEvidence, bool) {
-	if objectID == "" {
-		return nil, false
-	}
-	raw, err := os.ReadFile(AcceptedEvidencePath(objectID))
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
-	var rec AcceptedEvidence
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false
-	}
-	return &rec, true
-}
-
-// WriteTests persists a TestsEvidence under EvidenceDir.
-func WriteTests(rec *TestsEvidence) error {
-	if rec == nil || rec.ObjectID == "" {
-		return nil
-	}
-	if err := os.MkdirAll(EvidenceDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir evidence dir: %w", err)
-	}
-	rec.Kind = "tests"
-	if rec.Timestamp.IsZero() {
-		rec.Timestamp = time.Now().UTC()
-	}
-	raw, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(TestsEvidencePath(rec.ObjectID), raw, 0o644)
-}
-
-// ReadTests loads a previously-written TestsEvidence.
-func ReadTests(objectID string) (*TestsEvidence, bool) {
-	if objectID == "" {
-		return nil, false
-	}
-	raw, err := os.ReadFile(TestsEvidencePath(objectID))
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
-	var rec TestsEvidence
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false
-	}
-	return &rec, true
-}
-
-// WriteWaiver persists a WaiverEvidence under EvidenceDir.
-func WriteWaiver(rec *WaiverEvidence) error {
-	if rec == nil || rec.ObjectID == "" {
-		return nil
-	}
-	if err := os.MkdirAll(EvidenceDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir evidence dir: %w", err)
-	}
-	rec.Kind = "waiver"
-	if rec.Timestamp.IsZero() {
-		rec.Timestamp = time.Now().UTC()
-	}
-	raw, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(WaiverEvidencePath(rec.ObjectID), raw, 0o644)
-}
-
-// ReadWaiver loads a previously-written WaiverEvidence.
-func ReadWaiver(objectID string) (*WaiverEvidence, bool) {
-	if objectID == "" {
-		return nil, false
-	}
-	raw, err := os.ReadFile(WaiverEvidencePath(objectID))
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
-	var rec WaiverEvidence
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false
-	}
-	return &rec, true
-}
-
-// ReadRuntimeTrace loads a per-object runtime trace from
-// .kcpos/typecalc-runtime/<id>.json. Returns (nil, false) when the
-// file is missing or malformed — the runtime check rule treats
-// absence as its own issue (`runtime-trace-missing`).
-func ReadRuntimeTrace(objectID string) (*RuntimeTrace, bool) {
-	if objectID == "" {
-		return nil, false
-	}
-	raw, err := os.ReadFile(RuntimeTracePath(objectID))
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
-	var rec RuntimeTrace
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false
-	}
-	return &rec, true
-}
-
-// EvidenceRecord mirrors the JSON layout written by RecordEvidence and
-// read by callers (gate, hooks). Use json.Unmarshal with this struct
-// shape to inspect kind/lang/ok.
-//
-// Log is the test runner's combined stdout+stderr from the most recent
-// pass. Reviewers (typecalc_review) read this from the evidence rather
-// than taking it as a string argument — that way the agent has no
-// affordance to substitute a doctored log.
-//
-// ImplHash (D3) binds this evidence to a specific impl source state.
-// The static-check rule `evidence-stale` fails any object whose
-// current impl hash doesn't match the one recorded here. This makes
-// evidence freshness a structural invariant — agents cannot keep
-// stale Pass evidence and call it good after editing the impl.
+// EvidenceRecord is the v8.x flat compile/test result. v9.0 derives
+// this from the bundle's Compile / Test sections on demand.
 type EvidenceRecord struct {
 	ObjectID  string `json:"objectId"`
 	Kind      string `json:"kind"` // "compile" | "test" | "insufficient"
@@ -408,74 +274,295 @@ type EvidenceRecord struct {
 	Timestamp string `json:"timestamp"`
 }
 
-// RecordEvidence writes a small JSON record under EvidenceDir attesting
-// that the named entity passed a typecalc check. Callers are typically
-// the typecalc_compile / typecalc_test agent tools and the auto-typecalc
-// helpers in write_file / graph_merge_object.
+// --- v9.0 bundle-backed read/write API ---
 //
-// Empty objectID is a no-op (returns nil) — the helper sites pass through
-// missing object_id arguments rather than guarding at every call site.
+// These keep the v8.x function names so callers in tools/, session/,
+// graph/, etc. compile without churn. Each function loads the bundle,
+// reads/writes one section, and (for writes) persists the whole bundle
+// atomically.
+
+// WriteSpec persists a SpecEvidence by storing it as the bundle's
+// Spec section. The flat SpecEvidence.SourceHash is promoted to the
+// bundle-level SourceHash (if non-empty), maintaining the v8.x staleness
+// semantic that "spec hash drift = whole-object staleness".
+func WriteSpec(rec *SpecEvidence) error {
+	if rec == nil || rec.ObjectID == "" {
+		return nil
+	}
+	rec.Kind = "spec"
+	if rec.Timestamp.IsZero() {
+		rec.Timestamp = time.Now().UTC()
+	}
+	b := LoadOrInitBundle(rec.ObjectID)
+	b.Spec = &SpecSection{
+		Description: rec.Description,
+		SpecHash:    rec.SourceHash,
+		Timestamp:   rec.Timestamp,
+	}
+	if rec.SourceHash != "" {
+		b.SourceHash = rec.SourceHash
+	}
+	if rec.SymbolHash != "" {
+		b.SymbolHash = rec.SymbolHash
+	}
+	return SaveBundle(b)
+}
+
+// ReadSpec returns the bundle's Spec section reshaped as the v8.x
+// flat SpecEvidence for callers that haven't migrated.
+func ReadSpec(objectID string) (*SpecEvidence, bool) {
+	b, ok := ReadBundle(objectID)
+	if !ok || b.Spec == nil {
+		return nil, false
+	}
+	return &SpecEvidence{
+		ObjectID:    objectID,
+		Kind:        "spec",
+		Description: b.Spec.Description,
+		SourceHash:  b.Spec.SpecHash,
+		SymbolHash:  b.SymbolHash, // v9.0.2 — bundle-level field
+		Timestamp:   b.Spec.Timestamp,
+	}, true
+}
+
+// WriteAccepted stores the reviewer verdict as the Accepted section.
+func WriteAccepted(rec *AcceptedEvidence) error {
+	if rec == nil || rec.ObjectID == "" {
+		return nil
+	}
+	rec.Kind = "accepted"
+	if rec.Timestamp.IsZero() {
+		rec.Timestamp = time.Now().UTC()
+	}
+	b := LoadOrInitBundle(rec.ObjectID)
+	b.Accepted = &AcceptedSection{
+		OK:             rec.OK,
+		StaticIssues:   rec.StaticIssues,
+		RuntimeIssues:  rec.RuntimeIssues,
+		Reasonableness: rec.Reasonableness,
+		SpecHash:       rec.SpecHash,
+		TestsHash:      rec.TestsHash,
+		Timestamp:      rec.Timestamp,
+	}
+	if rec.SourceHash != "" {
+		b.SourceHash = rec.SourceHash
+	}
+	return SaveBundle(b)
+}
+
+// ReadAccepted returns the Accepted section reshaped as the v8.x flat
+// AcceptedEvidence.
+func ReadAccepted(objectID string) (*AcceptedEvidence, bool) {
+	b, ok := ReadBundle(objectID)
+	if !ok || b.Accepted == nil {
+		return nil, false
+	}
+	a := b.Accepted
+	return &AcceptedEvidence{
+		ObjectID:       objectID,
+		Kind:           "accepted",
+		OK:             a.OK,
+		StaticIssues:   a.StaticIssues,
+		RuntimeIssues:  a.RuntimeIssues,
+		Reasonableness: a.Reasonableness,
+		SourceHash:     b.SourceHash,
+		SpecHash:       a.SpecHash,
+		TestsHash:      a.TestsHash,
+		Timestamp:      a.Timestamp,
+	}, true
+}
+
+// WriteTests stores the synthesized test suite as the Tests section.
+func WriteTests(rec *TestsEvidence) error {
+	if rec == nil || rec.ObjectID == "" {
+		return nil
+	}
+	rec.Kind = "tests"
+	if rec.Timestamp.IsZero() {
+		rec.Timestamp = time.Now().UTC()
+	}
+	b := LoadOrInitBundle(rec.ObjectID)
+	b.Tests = &TestsSection{
+		Lang:      rec.Lang,
+		SpecHash:  rec.SpecHash,
+		Cases:     rec.Cases,
+		TestCode:  rec.TestCode,
+		Timestamp: rec.Timestamp,
+	}
+	return SaveBundle(b)
+}
+
+// ReadTests returns the Tests section reshaped as the v8.x flat
+// TestsEvidence.
+func ReadTests(objectID string) (*TestsEvidence, bool) {
+	b, ok := ReadBundle(objectID)
+	if !ok || b.Tests == nil {
+		return nil, false
+	}
+	t := b.Tests
+	return &TestsEvidence{
+		ObjectID:  objectID,
+		Kind:      "tests",
+		Lang:      t.Lang,
+		SpecHash:  t.SpecHash,
+		Timestamp: t.Timestamp,
+		Cases:     t.Cases,
+		TestCode:  t.TestCode,
+	}, true
+}
+
+// WriteWaiver stores the human-stand-in decision as the Waiver section.
+func WriteWaiver(rec *WaiverEvidence) error {
+	if rec == nil || rec.ObjectID == "" {
+		return nil
+	}
+	rec.Kind = "waiver"
+	if rec.Timestamp.IsZero() {
+		rec.Timestamp = time.Now().UTC()
+	}
+	b := LoadOrInitBundle(rec.ObjectID)
+	b.Waiver = &WaiverSection{
+		Reason:    rec.Reason,
+		Verifier:  rec.Verifier,
+		Kind:      rec.WaiverKind,
+		Timestamp: rec.Timestamp,
+	}
+	return SaveBundle(b)
+}
+
+// ReadWaiver returns the Waiver section reshaped as the v8.x flat
+// WaiverEvidence.
+func ReadWaiver(objectID string) (*WaiverEvidence, bool) {
+	b, ok := ReadBundle(objectID)
+	if !ok || b.Waiver == nil {
+		return nil, false
+	}
+	return &WaiverEvidence{
+		ObjectID:   objectID,
+		Kind:       "waiver",
+		Reason:     b.Waiver.Reason,
+		Verifier:   b.Waiver.Verifier,
+		WaiverKind: b.Waiver.Kind,
+		Timestamp:  b.Waiver.Timestamp,
+	}, true
+}
+
+// ReadRuntimeTrace returns the RuntimeTrace section reshaped as the
+// v8.x flat RuntimeTrace.
+func ReadRuntimeTrace(objectID string) (*RuntimeTrace, bool) {
+	b, ok := ReadBundle(objectID)
+	if !ok || b.RuntimeTrace == nil {
+		return nil, false
+	}
+	return &RuntimeTrace{
+		ObjectID: objectID,
+		ImplHash: b.SourceHash,
+		Calls:    b.RuntimeTrace.Calls,
+	}, true
+}
+
+// RecordEvidence writes the most basic compile/test result. v9.0
+// stores this in either the Compile or Test bundle section depending
+// on kind. For "test"-kind, this is the "I ran the test runner and it
+// returned X" record (verdict OK/false + log).
 func RecordEvidence(objectID, kind, lang string, ok bool) error {
-	return RecordEvidenceWithLog(objectID, kind, lang, ok, "")
+	return RecordEvidenceFull(objectID, kind, lang, ok, "", "")
 }
 
 // RecordEvidenceWithLog is the variant that also persists the test
-// runner's combined log. typecalc_review reads this when judging
-// reasonableness, so we keep it on disk rather than passing it through
-// agent string args.
+// runner's combined log.
 func RecordEvidenceWithLog(objectID, kind, lang string, ok bool, log string) error {
 	return RecordEvidenceFull(objectID, kind, lang, ok, log, "")
 }
 
-// RecordEvidenceFull is the most-complete writer, including the impl
-// hash so the evidence-stale rule can detect drift.
+// RecordEvidenceFull is the most-complete writer.
 func RecordEvidenceFull(objectID, kind, lang string, ok bool, log, implHash string) error {
+	return RecordEvidenceWithSymbol(objectID, kind, lang, ok, log, implHash, "")
+}
+
+// RecordEvidenceWithSymbol is the v9.0.2 variant that also stores a
+// per-object fragment hash. Pass symbolHash="" to leave the existing
+// bundle.SymbolHash untouched (use the plain RecordEvidenceFull when
+// the call site can't compute a fragment hash).
+func RecordEvidenceWithSymbol(objectID, kind, lang string, ok bool, log, implHash, symbolHash string) error {
 	if objectID == "" {
 		return nil
 	}
-	if err := os.MkdirAll(EvidenceDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir evidence dir: %w", err)
+	b := LoadOrInitBundle(objectID)
+	if implHash != "" {
+		b.SourceHash = implHash
 	}
-	rec := EvidenceRecord{
-		ObjectID:  objectID,
-		Kind:      kind,
-		Lang:      lang,
-		OK:        ok,
-		Log:       log,
-		ImplHash:  implHash,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	if symbolHash != "" {
+		b.SymbolHash = symbolHash
 	}
-	raw, _ := json.MarshalIndent(rec, "", "  ")
-	return os.WriteFile(filepath.Join(EvidenceDir, objectID+".json"), raw, 0o644)
+	ts := time.Now().UTC()
+	switch kind {
+	case "compile", "insufficient":
+		// v9.0 quirk: insufficient evidence at the compile step lives
+		// in the Compile section with Kind="insufficient". The Test
+		// section is separate — both can coexist (HTML projects
+		// often have compile=insufficient and test=test).
+		b.Compile = &CompileSection{Lang: lang, Kind: kind, OK: ok, Log: log, Timestamp: ts}
+	case "test":
+		b.Test = &TestSection{Lang: lang, Kind: kind, OK: ok, Log: log, Timestamp: ts}
+	default:
+		// Unknown kind — keep behavior compatible by stashing in Compile.
+		b.Compile = &CompileSection{Lang: lang, Kind: kind, OK: ok, Log: log, Timestamp: ts}
+	}
+	return SaveBundle(b)
 }
 
-// ReadEvidence loads the existing compile/test evidence for objectID.
-// Returns (nil, false) for missing or malformed files.
+// ReadEvidence returns the most-recent compile/test record. v9.0
+// prefers the Test section over Compile (since test evidence supersedes
+// compile evidence in the gate's requirement chain). Callers that
+// specifically want compile evidence should read the bundle directly.
 func ReadEvidence(objectID string) (*EvidenceRecord, bool) {
-	if objectID == "" {
+	b, ok := ReadBundle(objectID)
+	if !ok {
 		return nil, false
 	}
-	raw, err := os.ReadFile(filepath.Join(EvidenceDir, objectID+".json"))
-	if err != nil || len(raw) == 0 {
-		return nil, false
+	if b.Test != nil {
+		return &EvidenceRecord{
+			ObjectID:  objectID,
+			Kind:      b.Test.Kind,
+			Lang:      b.Test.Lang,
+			OK:        b.Test.OK,
+			Log:       b.Test.Log,
+			ImplHash:  b.SourceHash,
+			Timestamp: b.Test.Timestamp.Format(time.RFC3339),
+		}, true
 	}
-	var rec EvidenceRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false
+	if b.Compile != nil {
+		return &EvidenceRecord{
+			ObjectID:  objectID,
+			Kind:      b.Compile.Kind,
+			Lang:      b.Compile.Lang,
+			OK:        b.Compile.OK,
+			Log:       b.Compile.Log,
+			ImplHash:  b.SourceHash,
+			Timestamp: b.Compile.Timestamp.Format(time.RFC3339),
+		}, true
 	}
-	return &rec, true
+	return nil, false
 }
 
-// DetectEffectiveLang closes the "HTML loophole" identified in the
-// analysis report (problem 7.2): an HTML file whose content includes a
-// `<script>` block is in practice a JavaScript container, and the
-// test-evidence requirement should apply to the JS inside. When called
-// with declared=LangHTML and content containing `<script>`, this returns
-// LangJavaScript so downstream gate rules (typecalc-test-required) treat
-// the file as JS and demand a real test.
-//
-// For other languages, returns declared unchanged. For pure HTML (no
-// embedded script), keeps HTML — there's no JS to test.
+// SetRuntimeTrace overwrites the RuntimeTrace section. Called by the
+// harness when it finishes a typecalc_test run. Always overwrites —
+// v8.7 append-from-disk pollution is structurally prevented now (v9.0
+// has no "load and append" path; each run rewrites the section
+// wholesale).
+func SetRuntimeTrace(objectID string, calls []RuntimeCall) error {
+	if objectID == "" {
+		return nil
+	}
+	b := LoadOrInitBundle(objectID)
+	b.RuntimeTrace = &RuntimeTraceSection{Calls: calls}
+	return SaveBundle(b)
+}
+
+// DetectEffectiveLang closes the "HTML loophole": HTML files whose
+// content includes a `<script>` block are treated as JS for the purposes
+// of test-evidence requirements.
 func DetectEffectiveLang(content string, declared Lang) Lang {
 	if declared != LangHTML {
 		return declared
@@ -486,10 +573,8 @@ func DetectEffectiveLang(content string, declared Lang) Lang {
 	return declared
 }
 
-// HasInlineScript reports whether the content contains a non-empty
-// `<script>...</script>` block. Accepts any attributes on the open tag
-// (e.g. `<script type="module">`) but requires a closing `</script>`
-// with at least one non-whitespace character between.
+// HasInlineScript reports whether content contains a non-empty
+// `<script>...</script>` block.
 func HasInlineScript(content string) bool {
 	open := strings.Index(strings.ToLower(content), "<script")
 	if open < 0 {
@@ -506,3 +591,11 @@ func HasInlineScript(content string) bool {
 	body := content[open+gt+1 : open+close]
 	return strings.TrimSpace(body) != ""
 }
+
+// Re-export filepath so external test files can build the unified path
+// directly when constructing fixtures.
+var _ = filepath.Join
+
+// _ silences os import use; the package keeps os for atomic writes via
+// SaveBundle and for the EvidenceDir constant's mkdir callers.
+var _ = os.MkdirAll

@@ -105,7 +105,7 @@ func TestVerdict_PassWhenAllMustsFilled(t *testing.T) {
 	AddItem(p, "CHK-001", "must check", "", SeverityMust, "")
 	AddItem(p, "CHK-002", "should check", "", SeverityShould, "") // unfilled, should-only
 	Freeze(p)
-	if err := Fill(p, "CHK-001", "src/foo.ts:42 Foo", ""); err != nil {
+	if err := Fill(p, "CHK-001", "src/foo.ts:42 Foo"); err != nil {
 		t.Fatal(err)
 	}
 	c, _ := Load(p)
@@ -122,7 +122,7 @@ func TestVerdict_WaiverCountsAsResolved(t *testing.T) {
 	AddItem(p, "CHK-001", "must check", "", SeverityMust, "")
 	AddItem(p, "CHK-002", "waived", "", SeverityWaiver, "infeasible to test")
 	Freeze(p)
-	Fill(p, "CHK-001", "src/foo.ts:42", "")
+	Fill(p, "CHK-001", "src/foo.ts:42")
 	c, _ := Load(p)
 	if c.Summary.FinalVerdict != VerdictPass {
 		t.Errorf("waiver should not block PASS, got %s", c.Summary.FinalVerdict)
@@ -134,7 +134,7 @@ func TestVerdict_WaiverCountsAsResolved(t *testing.T) {
 
 func TestFill_RejectsUnknownItem(t *testing.T) {
 	p := tempCP(t)
-	if err := Fill(p, "CHK-999", "x", ""); err == nil {
+	if err := Fill(p, "CHK-999", "x"); err == nil {
 		t.Error("unknown id should error")
 	}
 }
@@ -142,23 +142,15 @@ func TestFill_RejectsUnknownItem(t *testing.T) {
 func TestFill_RejectsEmptyProof(t *testing.T) {
 	p := tempCP(t)
 	AddItem(p, "CHK-001", "desc", "", SeverityMust, "")
-	if err := Fill(p, "CHK-001", "", ""); err == nil {
-		t.Error("empty code+gameplay should error")
-	}
-}
-
-func TestFill_AcceptsOnlyGameplayProof(t *testing.T) {
-	p := tempCP(t)
-	AddItem(p, "CHK-001", "desc", "", SeverityMust, "")
-	if err := Fill(p, "CHK-001", "", "spawn / left:5 — K/proofs/CHK-001/final.png"); err != nil {
-		t.Errorf("gameplayProof alone should be accepted: %v", err)
+	if err := Fill(p, "CHK-001", ""); err == nil {
+		t.Error("empty codeProof should error")
 	}
 }
 
 func TestFill_RejectsWaiverItem(t *testing.T) {
 	p := tempCP(t)
 	AddItem(p, "CHK-001", "desc", "", SeverityWaiver, "reason")
-	if err := Fill(p, "CHK-001", "src/x.ts", ""); err == nil {
+	if err := Fill(p, "CHK-001", "src/x.ts"); err == nil {
 		t.Error("filling a waiver item should error")
 	}
 }
@@ -193,7 +185,7 @@ func TestPersistence_RoundTrip(t *testing.T) {
 	AddItem(p, "CHK-001", "desc1", "ui", SeverityMust, "")
 	AddItem(p, "CHK-002", "desc2", "core", SeverityShould, "")
 	Freeze(p)
-	Fill(p, "CHK-001", "src/x.ts:10", "")
+	Fill(p, "CHK-001", "src/x.ts:10")
 
 	c, err := Load(p)
 	if err != nil {

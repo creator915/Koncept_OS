@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/session"
 )
 
 // SubAgentRunner is the contract a top-level agent injects so the
@@ -51,7 +52,7 @@ func subAgentTool(runner SubAgentRunner) Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name: "spawn_subagent",
-				Description: "Spawn a child agent to handle a focused, self-contained sub-task. The child runs in its own conversation context — it does NOT see your messages — and returns a single summary string when done. The child shares K/* state with you (graph, sessions, checkpoint) but its tool-call detail and reasoning stay out of your context.\n\nUse this when:\n- a sub-task is well-scoped (one object's implementation; one type analysis; one file's refactor) — i.e. a child can succeed with the task description alone\n- your context is getting large and you want sub-task detail out\n- you explicitly want isolation: a child's failure won't contaminate your reasoning\n\nIf session_id is provided, the child auto-focuses on that KonceptOS session — its graph mutations record to that session's graphDiff. Focus is restored to your previous state on return.\n\nThe child has the same tool set as you, including (recursively, up to a depth cap) spawn_subagent.\n\nOptional capability scoping (§6 of docs/TypeCalculator.md): pass `role` to use a preset (implementer / tester / integrator / root) or `caps` for an explicit token list. If you pass either, every tool call in the child is gated against that set; tool calls outside the set return PermissionDenied. Child caps must be a subset of yours.",
+				Description: "Spawn a child agent to handle a focused, self-contained sub-task. The child runs in its own conversation context — it does NOT see your messages — and returns a single summary string when done. The child shares K/* state with you (graph, sessions, checkpoint) but its tool-call detail and reasoning stay out of your context.\n\n**This is the canonical way to do CLAUDE.md §5.4 path B** (one sub-agent per testable object). When the work involves ≥3 independent objects, prefer spawning one child per object over working through them sequentially in your own context.\n\nUse this when:\n- a sub-task is well-scoped (one object's implementation; one type analysis; one file's refactor) — i.e. a child can succeed with the task description alone\n- your context is getting large and you want sub-task detail out\n- you explicitly want isolation: a child's failure won't contaminate your reasoning\n\n**session_id auto-creation (v8.8):** if you pass session_id and that session does not yet exist, it will be auto-created (parent = your currently-focused session, task = the spawn task), activated, and focused before the child runs. This collapses the canonical path B sequence — session_create → session_status active → session_focus → spawn_subagent — into one tool call. If the session already exists, the child just focuses on it (same as pre-v8.8). Focus is restored to your previous state on return.\n\nThe child has the same tool set as you, including (recursively, up to a depth cap) spawn_subagent.\n\nOptional capability scoping (§6 of docs/TypeCalculator.md): pass `role` to use a preset (implementer / tester / integrator / root) or `caps` for an explicit token list. If you pass either, every tool call in the child is gated against that set; tool calls outside the set return PermissionDenied. Child caps must be a subset of yours.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -61,7 +62,7 @@ func subAgentTool(runner SubAgentRunner) Tool {
 						},
 						"session_id": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional. KonceptOS session id to auto-focus during the child's run.",
+							"description": "Optional. KonceptOS session id to auto-focus during the child's run. If the session does not exist, it is auto-created (parent=your-current-focus, task=task) before the child runs.",
 						},
 						"max_iterations": map[string]interface{}{
 							"type":        "integer",
@@ -90,8 +91,31 @@ func subAgentTool(runner SubAgentRunner) Tool {
 				return "", fmt.Errorf("task required")
 			}
 			req := SubAgentRequest{Task: task}
-			if sid, ok := args["session_id"].(string); ok {
-				req.SessionID = sid
+			if sid, ok := args["session_id"].(string); ok && sid != "" {
+				// v8.8: if the session doesn't exist, create it on the
+				// caller's behalf. Inherits parent from the parent's
+				// current focus, with task from this spawn — that
+				// represents the canonical "delegate this slice of work"
+				// flow. If session.Start errors because the id is
+				// already taken, that's fine and we proceed (the child
+				// will simply focus on the existing session); other
+				// errors propagate.
+				normalized, nerr := session.NormalizeID(sid)
+				if nerr == nil {
+					if !session.Exists(session.DefaultDir, normalized) {
+						parent, _ := session.GetFocus(session.DefaultDir)
+						if _, sterr := session.Start(session.DefaultDir, normalized, parent, task, session.Input{}); sterr != nil {
+							// Not fatal — the runner's own focus
+							// handling will retry; surface the error
+							// in the returned summary so the agent
+							// can see what happened.
+							return "", fmt.Errorf("spawn_subagent: auto-create session %s failed: %w", normalized, sterr)
+						}
+					}
+					req.SessionID = normalized
+				} else {
+					req.SessionID = sid
+				}
 			}
 			if iters, ok := args["max_iterations"].(float64); ok {
 				req.MaxIterations = int(iters)

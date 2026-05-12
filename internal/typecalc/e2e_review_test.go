@@ -3,7 +3,6 @@ package typecalc
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -120,9 +119,11 @@ func TestEndToEnd_DescribeReviewAccept(t *testing.T) {
 	}
 
 	// 8. Verify the file actually exists on disk where the gate expects.
-	expectedPath := filepath.Join(EvidenceDir, "Process.accepted.json")
+	// v9.0: accepted evidence is the Accepted section of the unified
+	// bundle at .kcpos/typecalc/Process.json.
+	expectedPath := AcceptedEvidencePath("Process")
 	if _, err := os.Stat(expectedPath); err != nil {
-		t.Fatalf("accepted evidence not at expected path %s: %v", expectedPath, err)
+		t.Fatalf("accepted evidence bundle not at expected path %s: %v", expectedPath, err)
 	}
 }
 

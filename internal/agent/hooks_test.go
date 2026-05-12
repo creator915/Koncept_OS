@@ -455,12 +455,14 @@ func TestTypecalcUse_FlagsConfirmWithoutEvidence(t *testing.T) {
 
 func TestTypecalcUse_PassesWhenEvidencePresent(t *testing.T) {
 	dir := t.TempDir()
-	evidenceDir := filepath.Join(dir, ".kcpos", "typecalc-evidence")
+	// v9.0: unified bundle path + bundle envelope around the Compile section.
+	evidenceDir := filepath.Join(dir, ".kcpos", "typecalc")
 	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	bundle := `{"objectId":"InitGame","version":1,"updatedAt":"1970-01-01T00:00:00Z","compile":{"kind":"compile","lang":"HTML","ok":true}}`
 	if err := os.WriteFile(filepath.Join(evidenceDir, "InitGame.json"),
-		[]byte(`{"objectId":"InitGame","kind":"compile","ok":true}`), 0o644); err != nil {
+		[]byte(bundle), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	chdirTo(t, dir)

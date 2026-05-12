@@ -27,8 +27,32 @@ type Attribute struct {
 type Object struct {
 	Def      string   `json:"def"`
 	Impl     *string  `json:"impl"`
-	Consumes []string `json:"consumes"`
-	Produces []string `json:"produces"`
+	// ImplFragment (v9.0.3) is the per-object writing target for
+	// single-file deliverables. When N graph objects all share the
+	// same Impl (e.g. all set impl="index.html" because the deliverable
+	// is one HTML file), each object's actual code lives in its own
+	// fragment file (e.g. implFragment="K/frags/WorldGen.js"). Child
+	// sessions write to ImplFragment; the R2 build step concatenates
+	// every fragment into Impl in topological order.
+	//
+	// Empty for multi-file projects (TypeScript / Go) where Impl is
+	// already per-object (e.g. src/WorldGen.impl.ts). v9.0.2 Terraria
+	// batch died because no ImplFragment mechanism existed: every
+	// object shared impl=index.html and the parent agent had to write
+	// the entire 4000-8000-line file in one LLM stream, which
+	// overflowed the response deadline.
+	ImplFragment *string `json:"implFragment,omitempty"`
+	// ImplSymbol is the name the test harness looks up in IMPL[...] to
+	// find the actual function to invoke. Empty defaults to the object
+	// ID — the historical assumption pre-v8.8. v8.7 pong-05 ran a
+	// PascalCase object (UpdatePhysics) against a camelCase impl
+	// (function updatePhysics) and the harness's implicit
+	// IMPL[objectID] lookup failed across all 13 test cases. v8.8
+	// makes the mapping explicit: an agent writing camelCase functions
+	// declares it via graph_merge_object patch='{"implSymbol":"updatePhysics"}'.
+	ImplSymbol string `json:"implSymbol,omitempty"`
+	Consumes   []string `json:"consumes"`
+	Produces   []string `json:"produces"`
 	// Mutates names attributes the object reads AND writes in place
 	// (mutation-style semantics, e.g. JS object property assignment).
 	// Distinct from Produces (pure functional output) and from Consumes

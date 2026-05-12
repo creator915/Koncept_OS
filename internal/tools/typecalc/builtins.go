@@ -13,6 +13,15 @@ import (
 // Tools returns the typecalc-area agent tools.
 func Tools() map[string]llm.Tool {
 	return map[string]llm.Tool{
+		// v9.0 high-level entry point — replaces the 6-step manual
+		// typecalc_compile / describe / synthesize / test / review /
+		// graph_merge_object sequence with a single state-machine
+		// invocation that handles enrich-retry between failures.
+		"confirm_object": confirmObjectTool(),
+
+		// Low-level tools — kept available for advanced workflows
+		// (debugging, single-step re-runs) but the typical agent path
+		// should be confirm_object.
 		"typecalc_compile":          typecalcCompileTool(),
 		"typecalc_test":             typecalcTestTool(),
 		"typecalc_probe_plan":       typecalcProbePlanTool(),

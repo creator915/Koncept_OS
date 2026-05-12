@@ -16,6 +16,9 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/creator915/Koncept_OS/internal/agent"
+	"github.com/creator915/Koncept_OS/internal/protocol"
 )
 
 const usage = `kcpos — KonceptOS coding agent CLI
@@ -27,6 +30,8 @@ Usage:
   kcpos graph <verb> ...           direct CLI on K/graph.json
   kcpos session <verb> ...         work-session lifecycle (K/sessions/)
   kcpos checkpoint <verb> ...      verification ledger (K/checkpoint.json)
+  kcpos doc protocol               print the runtime protocol (markdown)
+  kcpos doc system                 print the full LLM system prompt
   kcpos help                       this help
   kcpos <sub> --help               help for a subcommand
 
@@ -54,6 +59,8 @@ func main() {
 		os.Exit(runSession(rest))
 	case "checkpoint":
 		os.Exit(runCheckpoint(rest))
+	case "doc":
+		os.Exit(runDoc(rest))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		os.Exit(0)
@@ -62,5 +69,26 @@ func main() {
 		// If the first arg doesn't look like a subcommand name, treat the
 		// whole arg list as a chat prompt.
 		os.Exit(runChat(os.Args[1:]))
+	}
+}
+
+// runDoc prints documentation generated from kcpos's internal state.
+// `kcpos doc protocol` is the v9.0 successor to the old CLAUDE.md —
+// the runtime protocol as a single source of truth.
+func runDoc(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: kcpos doc <protocol|system>")
+		return 2
+	}
+	switch args[0] {
+	case "protocol":
+		fmt.Print(protocol.Describe())
+		return 0
+	case "system":
+		fmt.Print(agent.SystemPrompt)
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "unknown doc topic %q (try: protocol, system)\n", args[0])
+		return 2
 	}
 }

@@ -94,23 +94,23 @@ func TestAggregate_DerivesTestsFromEvidenceFiles(t *testing.T) {
 	_ = Save(sessionDir, s)
 
 	// Create evidence file for "Touched"; another stale one for an
-	// unrelated id should NOT show up.
-	evDir := filepath.Join(dir, ".kcpos", "typecalc-evidence")
+	// unrelated id should NOT show up. v9.0: unified bundle path.
+	evDir := filepath.Join(dir, ".kcpos", "typecalc")
 	if err := os.MkdirAll(evDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Post-Fix-2: only kind=test evidence counts as a "test".
-	if err := os.WriteFile(filepath.Join(evDir, "Touched.json"),
-		[]byte(`{"objectId":"Touched","kind":"test","lang":"Go","ok":true}`), 0o644); err != nil {
+	touchedBundle := `{"objectId":"Touched","version":1,"updatedAt":"1970-01-01T00:00:00Z","test":{"kind":"test","lang":"Go","ok":true}}`
+	if err := os.WriteFile(filepath.Join(evDir, "Touched.json"), []byte(touchedBundle), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(evDir, "Unrelated.json"),
-		[]byte(`{"objectId":"Unrelated","kind":"test","lang":"Go","ok":true}`), 0o644); err != nil {
+	unrelatedBundle := `{"objectId":"Unrelated","version":1,"updatedAt":"1970-01-01T00:00:00Z","test":{"kind":"test","lang":"Go","ok":true}}`
+	if err := os.WriteFile(filepath.Join(evDir, "Unrelated.json"), []byte(unrelatedBundle), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	got, _ := Aggregate(sessionDir, "s_root")
-	want := filepath.Join(".kcpos", "typecalc-evidence", "Touched.json")
+	want := filepath.Join(".kcpos", "typecalc", "Touched.json")
 	if !contains2(got.Output.Tests, want) {
 		t.Errorf("expected tests to include %s, got: %v", want, got.Output.Tests)
 	}

@@ -182,8 +182,17 @@ func (c *Client) chatOnce(ctx context.Context, messages []Message, tools []ToolS
 		return nil, fmt.Errorf("llm http %d: %s", resp.StatusCode, b)
 	}
 
-	// From here on we may emit deltas to the handler — do NOT retry on errors
-	// past this point.
+	// From here on we may emit deltas to the handler. v9.0.3 nuance: a
+	// stream error that fires BEFORE any delta has reached the handler
+	// is still safe to retry — nothing the user saw will repeat. The
+	// 2026-05-11 Terraria batch died here repeatedly: 5/5 instances hit
+	// `context deadline exceeded` or `unexpected EOF` during the stream
+	// before producing any visible response, and the pre-v9.0.3 code
+	// surfaced that as a fatal non-retryable error, taking the whole
+	// kcpos chat process down. Now: track whether any content has been
+	// emitted; if not, wrap the stream error as retryable so the outer
+	// Chat loop's backoff fires.
+	emittedAny := false
 	msg := &Message{Role: "assistant"}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -212,17 +221,20 @@ func (c *Client) chatOnce(ctx context.Context, messages []Message, tools []ToolS
 		delta := chunk.Choices[0].Delta
 		if delta.Content != "" {
 			msg.Content += delta.Content
+			emittedAny = true
 			if h.OnContent != nil {
 				h.OnContent(delta.Content)
 			}
 		}
 		if delta.ReasoningContent != "" {
 			msg.ReasoningContent += delta.ReasoningContent
+			emittedAny = true
 			if h.OnReasoning != nil {
 				h.OnReasoning(delta.ReasoningContent)
 			}
 		}
 		for _, tcd := range delta.ToolCalls {
+			emittedAny = true
 			for len(msg.ToolCalls) <= tcd.Index {
 				msg.ToolCalls = append(msg.ToolCalls, ToolCall{Type: "function"})
 			}
@@ -242,7 +254,14 @@ func (c *Client) chatOnce(ctx context.Context, messages []Message, tools []ToolS
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read stream: %w", err)
+		// v9.0.3: stream error before any delta reached the handler is
+		// safe to retry — the user hasn't seen anything to repeat.
+		// Common causes: server-side TCP close (`unexpected EOF`),
+		// client HTTP body deadline (`context deadline exceeded`).
+		if !emittedAny {
+			return nil, fmt.Errorf("%w: read stream (no partial emitted): %v", errRetryable, err)
+		}
+		return nil, fmt.Errorf("read stream: %w (partial content already emitted; not retried — re-invoke or resume manually)", err)
 	}
 	return msg, nil
 }

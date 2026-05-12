@@ -144,7 +144,10 @@ func deriveOutputsFromState(s *Session, cwd string) (impls, sigs, attrs, tests [
 		idSet[id] = true
 	}
 	for id := range idSet {
-		rel := filepath.Join(".kcpos", "typecalc-evidence", id+".json")
+		// v9.0: aggregate inspects the unified bundle's Test section.
+		// Path is .kcpos/typecalc/<id>.json; the rel string is what
+		// we record into output.tests for downstream tools.
+		rel := filepath.Join(".kcpos", "typecalc", id+".json")
 		path := rel
 		if !filepath.IsAbs(path) && cwd != "" {
 			path = filepath.Join(cwd, rel)
@@ -153,14 +156,16 @@ func deriveOutputsFromState(s *Session, cwd string) (impls, sigs, attrs, tests [
 		if err != nil || len(raw) == 0 {
 			continue
 		}
-		var ev struct {
-			Kind string `json:"kind"`
-			OK   bool   `json:"ok"`
+		var bundle struct {
+			Test *struct {
+				Kind string `json:"kind"`
+				OK   bool   `json:"ok"`
+			} `json:"test"`
 		}
-		if err := json.Unmarshal(raw, &ev); err != nil {
+		if err := json.Unmarshal(raw, &bundle); err != nil {
 			continue
 		}
-		if ev.Kind == "test" && ev.OK {
+		if bundle.Test != nil && bundle.Test.Kind == "test" && bundle.Test.OK {
 			tests = append(tests, rel)
 		}
 	}

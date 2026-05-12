@@ -498,17 +498,21 @@ func graphMergeObjectTool() llm.Tool {
 					}
 				}
 			}
-			// 2026-05-09 v8.5 — dual-source prevention. The v7→v8.4
-			// fixes routed HTML through the JS harness so kcpos can
-			// test the actual deliverable, eliminating the need for
-			// shadow K/impl/*.js files. But the v8.4 batch (pong-01
-			// and pong-03) still saw agents create those shadow files
-			// out of habit. The risk: inline functions in index.html
-			// drift from the .js shadows being tested → kcpos says
-			// "all green" while the user-opened deliverable is broken.
-			// Now: when index.html exists in cwd AND the patch sets
-			// impl to a non-html path, refuse the merge with a clear
-			// remediation message pointing the agent at the v8 model.
+			// 2026-05-09 v8.5 / 2026-05-11 v9.0.3 — dual-source prevention.
+			// The v7→v8.4 fixes routed HTML through the JS harness so kcpos
+			// can test the actual deliverable, eliminating the need for
+			// shadow K/impl/*.js files. The v8.4 batch saw agents create
+			// those shadow files out of habit, where inline functions in
+			// index.html drift from the .js shadows being tested → kcpos
+			// says "all green" while the user-opened deliverable is broken.
+			// v8.5 closed that by refusing impl=*.js when index.html exists.
+			//
+			// v9.0.3 keeps the same guarantee (no .js shadow as the
+			// declared `impl`) but reintroduces a per-object writing
+			// surface via the SEPARATE `implFragment` field — see
+			// `kcpos doc protocol` § "Single-file deliverable model".
+			// implFragment is intentionally NOT subject to this hook;
+			// it's a staging path, not the deliverable.
 			if implVal, hasImpl := patch["impl"]; hasImpl {
 				if implPath, _ := implVal.(string); implPath != "" {
 					cwd, _ := os.Getwd()
@@ -520,8 +524,22 @@ func graphMergeObjectTool() llm.Tool {
 					if indexExists && ext != ".html" && ext != ".htm" {
 						return "", fmt.Errorf(
 							"refusing to set impl=%q for object %q: project root contains index.html — kcpos v8 routes HTML inline scripts directly through the JS harness, so K/impl/*.js shadow files are unnecessary AND dangerous (the inline script and the shadow can drift, leaving the deliverable broken while kcpos says 'all green'). "+
-								"Set impl=index.html instead. The harness will extract <script> blocks, install browser stubs (document/window/RAF/canvas), evaluate via indirect eval to expose function declarations on globalThis, and run synthesized tests against the same code the user opens in a browser.",
-							implPath, id)
+								"v9.0.3 model for HTML single-file projects: set impl=\"index.html\" (the deliverable) PLUS implFragment=\"K/frags/<ObjectId>.js\" (this object's per-object staging file). Child sessions write to implFragment; the R2 build step concatenates every fragment into index.html. Example: graph_merge_object id=%q patch='{\"impl\":\"index.html\",\"implFragment\":\"K/frags/%s.js\"}'.",
+							implPath, id, id, id)
+					}
+				}
+			}
+			// v9.0.3 — validate implFragment path is under K/frags/ when
+			// set, to keep all per-object staging files in one location
+			// and prevent agents from picking arbitrary paths that
+			// collide with the multi-file project model.
+			if fragVal, hasFrag := patch["implFragment"]; hasFrag {
+				if fragPath, _ := fragVal.(string); fragPath != "" {
+					normalized := strings.ReplaceAll(fragPath, "\\", "/")
+					if !strings.HasPrefix(normalized, "K/frags/") {
+						return "", fmt.Errorf(
+							"refusing to set implFragment=%q for object %q: implFragment must live under K/frags/ (per-object staging area). Example: implFragment=\"K/frags/%s.js\"",
+							fragPath, id, id)
 					}
 				}
 			}
@@ -553,77 +571,48 @@ func graphMergeObjectTool() llm.Tool {
 	}
 }
 
-// typecalcEvidenceFileExists is the cwd-relative existence check that
-// graph_merge_object uses to enforce the v8.5 confirm-needs-evidence
-// invariant. The session-finish gate runs the same check via
-// readEvidence; this duplicates the path resolution to keep the
-// dependency graph thin (tools/graph already imports graph + session
-// + checkpoint, but not typecalc — and we only need the file
-// existence, not the full record).
-//
-// 2026-05-11 v8.7 — obstacle+waiver pair is also accepted as
-// evidence-equivalent. The gate's accepted-evidence-required rule
-// already treats obstacle+waiver as a legitimate finish path
-// (v8.6 carve-out). The confirm-time hook was the missing
-// counterpart: pong-02 v8.6 wrote obstacle.json + waiver.json for
-// UpdateFrame, then `graph_merge_object UpdateFrame status=confirmed`
-// was blocked here because <id>.json (the canonical typecalc evidence)
-// was missing. The agent's workaround was to run an extra noisy
-// typecalc_test (which itself TestError'd, but generated the file
-// shell). Treat obstacle+waiver pair as semantically equivalent to
-// typecalc evidence at confirm time so the agent doesn't need that
-// roundabout step.
+// typecalcEvidenceFileExists wraps typecalc.LoadObjectState so the
+// graph_merge_object confirm-needs-evidence rule shares logic with
+// the gate and the agent hook. Pre-v9.0 each of those three sites
+// re-implemented the file probe; consolidation lives in
+// internal/typecalc/state.go.
 func typecalcEvidenceFileExists(objectID string) bool {
 	if objectID == "" {
 		return false
 	}
-	cwd, _ := os.Getwd()
-	dir := filepath.Join(cwd, ".kcpos", "typecalc-evidence")
-	primary := filepath.Join(dir, objectID+".json")
-	if info, err := os.Stat(primary); err == nil && !info.IsDir() && info.Size() > 0 {
-		return true
-	}
-	// Obstacle+waiver pair carve-out: both files must exist and be
-	// non-empty. A waiver without a matching obstacle is not enough
-	// (the agent must justify the escape via the obstacle reason
-	// before the waiver substitutes for evidence).
-	obstacle := filepath.Join(dir, objectID+".obstacle.json")
-	waiver := filepath.Join(dir, objectID+".waiver.json")
-	oInfo, oErr := os.Stat(obstacle)
-	wInfo, wErr := os.Stat(waiver)
-	if oErr == nil && wErr == nil &&
-		!oInfo.IsDir() && oInfo.Size() > 0 &&
-		!wInfo.IsDir() && wInfo.Size() > 0 {
-		return true
-	}
-	return false
+	s := typecalc.LoadObjectState(objectID, "")
+	return s.HasUsableEvidence()
 }
 
 // autoCompileOnImplSet runs typecalc_compile against the file referenced
-// by a freshly-set `impl` field on a graph object, and writes evidence
-// for that object on success. Returns a string to append to the merge
-// result describing what happened (empty = no auto-compile triggered).
+// by a freshly-set `impl` (or `implFragment`) field on a graph object,
+// and writes evidence for that object on success. Returns a string to
+// append to the merge result describing what happened (empty = no
+// auto-compile triggered).
 //
-// Trigger: patch contains "impl" key with a non-empty string value.
-// We re-load the graph after merge to get the canonical impl path
-// (the patch may use a relative path that the merger normalized).
+// Trigger: patch contains "impl" OR "implFragment" key with a non-empty
+// string value. v9.0.3: when `implFragment` is present (or already set
+// on the graph object), the fragment path is the auto-compile target
+// because that's the per-object file the agent will write. Using `impl`
+// as the target for a shared-deliverable HTML project meant N objects
+// would re-trigger the same hook against the same index.html, producing
+// N "pending compile" messages and pressuring the agent to single-shot
+// write the entire deliverable from the parent context (the v9.0.2
+// Terraria batch death mode).
 func autoCompileOnImplSet(ctx context.Context, objectID string, patch map[string]any) string {
-	implRaw, ok := patch["impl"]
-	if !ok {
+	target := pickAutoCompileTarget(objectID, patch)
+	if target == "" {
 		return ""
 	}
-	implPath, ok := implRaw.(string)
-	if !ok || implPath == "" {
-		return ""
-	}
-	content, err := os.ReadFile(implPath)
+	content, err := os.ReadFile(target)
 	if err != nil {
 		// File not on disk yet — likely the agent will write_file next
-		// (which will trigger auto-typecalc-on-write since impl is now
-		// set). Don't fail the merge; just note.
-		return fmt.Sprintf("[auto-typecalc] impl=%q referenced but file not yet on disk; "+
-			"compile will run automatically on the next write_file to that path", implPath)
+		// (which will trigger auto-typecalc-on-write since the path is now
+		// declared). Don't fail the merge; just note.
+		return fmt.Sprintf("[auto-typecalc] %q referenced but file not yet on disk; "+
+			"compile will run automatically on the next write_file to that path", target)
 	}
+	implPath := target
 	ext := filepath.Ext(implPath)
 	langTag := typecalc.LangFromExt(ext)
 	if langTag == typecalc.LangNone {
@@ -653,6 +642,35 @@ func autoCompileOnImplSet(ctx context.Context, objectID string, patch map[string
 				"No evidence was recorded. Fix the source file and re-merge (or simply re-write the file — "+
 				"auto-typecalc-on-write will retry).",
 			implPath, objectID, ce.ErrorCode, indent(ce.ErrorLog, "    "))
+	}
+	return ""
+}
+
+// pickAutoCompileTarget chooses what file to auto-compile after a
+// graph_merge_object patch. v9.0.3 prefers `implFragment` (per-object,
+// no shared-deliverable contention) over `impl` (often shared across N
+// objects when the deliverable is a single index.html). The selection
+// considers both the patch and the post-merge graph state — if the
+// patch only sets `impl` but the object already had `implFragment`
+// from a prior merge, we still use the fragment as the target.
+func pickAutoCompileTarget(objectID string, patch map[string]any) string {
+	// 1. patch-supplied implFragment wins.
+	if v, has := patch["implFragment"]; has {
+		if s, _ := v.(string); s != "" {
+			return s
+		}
+	}
+	// 2. existing implFragment on the merged-into object wins next.
+	if g, err := graph.LoadOrInit(graph.DefaultPath); err == nil {
+		if obj, ok := g.Objects[objectID]; ok && obj.ImplFragment != nil && *obj.ImplFragment != "" {
+			return *obj.ImplFragment
+		}
+	}
+	// 3. fall back to impl from the patch.
+	if v, has := patch["impl"]; has {
+		if s, _ := v.(string); s != "" {
+			return s
+		}
 	}
 	return ""
 }

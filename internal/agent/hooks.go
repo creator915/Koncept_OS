@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/graph"
+	"github.com/creator915/Koncept_OS/internal/session"
+	"github.com/creator915/Koncept_OS/internal/typecalc"
 )
 
 // SpecHook is the contract for "did the agent's last action need follow-up
@@ -36,6 +38,7 @@ func DefaultHooks() []SpecHook {
 		&rootFinishGateHook{},
 		&statusTransitionHook{},
 		&typecalcUseHook{},
+		&objectGateHook{}, // v8.8: per-object early feedback on status=confirmed
 		&autoValidateHook{},
 	}
 }
@@ -438,36 +441,76 @@ func typecalcEvidenceExists(objectID string) bool {
 	if objectID == "" {
 		return false
 	}
+	// v9.0: route through the unified ObjectState query so the agent
+	// hook, the graph_merge_object blocking check, and the root gate
+	// all judge "has usable evidence?" the same way.
+	return typecalc.LoadObjectState(objectID, "").HasUsableEvidence()
+}
+
+// --- Hook 7.5: object-gate on status=confirmed (v8.8) ---
+//
+// When graph_merge_object flips an object to status=confirmed, the
+// agent has implicitly claimed "this object's evidence is in order".
+// Pre-v8.8 that claim was only validated at root-finish gate_check —
+// problems sat dormant for many turns until the agent eventually
+// hit the big gate. v8.7 pong-03 hit gate_check 8 times because of
+// this; pong-05 hit 4 times. v8.8 splits the gate so every
+// status=confirmed transition gets an immediate per-object audit:
+// the same rules the root walk applies, but scoped to ONE object,
+// emitted as a hook message the agent sees next turn.
+//
+// The hook fires regardless of whether typecalc-use's evidence-exists
+// check passed — that check verifies a file exists; gate_object
+// verifies the file's content (ok=true / kind=test / accepted-evidence
+// chain). Both can fire on the same merge if both are violated;
+// FormatViolations concatenates them in order.
+//
+// Emits nothing when gate_object returns no issues (clean confirm).
+
+type objectGateHook struct{}
+
+func (h *objectGateHook) Name() string { return "object-gate" }
+
+func (h *objectGateHook) After(toolName, argsJSON, _ string) string {
+	if toolName != "graph_merge_object" {
+		return ""
+	}
+	var args struct {
+		ID    string `json:"id"`
+		Patch string `json:"patch"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ""
+	}
+	var patch map[string]any
+	if err := json.Unmarshal([]byte(args.Patch), &patch); err != nil {
+		return ""
+	}
+	statusVal, hasStatus := patch["status"]
+	if !hasStatus {
+		return ""
+	}
+	if s, _ := statusVal.(string); s != graph.StatusConfirmed {
+		return ""
+	}
+	g, err := graph.LoadOrInit(graph.DefaultPath)
+	if err != nil {
+		return ""
+	}
 	cwd, _ := os.Getwd()
-	rel := filepath.Join(typecalcEvidenceDirRel, objectID+".json")
-	path := filepath.Join(cwd, rel)
-	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-		// Minimal parse — we don't need the full struct here, just the
-		// `ok` field. The gate (internal/session/gate.go) does the full
-		// inspection (kind=test enforcement, etc.). The hook is intentionally
-		// lighter: it lets a compile-only evidence file pass at merge time
-		// so the agent can still iterate, while the gate at root-finish
-		// makes the harder demand.
-		var rec struct {
-			OK bool `json:"ok"`
-		}
-		if err := json.Unmarshal(raw, &rec); err == nil && rec.OK {
-			return true
-		}
+	issues, _ := session.CheckObjectGate(g, args.ID, cwd)
+	if len(issues) == 0 {
+		return ""
 	}
-	// 2026-05-11 v8.7 — obstacle+waiver pair counts as evidence-equivalent
-	// at the warning level too. Matches the blocking check in
-	// internal/tools/graph/graph.go typecalcEvidenceFileExists.
-	obstacle := filepath.Join(cwd, typecalcEvidenceDirRel, objectID+".obstacle.json")
-	waiver := filepath.Join(cwd, typecalcEvidenceDirRel, objectID+".waiver.json")
-	oInfo, oErr := os.Stat(obstacle)
-	wInfo, wErr := os.Stat(waiver)
-	if oErr == nil && wErr == nil &&
-		!oInfo.IsDir() && oInfo.Size() > 0 &&
-		!wInfo.IsDir() && wInfo.Size() > 0 {
-		return true
+	var b []byte
+	b = append(b, fmt.Sprintf("[object-gate] %s flipped to status=confirmed but per-object gate found %d issue(s):\n", args.ID, len(issues))...)
+	for _, iss := range issues {
+		b = append(b, "  ✗ "...)
+		b = append(b, iss...)
+		b = append(b, '\n')
 	}
-	return false
+	b = append(b, "Address each before the next graph_merge_object or before session_gate_check. The root-finish gate runs the same checks across all confirmed objects — fixing them per-object now avoids stacking failures."...)
+	return string(b)
 }
 
 // --- Hook 8: auto-validate after every graph mutation ---

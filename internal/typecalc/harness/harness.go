@@ -32,6 +32,14 @@ type RenderInputs struct {
 	ImplPath        string
 	TracePath       string
 	PortObservation map[string]string // port_name → extractor expression
+	// ImplSymbol (v8.8) is the actual function name inside the impl
+	// source code. Empty defaults to ObjectID. When set, the harness
+	// binds the function under BOTH the ObjectID and the ImplSymbol on
+	// globalThis.IMPL so that synthesized tests (which call
+	// IMPL.<ObjectID>(...)) AND direct-symbol calls (IMPL.<implSymbol>)
+	// both work. Decouples "graph object name convention" from
+	// "impl-side function name convention".
+	ImplSymbol string
 }
 
 // Render takes the synthesized TestsEvidence + I/O port lists +
@@ -65,8 +73,13 @@ func renderJavaScript(in RenderInputs) string {
 		po = map[string]string{}
 	}
 	poJSON, _ := json.Marshal(po)
+	implSym := in.ImplSymbol
+	if implSym == "" {
+		implSym = in.Tests.ObjectID
+	}
 	src := jsHarnessTemplate
 	src = strings.ReplaceAll(src, "__OBJECT_ID__", jsString(in.Tests.ObjectID))
+	src = strings.ReplaceAll(src, "__IMPL_SYMBOL__", jsString(implSym))
 	src = strings.ReplaceAll(src, "__IMPL_PATH__", jsString(in.ImplPath))
 	src = strings.ReplaceAll(src, "__TRACE_PATH__", jsString(in.TracePath))
 	src = strings.ReplaceAll(src, "__CASES__", string(cases))
@@ -104,6 +117,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const OBJECT_ID = __OBJECT_ID__;
+const IMPL_SYMBOL = __IMPL_SYMBOL__;
 const IMPL_PATH = __IMPL_PATH__;
 const TRACE_FILE = __TRACE_PATH__;
 const CASES = __CASES__;
@@ -132,28 +146,54 @@ function computeImplHash() {
 }
 const IMPL_HASH = computeImplHash();
 
-function loadTrace() {
+// 2026-05-11 v9.0 — trace lives as the runtimeTrace section inside
+// the unified evidence bundle (.kcpos/typecalc/<id>.json). The harness
+// reads the bundle, mutates only runtimeTrace + sourceHash, writes it
+// back. Other sections (spec, tests, accepted, ...) are preserved
+// across runs.
+const RUN_CALLS = [];
+
+function loadBundle() {
   try {
     if (fs.existsSync(TRACE_FILE)) {
-      return JSON.parse(fs.readFileSync(TRACE_FILE, 'utf-8'));
+      const raw = fs.readFileSync(TRACE_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && parsed.objectId === OBJECT_ID) {
+        return parsed;
+      }
     }
-  } catch (_) { /* fresh start */ }
-  return { objectId: OBJECT_ID, implHash: IMPL_HASH, calls: [] };
+  } catch (_) { /* fresh */ }
+  return { objectId: OBJECT_ID, version: 1, updatedAt: new Date().toISOString() };
 }
 
-function saveTrace(t) {
+function saveTrace() {
   fs.mkdirSync(path.dirname(TRACE_FILE), { recursive: true });
-  fs.writeFileSync(TRACE_FILE, JSON.stringify(t, null, 2), 'utf-8');
+  const bundle = loadBundle();
+  bundle.objectId = OBJECT_ID;
+  bundle.version = bundle.version || 1;
+  bundle.sourceHash = IMPL_HASH;
+  bundle.updatedAt = new Date().toISOString();
+  bundle.runtimeTrace = { calls: RUN_CALLS };
+  fs.writeFileSync(TRACE_FILE, JSON.stringify(bundle, null, 2), 'utf-8');
+}
+
+// resetTrace writes a fresh runtimeTrace section at run start (preserving
+// any other sections in the bundle). Called once at module top before
+// any test() body executes.
+function resetTrace() {
+  saveTrace();
 }
 
 function appendTrace(inputs, outputs) {
-  const t = loadTrace();
-  // Always refresh implHash on save — if a previous run left a stale
-  // hash, this overwrites it with the current one.
-  t.implHash = IMPL_HASH;
-  t.calls.push({ inputs, outputs });
-  saveTrace(t);
+  RUN_CALLS.push({ inputs, outputs });
+  saveTrace();
 }
+
+// Reset on module load so even a zero-call run produces a clean
+// trace file with the current implHash (preventing v8.7 evidence-stale
+// from firing on a leftover file when typecalc_test legitimately
+// recorded nothing).
+resetTrace();
 
 // resolvePath walks a dotted path on an object. Used to extract
 // port values from a return value (e.g. "return.ball.x") or an
@@ -366,6 +406,22 @@ async function loadImpl() {
         if (typeof ns[k] === 'undefined') ns[k] = globalThis.IMPL[k];
       }
     }
+    // 2026-05-11 v8.8 — symbol-alias bridge. The synthesized tests call
+    // IMPL.<OBJECT_ID>(...), but impl-side functions may be named under
+    // a different convention (camelCase vs PascalCase, namespacing,
+    // etc.). When the graph object declares implSymbol != objectID,
+    // make IMPL[OBJECT_ID] resolve to the function exposed under
+    // IMPL[IMPL_SYMBOL]. Bidirectional so direct-symbol calls still
+    // work. Pre-v8.8 the harness silently failed all tests when an
+    // agent wrote function updatePhysics(...) for graph object
+    // "UpdatePhysics" (pong-05 v8.7 case, 13 cases failed).
+    if (IMPL_SYMBOL && IMPL_SYMBOL !== OBJECT_ID) {
+      if (typeof ns[IMPL_SYMBOL] === 'function' && typeof ns[OBJECT_ID] === 'undefined') {
+        ns[OBJECT_ID] = ns[IMPL_SYMBOL];
+      } else if (typeof ns[OBJECT_ID] === 'function' && typeof ns[IMPL_SYMBOL] === 'undefined') {
+        ns[IMPL_SYMBOL] = ns[OBJECT_ID];
+      }
+    }
     globalThis.IMPL = ns;
     return;
   }
@@ -380,6 +436,14 @@ async function loadImpl() {
     // call, so collisions with harness-internal globals don't happen.
     for (const k of Object.keys(mod)) {
       if (typeof globalThis[k] === 'undefined') globalThis[k] = mod[k];
+    }
+    // v8.8 symbol-alias bridge for module imports (same rationale as HTML branch above).
+    if (IMPL_SYMBOL && IMPL_SYMBOL !== OBJECT_ID) {
+      if (typeof globalThis.IMPL[IMPL_SYMBOL] === 'function' && typeof globalThis.IMPL[OBJECT_ID] === 'undefined') {
+        globalThis.IMPL = Object.assign({}, globalThis.IMPL, { [OBJECT_ID]: globalThis.IMPL[IMPL_SYMBOL] });
+      } else if (typeof globalThis.IMPL[OBJECT_ID] === 'function' && typeof globalThis.IMPL[IMPL_SYMBOL] === 'undefined') {
+        globalThis.IMPL = Object.assign({}, globalThis.IMPL, { [IMPL_SYMBOL]: globalThis.IMPL[OBJECT_ID] });
+      }
     }
     return;
   }

@@ -31,7 +31,7 @@ func typecalcWaiveTool() llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name: "typecalc_waive",
-				Description: "Record an explicit waiver for an object whose kind=insufficient evidence cannot be upgraded to test/compile. The waiver acknowledges the limitation and describes how the object will be verified out-of-band.\n\nUse this when typecalc_test or typecalc_compile reported `Insufficient` (e.g. for HTML, Rust, Java, or any language without an in-tree runner). The gate refuses to confirm such objects without a paired waiver.\n\nReason MUST be specific (\"manual play-testing on Chrome 120 confirmed all 8 SPEC items\", NOT \"works fine\"). One-word or hand-wavy reasons are rejected.",
+				Description: "Record an explicit waiver for an object whose kind=insufficient evidence cannot be upgraded to test/compile. The waiver acknowledges the limitation and describes how the object will be verified out-of-band.\n\nUse this when typecalc_test or typecalc_compile reported `Insufficient` (e.g. for HTML, Rust, Java, or any language without an in-tree runner). The gate refuses to confirm such objects without a paired waiver.\n\nReason MUST be specific (\"manual play-testing on Chrome 120 confirmed all 8 SPEC items\", NOT \"works fine\"). One-word or hand-wavy reasons are rejected.\n\n**kind** (v9.0.1) discriminates the waiver category:\n  - \"structural\" — kcpos cannot mechanically verify this in principle: DOM input handlers, Canvas drawing, side-effect-only functions, languages without an in-tree runner. Doesn't count toward the waiver-flood gate (many such waivers in one project is expected when the deliverable is HTML).\n  - \"pragmatic\" (default) — the underlying issue is solvable but bypassed for now (test-harness binding mismatch, time pressure). Counts toward waiver-flood: if ≥75% of confirmed objects ride pragmatic waivers the root gate blocks finish.\n\nWhen unsure, prefer \"structural\" only when the verification is genuinely outside kcpos's reach. Otherwise leave default.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -47,6 +47,11 @@ func typecalcWaiveTool() llm.Tool {
 							"type":        "string",
 							"description": "Optional. Who or what performs the out-of-band check (e.g. 'human play-test', 'integration test in src/integration.test.js').",
 						},
+						"kind": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional. \"structural\" or \"pragmatic\" (default). See tool description above.",
+							"enum":        []string{"structural", "pragmatic"},
+						},
 					},
 					"required": []string{"object_id", "reason"},
 				},
@@ -56,6 +61,7 @@ func typecalcWaiveTool() llm.Tool {
 			objectID, _ := args["object_id"].(string)
 			reason, _ := args["reason"].(string)
 			verifier, _ := args["verifier"].(string)
+			kind, _ := args["kind"].(string)
 			if objectID == "" {
 				return "", fmt.Errorf("object_id required")
 			}
@@ -63,20 +69,29 @@ func typecalcWaiveTool() llm.Tool {
 			if err := validateWaiverReason(reason); err != nil {
 				return "", err
 			}
+			kind = strings.TrimSpace(kind)
+			switch kind {
+			case "", typecalc.WaiverKindStructural, typecalc.WaiverKindPragmatic:
+			default:
+				return "", fmt.Errorf("kind must be \"structural\" or \"pragmatic\" (got %q)", kind)
+			}
 			rec := &typecalc.WaiverEvidence{
-				ObjectID: objectID,
-				Reason:   reason,
-				Verifier: verifier,
+				ObjectID:   objectID,
+				Reason:     reason,
+				Verifier:   verifier,
+				WaiverKind: kind,
 			}
 			if err := typecalc.WriteWaiver(rec); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf(
-				"waived %s — wrote %s\n\n  reason: %s\n  verifier: %s\n",
+				"waived %s — wrote %s\n\n  reason: %s\n  verifier: %s\n  kind: %s (counts toward waiver-flood: %v)\n",
 				objectID,
 				typecalc.WaiverEvidencePath(objectID),
 				reason,
 				ifNonEmpty(verifier, "(unspecified)"),
+				ifNonEmpty(kind, typecalc.WaiverKindPragmatic+" (default)"),
+				kind != typecalc.WaiverKindStructural,
 			), nil
 		},
 	}

@@ -2,16 +2,14 @@ package checkpointtools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/checkpoint"
 	"github.com/creator915/Koncept_OS/internal/graph"
 	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/typecalc"
 )
 
 // Checkpoint tools maintain K/checkpoint.json — the project verification
@@ -82,22 +80,20 @@ func checkpointFillTool() llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "checkpoint_fill",
-				Description: "Record codeProof and/or gameplayProof for an item. codeProof = file:line + key export (e.g. 'src/Auth.impl.ts:42 LoginHandler'). gameplayProof = runtime reproduction steps + path to K/proofs/<id>/ artifacts (e.g. 'spawn / left:30 / attack:5 → see K/proofs/CHK-001/final.png'). For root finish on projects with executable deliverables (index.html / dist bundle), CLAUDE.md §5.5 R3 requires BOTH proofs on every must item; the gate enforces this via [gameplay-proof-required]. At least one proof must be supplied per call; subsequent calls overwrite only the supplied slots.",
+				Description: "Record codeProof for an item (the file:line + key export name that satisfies it, e.g. 'src/Auth.impl.ts:42 LoginHandler'). Use this once the implementation is in place to demonstrate the requirement is met.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":             map[string]interface{}{"type": "string"},
-						"code_proof":     map[string]interface{}{"type": "string", "description": "file:line + symbol, e.g. 'src/foo.ts:42 ExportName'. Optional if gameplay_proof is supplied."},
-						"gameplay_proof": map[string]interface{}{"type": "string", "description": "Reproduction steps + path under K/proofs/<id>/, e.g. 'launch / move-left:30 / attack:5 — see K/proofs/CHK-001/final.png'. Required at root finish for projects with executable deliverables. Optional if code_proof is supplied."},
+						"id":         map[string]interface{}{"type": "string"},
+						"code_proof": map[string]interface{}{"type": "string", "description": "file:line + symbol, e.g. 'src/foo.ts:42 ExportName'."},
 					},
-					"required": []string{"id"},
+					"required": []string{"id", "code_proof"},
 				},
 			},
 		},
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			id, _ := args["id"].(string)
-			codeProof, _ := args["code_proof"].(string)
-			gameplayProof, _ := args["gameplay_proof"].(string)
+			proof, _ := args["code_proof"].(string)
 			// 2026-05-09 v8.5 — checkpoint_fill must not fabricate
 			// codeProof. The 5-instance v8.4 batch caught pong-03
 			// filling 8 items 365 lines BEFORE its first Tested<Pass>
@@ -112,20 +108,13 @@ func checkpointFillTool() llm.Tool {
 			if !anyConfirmedWithPassingEvidence() {
 				return "", fmt.Errorf(
 					"refusing checkpoint_fill for %q: no confirmed object on K/graph.json yet has passing typecalc evidence (kind=test ok=true OR kind=insufficient+waiver). "+
-						"Filling codeProof before any code has been verified amounts to fabricating evidence. Run typecalc_compile + typecalc_test on at least one object, get it to confirmed with passing evidence, THEN return to fill checkpoint items. CLAUDE.md §5.5 R4 places fill AFTER R3 (impl + tests passing).",
+						"Filling codeProof before any code has been verified amounts to fabricating evidence. Run typecalc_compile + typecalc_test on at least one object, get it to confirmed with passing evidence, THEN return to fill checkpoint items.",
 					id)
 			}
-			if err := checkpoint.Fill(checkpoint.DefaultPath, id, codeProof, gameplayProof); err != nil {
+			if err := checkpoint.Fill(checkpoint.DefaultPath, id, proof); err != nil {
 				return "", err
 			}
-			var parts []string
-			if codeProof != "" {
-				parts = append(parts, "codeProof = "+codeProof)
-			}
-			if gameplayProof != "" {
-				parts = append(parts, "gameplayProof = "+gameplayProof)
-			}
-			return fmt.Sprintf("%s · %s", id, strings.Join(parts, "; ")), nil
+			return fmt.Sprintf("%s · codeProof = %s", id, proof), nil
 		},
 	}
 }
@@ -141,34 +130,16 @@ func anyConfirmedWithPassingEvidence() bool {
 	if err != nil {
 		return false
 	}
-	cwd, _ := os.Getwd()
 	for objID, obj := range g.Objects {
 		if obj.Status != graph.StatusConfirmed {
 			continue
 		}
-		evPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".json")
-		raw, err := os.ReadFile(evPath)
-		if err != nil || len(raw) == 0 {
-			continue
-		}
-		var ev struct {
-			Kind string `json:"kind"`
-			OK   bool   `json:"ok"`
-		}
-		if err := json.Unmarshal(raw, &ev); err != nil {
-			continue
-		}
-		if ev.OK {
+		// v9.0: route through ObjectState so the same "is this object
+		// verified?" semantics power gate, hooks, and this precondition
+		// check.
+		st := typecalc.LoadObjectState(objID, "")
+		if st.HasUsableEvidence() {
 			return true
-		}
-		// Insufficient + waiver also counts as "verified to the
-		// extent kcpos can": agent declared inability to mechanically
-		// test and provided a manual verification plan.
-		if ev.Kind == "insufficient" {
-			waiverPath := filepath.Join(cwd, ".kcpos", "typecalc-evidence", objID+".waiver.json")
-			if _, statErr := os.Stat(waiverPath); statErr == nil {
-				return true
-			}
 		}
 	}
 	return false

@@ -35,6 +35,11 @@ type SynthesizeInputs struct {
 	// captures the return value. If "global", the call mutates globals.
 	// Folded into the prompt as a JSON object {port: extractor}.
 	PortObservation string
+	// Examples (v9.0.5.4) are concrete `@example` blocks extracted from
+	// the JS def file. Far stronger grounding than @param / @returns
+	// alone — the synthesized cases inherit the shape of these instead
+	// of inventing it. Each entry is the raw text of one example.
+	Examples []string
 }
 
 // SynthesizeTests asks an LLM to generate test cases from the spec
@@ -170,6 +175,15 @@ Rules:
 5. The harness automatically: snapshots input ports before each call, snapshots output ports after, appends to .kcpos/typecalc-runtime/<id>.json BEFORE running assertions (so traces are captured even on assertion failure), and runs the assertions. You do NOT need to write any of that.
 6. If the spec is too underspecified to derive meaningful cases, return the literal text CANNOT_SYNTHESIZE on a single line followed by a one-sentence reason. Do not return JSON in that case.
 
+**v9.0.2 assertion-style rules (CRITICAL — these prevent brittle tests):**
+
+7. **Only use ` + "`equals`" + ` for values that are DECLARED INVARIANTS** — named constants the contract pins (e.g. ` + "`radius=8`" + ` if the description says "radius is fixed at 8"), enum members, status strings ("playing"/"game_over"), boolean flags. NEVER use ` + "`equals`" + ` for computed/derived values.
+8. **For arithmetic-derived values use ` + "`between: [lo, hi]`" + `** with a ±1% tolerance band around the expected value. Example: if the description says "paddle moves at 500 px/s for dt=0.016s" expecting `+ "`paddleX = 200 - 8 = 192`" + `, write ` + "`{between: [190, 194]}`" + ` not ` + "`{equals: 192}`" + `. This protects against floating-point precision drift across impl rewrites.
+9. **For values whose specific magnitude is implementation-chosen (e.g. random starting position drawn from a range), use ` + "`between`" + ` over the FULL declared range**, not the specific sample. If description says "ball spawns at x in [8, width-8]", write ` + "`{between: [8, 792]}`" + ` for a 800px canvas — NEVER ` + "`{equals: 400}`" + ` even if a representative sample value appears in the description.
+10. **For shape/structure validation use ` + "`type`" + ` not ` + "`equals: {}`" + `**: ` + "`{type: \"object\"}`" + ` / ` + "`{type: \"array\"}`" + ` / ` + "`{type: \"number\"}`" + `. ` + "`equals` on an object" + ` requires exact key-order match — gratuitously brittle.
+
+**Why these rules**: tests must verify the *contract* (description-level invariants), not the *implementation* (specific numeric coincidences). A test that fires ` + "`equals: 192`" + ` breaks when the impl is rewritten with a different rounding order producing 192.00001 — even though the contract is satisfied. The harness supports ` + "`between` / `type` / `enum` / `truthy`" + ` precisely so synthesized tests can stay contract-anchored.
+
 Legacy fallback (only when a harness for the language doesn't exist): instead of "cases", output:
 {
   "objectId": "<id>",
@@ -196,6 +210,13 @@ func buildSynthesizePrompt(in SynthesizeInputs) string {
 	}
 	if in.ValueSpace != "" {
 		fmt.Fprintf(&b, "## valueSpace declarations\n```\n%s\n```\n\n", clip(in.ValueSpace, 2000))
+	}
+	if len(in.Examples) > 0 {
+		b.WriteString("## Concrete examples from the def file (ground truth — use these as case seeds)\n\n")
+		for i, ex := range in.Examples {
+			fmt.Fprintf(&b, "Example %d:\n```\n%s\n```\n\n", i+1, clip(ex, 1000))
+		}
+		b.WriteString("These examples come from the def's JSDoc @example tags and are AUTHORITATIVE input/output pairs for this function. Your generated cases MUST cover at least every example here verbatim (preserve the exact inputs and assert the exact outputs). You may add ADDITIONAL boundary/edge cases on top.\n\n")
 	}
 	if in.PortObservation != "" {
 		fmt.Fprintf(&b, "## portObservation (how to read each port at runtime)\n```\n%s\n```\n\n"+
