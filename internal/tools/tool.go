@@ -13,19 +13,20 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
-	checkpointtools "github.com/creator915/Koncept_OS/internal/tools/checkpoint"
+	"github.com/creator915/Koncept_OS/internal/app/services"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 	"github.com/creator915/Koncept_OS/internal/tools/fs"
 	"github.com/creator915/Koncept_OS/internal/tools/git"
 	graphtools "github.com/creator915/Koncept_OS/internal/tools/graph"
+	runtimetools "github.com/creator915/Koncept_OS/internal/tools/runtime"
 	sessiontools "github.com/creator915/Koncept_OS/internal/tools/session"
-	typecalctools "github.com/creator915/Koncept_OS/internal/tools/typecalc"
 )
 
 // Tool is re-exported from llm so existing callers (agent.RunTurnOpts,
 // SubAgentRunner, cmd/kcpos) can keep using `tools.Tool` as the
-// interchange type. New code may use `llm.Tool` directly.
-type Tool = llm.Tool
+// interchange type. New code may use `toolcall.Tool` directly.
+type Tool = toolcall.Tool
 
 // Builtins returns the full set of agent tools, aggregated from each
 // subpackage. The set is a fresh map every call (so callers can mutate
@@ -44,10 +45,13 @@ func Builtins() map[string]Tool {
 	for k, v := range sessiontools.Tools() {
 		out[k] = v
 	}
-	for k, v := range checkpointtools.Tools() {
+	for k, v := range services.CheckpointTools() {
 		out[k] = v
 	}
-	for k, v := range typecalctools.Tools() {
+	for k, v := range services.TypecalcTools() {
+		out[k] = v
+	}
+	for k, v := range runtimetools.Tools() {
 		out[k] = v
 	}
 	return out
@@ -55,8 +59,8 @@ func Builtins() map[string]Tool {
 
 // Specs extracts the schema descriptions the LLM provider's chat API
 // expects in its `tools` field.
-func Specs(tools map[string]Tool) []llm.ToolSpec {
-	specs := make([]llm.ToolSpec, 0, len(tools))
+func Specs(tools map[string]Tool) []transport.ToolSpec {
+	specs := make([]transport.ToolSpec, 0, len(tools))
 	for _, t := range tools {
 		specs = append(specs, t.Spec)
 	}

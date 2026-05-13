@@ -5,8 +5,9 @@
 # Rust build artifacts
 /target/
 
-# runtime session data (when running kcpos inside its own repo)
+# runtime session data (when running kcpos inside its own repo or a test subdir)
 /.kcpos/
+**/.kcpos/
 
 # macOS
 .DS_Store

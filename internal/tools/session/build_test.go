@@ -1,12 +1,13 @@
 package sessiontools
 
 import (
+	"github.com/creator915/Koncept_OS/internal/infra/persistence"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/creator915/Koncept_OS/internal/graph"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
 )
 
 // runInTempDir creates a tempdir, chdirs into it, returns a cleanup
@@ -34,7 +35,7 @@ func runInTempDir(t *testing.T) func() {
 // LoadOrInit it.
 func writeGraph(t *testing.T, g *graph.Graph) {
 	t.Helper()
-	if err := graph.Save(graph.DefaultPath, g); err != nil {
+	if err := persistence.SaveGraph(persistence.GraphDefaultPath, g); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -69,7 +70,7 @@ func TestSessionBuild_HappyPath(t *testing.T) {
 	mustWrite(t, "K/frags/UpdateFrame.js", "function UpdateFrame() { return 'B'; }")
 	mustWrite(t, "K/frags/Render.js", "function Render() { return 'C'; }")
 
-	out, err := runSessionBuild()
+	out, err := runSessionBuild("inline")
 	if err != nil {
 		t.Fatalf("runSessionBuild: %v", err)
 	}
@@ -115,11 +116,11 @@ func TestSessionBuild_Idempotent(t *testing.T) {
 	writeGraph(t, g)
 	mustWrite(t, "K/frags/Foo.js", "function Foo() {}")
 
-	if _, err := runSessionBuild(); err != nil {
+	if _, err := runSessionBuild("inline"); err != nil {
 		t.Fatalf("first build: %v", err)
 	}
 	first := mustRead(t, "index.html")
-	if _, err := runSessionBuild(); err != nil {
+	if _, err := runSessionBuild("inline"); err != nil {
 		t.Fatalf("second build: %v", err)
 	}
 	second := mustRead(t, "index.html")
@@ -146,7 +147,7 @@ func TestSessionBuild_ReplacePriorBlock(t *testing.T) {
 	// match the graph object id. The V1/V2 difference is in the body.
 	mustWrite(t, "K/frags/Foo.js", "function Foo() { return 1; /* V1 */ }")
 
-	if _, err := runSessionBuild(); err != nil {
+	if _, err := runSessionBuild("inline"); err != nil {
 		t.Fatal(err)
 	}
 	// Add agent-authored HTML around the kcpos block.
@@ -159,7 +160,7 @@ func TestSessionBuild_ReplacePriorBlock(t *testing.T) {
 
 	// Now bump the fragment body and rebuild.
 	mustWrite(t, "K/frags/Foo.js", "function Foo() { return 2; /* V2 */ }")
-	if _, err := runSessionBuild(); err != nil {
+	if _, err := runSessionBuild("inline"); err != nil {
 		t.Fatal(err)
 	}
 	body := mustRead(t, "index.html")
@@ -187,7 +188,7 @@ func TestSessionBuild_NoFragmentsIsHarmless(t *testing.T) {
 	g.Objects["Foo"] = obj
 	writeGraph(t, g)
 
-	out, err := runSessionBuild()
+	out, err := runSessionBuild("inline")
 	if err != nil {
 		t.Fatalf("expected no error for multi-file project, got: %v", err)
 	}
@@ -218,7 +219,7 @@ func TestSessionBuild_MultipleDeliverablesIsError(t *testing.T) {
 	mustWrite(t, "K/frags/A.js", "")
 	mustWrite(t, "K/frags/B.js", "")
 
-	_, err := runSessionBuild()
+	_, err := runSessionBuild("inline")
 	if err == nil {
 		t.Fatal("expected error for multi-deliverable graph")
 	}
@@ -253,7 +254,7 @@ function ghost(x) {
   return x + 1;
 }
 `)
-	_, err := runSessionBuild()
+	_, err := runSessionBuild("inline")
 	if err == nil {
 		t.Fatal("expected session_build to refuse on unmodeled function")
 	}
@@ -286,7 +287,7 @@ func TestSessionBuild_AllowsClosuresAndArrows(t *testing.T) {
   return _inner(input);
 }
 `)
-	out, err := runSessionBuild()
+	out, err := runSessionBuild("inline")
 	if err != nil {
 		t.Fatalf("closures/arrows should not trip the unmodeled-function gate; got: %v\nout: %s", err, out)
 	}
@@ -311,7 +312,7 @@ func TestSessionBuild_AllowsImplSymbol(t *testing.T) {
   return input;
 }
 `)
-	if _, err := runSessionBuild(); err != nil {
+	if _, err := runSessionBuild("inline"); err != nil {
 		t.Errorf("ImplSymbol-named function should pass; got: %v", err)
 	}
 }
@@ -331,7 +332,7 @@ func TestSessionBuild_MissingFragmentFileIsError(t *testing.T) {
 	writeGraph(t, g)
 	// note: NOT writing K/frags/Missing.js
 
-	_, err := runSessionBuild()
+	_, err := runSessionBuild("inline")
 	if err == nil {
 		t.Fatal("expected error for missing fragment file")
 	}
@@ -369,12 +370,149 @@ func TestSessionBuild_CycleDetected(t *testing.T) {
 	}
 	writeGraph(t, g)
 
-	_, err := runSessionBuild()
+	_, err := runSessionBuild("inline")
 	if err == nil {
 		t.Fatal("expected cycle error")
 	}
 	if !strings.Contains(err.Error(), "cycle") {
 		t.Errorf("expected cycle in error; got: %v", err)
+	}
+}
+
+// TestSessionBuild_ReferenceMode_HappyPath: v9.3.1 reference mode emits
+// `<script src="K/frags/<id>.js">` references in topo order instead of
+// inline concatenation. Browser-loadable, idempotent, cheap to re-run.
+func TestSessionBuild_ReferenceMode_HappyPath(t *testing.T) {
+	defer runInTempDir(t)()
+
+	g := graph.NewGraph()
+	g.Attributes["state"] = graph.NewAttribute("defs/state.ts", "state")
+	g.Attributes["frame"] = graph.NewAttribute("defs/frame.ts", "frame")
+
+	implPath := "index.html"
+	for _, id := range []string{"InitGame", "UpdateFrame", "Render"} {
+		fragPath := "K/frags/" + id + ".js"
+		obj := graph.NewObject("defs/"+id+".ts", id+" intent")
+		obj.Impl = &implPath
+		obj.ImplFragment = &fragPath
+		g.Objects[id] = obj
+	}
+	g.Objects["InitGame"].Produces = []string{"state"}
+	g.Objects["UpdateFrame"].Consumes = []string{"state"}
+	g.Objects["UpdateFrame"].Produces = []string{"frame"}
+	g.Objects["Render"].Consumes = []string{"frame"}
+	writeGraph(t, g)
+
+	mustWrite(t, "K/frags/InitGame.js", "function InitGame() { return 'A'; }")
+	mustWrite(t, "K/frags/UpdateFrame.js", "function UpdateFrame() { return 'B'; }")
+	mustWrite(t, "K/frags/Render.js", "function Render() { return 'C'; }")
+
+	out, err := runSessionBuild("reference")
+	if err != nil {
+		t.Fatalf("runSessionBuild(reference): %v", err)
+	}
+	body := mustRead(t, "index.html")
+
+	// Reference mode: fragment BODIES must NOT appear in deliverable.
+	for _, forbidden := range []string{"function InitGame", "function UpdateFrame", "function Render"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("reference mode must NOT inline fragment body %q. Body:\n%s", forbidden, body)
+		}
+	}
+	// Instead, `<script src>` references in topo order.
+	wantOrder := []string{
+		`<script src="K/frags/InitGame.js"></script>`,
+		`<script src="K/frags/UpdateFrame.js"></script>`,
+		`<script src="K/frags/Render.js"></script>`,
+	}
+	prevIdx := -1
+	for _, want := range wantOrder {
+		idx := strings.Index(body, want)
+		if idx < 0 {
+			t.Errorf("reference mode deliverable missing %q. Body:\n%s", want, body)
+			continue
+		}
+		if idx <= prevIdx {
+			t.Errorf("reference-mode order violation: %q at %d should follow earlier; prevIdx=%d", want, idx, prevIdx)
+		}
+		prevIdx = idx
+	}
+	// Block markers present so re-runs replace cleanly.
+	if !strings.Contains(body, kcposBlockOpen) || !strings.Contains(body, kcposBlockClose) {
+		t.Error("block markers missing from reference-mode deliverable")
+	}
+	if !strings.Contains(out, "mode=reference") {
+		t.Errorf("report should announce mode=reference. Got: %s", out)
+	}
+}
+
+// TestSessionBuild_ReferenceMode_Idempotent: re-running reference mode
+// produces byte-identical output when fragments unchanged.
+func TestSessionBuild_ReferenceMode_Idempotent(t *testing.T) {
+	defer runInTempDir(t)()
+
+	g := graph.NewGraph()
+	implPath := "index.html"
+	fragPath := "K/frags/Foo.js"
+	obj := graph.NewObject("defs/Foo.ts", "")
+	obj.Impl = &implPath
+	obj.ImplFragment = &fragPath
+	g.Objects["Foo"] = obj
+	writeGraph(t, g)
+	mustWrite(t, "K/frags/Foo.js", "function Foo() {}")
+
+	if _, err := runSessionBuild("reference"); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	first := mustRead(t, "index.html")
+	if _, err := runSessionBuild("reference"); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	second := mustRead(t, "index.html")
+	if first != second {
+		t.Errorf("reference mode not idempotent. First:\n%s\nSecond:\n%s", first, second)
+	}
+}
+
+// TestSessionBuild_DefaultsToReference: calling session_build without
+// specifying mode picks reference (v9.3.1 default).
+func TestSessionBuild_DefaultsToReference(t *testing.T) {
+	defer runInTempDir(t)()
+
+	g := graph.NewGraph()
+	implPath := "index.html"
+	fragPath := "K/frags/Foo.js"
+	obj := graph.NewObject("defs/Foo.ts", "")
+	obj.Impl = &implPath
+	obj.ImplFragment = &fragPath
+	g.Objects["Foo"] = obj
+	writeGraph(t, g)
+	mustWrite(t, "K/frags/Foo.js", "function Foo() {}")
+
+	out, err := runSessionBuild("") // empty = default
+	if err != nil {
+		t.Fatalf("default mode run: %v", err)
+	}
+	if !strings.Contains(out, "mode=reference") {
+		t.Errorf("default mode must be reference. Got: %s", out)
+	}
+	body := mustRead(t, "index.html")
+	if !strings.Contains(body, `<script src="K/frags/Foo.js"></script>`) {
+		t.Errorf("default mode must emit <script src> reference. Body:\n%s", body)
+	}
+	if strings.Contains(body, "function Foo") {
+		t.Errorf("default mode must NOT inline fragment body. Body:\n%s", body)
+	}
+}
+
+// TestSessionBuild_UnknownMode rejects mode values other than
+// inline / reference.
+func TestSessionBuild_UnknownMode(t *testing.T) {
+	defer runInTempDir(t)()
+	if _, err := runSessionBuild("bogus"); err == nil {
+		t.Error("expected error for bogus mode, got nil")
+	} else if !strings.Contains(err.Error(), "unknown mode") {
+		t.Errorf("error should mention 'unknown mode', got: %v", err)
 	}
 }
 

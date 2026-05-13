@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/graph"
-	"github.com/creator915/Koncept_OS/internal/llm"
-	"github.com/creator915/Koncept_OS/internal/session"
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	"github.com/creator915/Koncept_OS/internal/app/workflow"
+	"github.com/creator915/Koncept_OS/internal/infra/persistence"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 	"github.com/creator915/Koncept_OS/internal/typecalc/lang"
 )
 
@@ -24,7 +26,7 @@ import (
 // session's graphDiff. Tool wrappers use this so every mutating operation
 // gets diff capture for free.
 func mutateGraph(mutate func(*graph.Graph) error) error {
-	g, err := graph.LoadOrInit(graph.DefaultPath)
+	g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
 	if err != nil {
 		return err
 	}
@@ -32,22 +34,22 @@ func mutateGraph(mutate func(*graph.Graph) error) error {
 	if err := mutate(g); err != nil {
 		return err
 	}
-	if err := graph.Save(graph.DefaultPath, g); err != nil {
+	if err := persistence.SaveGraph(persistence.GraphDefaultPath, g); err != nil {
 		return err
 	}
 	// Capture errors are intentionally swallowed: the graph is already saved
 	// successfully and we don't want to confuse the model with secondary
 	// failures. CaptureDiff itself no-ops if no session is focused.
-	_ = session.CaptureDiff(session.DefaultDir, before, g)
+	_ = workflow.CaptureDiff(persistence.SessionDefaultDir, before, g)
 	return nil
 }
 
-func graphShowTool() llm.Tool {
-	return llm.Tool{
+func graphShowTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_show",
 				Description: "Show a node and its immediate neighbors in K/graph.json (the project hypergraph). Works for both attribute and object IDs.",
 				Parameters: map[string]interface{}{
@@ -64,7 +66,7 @@ func graphShowTool() llm.Tool {
 			if id == "" {
 				return "", fmt.Errorf("id required")
 			}
-			g, err := graph.LoadOrInit(graph.DefaultPath)
+			g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
 			if err != nil {
 				return "", err
 			}
@@ -73,11 +75,11 @@ func graphShowTool() llm.Tool {
 	}
 }
 
-func graphCreateAttributeTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphCreateAttributeTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_create_attribute",
 				Description: "Add a new attribute (data type / hypergraph node) to K/graph.json. Errors if id already exists. Status starts as 'declared'.\n\nDefault `def` is `defs/<id>.ts` (TypeScript-first convention). For non-TS projects (Go / Python / single-file HTML), pass `def` explicitly to point at the actual file where this type's signature lives — otherwise the def-existence check will warn. After creation, you (or a child) are responsible for creating that file with the type definition.",
 				Parameters: map[string]interface{}{
@@ -114,11 +116,11 @@ func graphCreateAttributeTool() llm.Tool {
 	}
 }
 
-func graphCreateObjectTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphCreateObjectTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_create_object",
 				Description: "Add a new object (function type / hyperedge) to K/graph.json. Errors if id already exists. Status starts as 'declared'.\n\nDefault `def` is `defs/<id>.ts` (TypeScript-first convention). For non-TS projects, pass `def` explicitly. After creation you must (a) create the def file with the function signature and (b) once implemented, call `graph_merge_object --patch '{\"impl\":\"<actual file>\",\"status\":\"confirmed\"}'` to mark the work done — otherwise the §root-deliver gate will block session finish.",
 				Parameters: map[string]interface{}{
@@ -155,11 +157,11 @@ func graphCreateObjectTool() llm.Tool {
 	}
 }
 
-func graphLinkRefineTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphLinkRefineTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_link_refine",
 				Description: "Record that one attribute refines another in the partial order (child <: parent). Both attributes must already exist.",
 				Parameters: map[string]interface{}{
@@ -185,11 +187,11 @@ func graphLinkRefineTool() llm.Tool {
 	}
 }
 
-func graphLinkConsumeTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphLinkConsumeTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_link_consume",
 				Description: "Record that an object consumes an attribute (reads it as input). Both must already exist.",
 				Parameters: map[string]interface{}{
@@ -215,11 +217,11 @@ func graphLinkConsumeTool() llm.Tool {
 	}
 }
 
-func graphLinkProduceTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphLinkProduceTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_link_produce",
 				Description: "Record that an object produces an attribute (writes it as fresh output, replacing any prior value). Use `graph_link_mutate` instead for in-place mutation (e.g. JS object property assignment).",
 				Parameters: map[string]interface{}{
@@ -254,11 +256,11 @@ func graphLinkProduceTool() llm.Tool {
 // object mutation, in-place data structure updates, or any function whose
 // "output" is "the same object, modified". Use graph_link_produce when
 // the function returns a fresh value.
-func graphLinkMutateTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphLinkMutateTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_link_mutate",
 				Description: "Record that an object MUTATES an attribute in place (reads + writes the same value, no fresh output). Use this for JS-style mutation. Distinct from `produces` (fresh output) — `mutates` does NOT count as a producer in cycle detection, so mutual mutation of shared state does not create false cycles.",
 				Parameters: map[string]interface{}{
@@ -284,11 +286,11 @@ func graphLinkMutateTool() llm.Tool {
 	}
 }
 
-func graphUnlinkMutateTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphUnlinkMutateTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_unlink_mutate",
 				Description: "Remove a mutates edge from object's mutates list. Idempotent.",
 				Parameters: map[string]interface{}{
@@ -314,11 +316,11 @@ func graphUnlinkMutateTool() llm.Tool {
 	}
 }
 
-func graphUnlinkRefineTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphUnlinkRefineTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_unlink_refine",
 				Description: "Remove a refines edge (child no longer refines parent). Idempotent.",
 				Parameters: map[string]interface{}{
@@ -344,11 +346,11 @@ func graphUnlinkRefineTool() llm.Tool {
 	}
 }
 
-func graphUnlinkConsumeTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphUnlinkConsumeTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_unlink_consume",
 				Description: "Remove a consume edge. Idempotent.",
 				Parameters: map[string]interface{}{
@@ -374,11 +376,11 @@ func graphUnlinkConsumeTool() llm.Tool {
 	}
 }
 
-func graphUnlinkProduceTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphUnlinkProduceTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_unlink_produce",
 				Description: "Remove a produce edge. Idempotent.",
 				Parameters: map[string]interface{}{
@@ -404,11 +406,11 @@ func graphUnlinkProduceTool() llm.Tool {
 	}
 }
 
-func graphMergeAttributeTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphMergeAttributeTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_merge_attribute",
 				Description: "Apply a partial JSON patch to an existing attribute. Allowed fields: intent, status, statusSession, valueSpace, confirmedOps, laws. Structural fields (def, refines) are not patchable here — use unlink/relink instead. The patch must be a JSON object string; only present keys are updated.\n\nOptional `session_id` temporarily swaps the focused session for the duration of the merge so the diff is recorded against that session — saves the focus / merge / re-focus call cycle when ticking through child sessions in batch.",
 				Parameters: map[string]interface{}{
@@ -448,11 +450,11 @@ func graphMergeAttributeTool() llm.Tool {
 	}
 }
 
-func graphMergeObjectTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func graphMergeObjectTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_merge_object",
 				Description: "Apply a partial JSON patch to an existing object. Allowed fields: intent, impl, status, statusSession, temporal, preconditions, postconditions. Structural fields (def, consumes, produces) are not patchable — use unlink/relink. Patch must be a JSON object string.\n\nOptional `session_id` temporarily swaps the focused session for the duration of the merge so the diff is recorded against that session — saves the focus / merge / re-focus cycle when ticking many child sessions through implementing→confirmed in a batch.",
 				Parameters: map[string]interface{}{
@@ -527,6 +529,44 @@ func graphMergeObjectTool() llm.Tool {
 								"v9.0.3 model for HTML single-file projects: set impl=\"index.html\" (the deliverable) PLUS implFragment=\"K/frags/<ObjectId>.js\" (this object's per-object staging file). Child sessions write to implFragment; the R2 build step concatenates every fragment into index.html. Example: graph_merge_object id=%q patch='{\"impl\":\"index.html\",\"implFragment\":\"K/frags/%s.js\"}'.",
 							implPath, id, id, id)
 					}
+					// v9.3: refuse fragment-as-impl. v92-04 had every
+					// confirmed object set impl=K/frags/<id>.js, which is
+					// the staging path, not the deliverable. The build
+					// step never assembled anything, the gate never ran
+					// runtime_smoke (impl wasn't HTML), and the run looked
+					// green while shipping nothing.
+					normalized := strings.ReplaceAll(implPath, "\\", "/")
+					if strings.HasPrefix(normalized, "K/frags/") {
+						return "", fmt.Errorf(
+							"refusing to set impl=%q for object %q: K/frags/ is the per-object STAGING area for fragments, not a deliverable path. The deliverable is what runs when the user opens the project (e.g. index.html for HTML projects, dist/<bundle>.js for bundled, src/<file>.go for Go). For HTML single-file projects use impl=\"index.html\" + implFragment=%q. If this is a multi-file project, set impl to the actual file the user will execute — never K/frags/*",
+							implPath, id, implPath)
+					}
+					// v9.3.1: HTML impl REQUIRES implFragment. v93-04 monolithic
+					// retro showed agent picked impl=index.html and skipped
+					// implFragment entirely → wrote the entire game inline →
+					// review's "read fragment not deliverable" optimisation
+					// (Phase 2.2) became inert → reviewer fed the full 1176-
+					// line index.html to the LLM → token overflow loop. Force
+					// the fragment to be set in the same patch (or be already
+					// set on the object) so HTML projects can only exist in
+					// the canonical fragment form.
+					if ext == ".html" || ext == ".htm" {
+						hasFragInPatch := false
+						if v, ok := patch["implFragment"].(string); ok && v != "" {
+							hasFragInPatch = true
+						}
+						hasFragOnObj := false
+						if g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath); err == nil {
+							if obj, exists := g.Objects[id]; exists && obj.ImplFragment != nil && *obj.ImplFragment != "" {
+								hasFragOnObj = true
+							}
+						}
+						if !hasFragInPatch && !hasFragOnObj {
+							return "", fmt.Errorf(
+								"refusing to set impl=%q for object %q without implFragment: HTML deliverables MUST be assembled from per-object fragments (kcpos v9.3.1 canonical single-file model). Same patch must also set implFragment=\"K/frags/%s.js\" (each child session writes its own fragment; session_build assembles them in reference mode by default). v93-04 retro: ignoring this requirement produces a monolithic 1000+-line index.html that breaks review's prompt budget and bypasses the AP11 fragment scan",
+								implPath, id, id)
+						}
+					}
 				}
 			}
 			// v9.0.3 — validate implFragment path is under K/frags/ when
@@ -571,7 +611,7 @@ func graphMergeObjectTool() llm.Tool {
 	}
 }
 
-// typecalcEvidenceFileExists wraps typecalc.LoadObjectState so the
+// typecalcEvidenceFileExists wraps core.LoadObjectState so the
 // graph_merge_object confirm-needs-evidence rule shares logic with
 // the gate and the agent hook. Pre-v9.0 each of those three sites
 // re-implemented the file probe; consolidation lives in
@@ -580,7 +620,7 @@ func typecalcEvidenceFileExists(objectID string) bool {
 	if objectID == "" {
 		return false
 	}
-	s := typecalc.LoadObjectState(objectID, "")
+	s := core.LoadObjectState(objectID, "")
 	return s.HasUsableEvidence()
 }
 
@@ -614,29 +654,29 @@ func autoCompileOnImplSet(ctx context.Context, objectID string, patch map[string
 	}
 	implPath := target
 	ext := filepath.Ext(implPath)
-	langTag := typecalc.LangFromExt(ext)
-	if langTag == typecalc.LangNone {
+	langTag := core.LangFromExt(ext)
+	if langTag == core.LangNone {
 		return fmt.Sprintf("[auto-typecalc] could not infer language from extension %q (impl=%q); "+
 			"call typecalc_compile object_id=%q lang=<L> manually", ext, implPath, objectID)
 	}
-	tv := typecalc.New(typecalc.KindCode, string(content)).
-		WithState(typecalc.StateUncompiled).
+	tv := core.New(core.KindCode, string(content)).
+		WithState(core.StateUncompiled).
 		WithLang(langTag)
-	env := &typecalc.RuleEnv{WorkDir: "."}
+	env := &core.RuleEnv{WorkDir: "."}
 	out, err := lang.CompileLanguageInvoker(ctx, env, tv)
 	if err != nil {
 		return fmt.Sprintf("[auto-typecalc] invoker error on %s: %v", implPath, err)
 	}
-	if out.State == typecalc.StateCompiled {
-		effectiveLang := typecalc.DetectEffectiveLang(string(content), langTag)
-		if recErr := typecalc.RecordEvidence(objectID, "compile", string(effectiveLang), true); recErr != nil {
+	if out.State == core.StateCompiled {
+		effectiveLang := core.DetectEffectiveLang(string(content), langTag)
+		if recErr := core.RecordEvidence(objectID, "compile", string(effectiveLang), true); recErr != nil {
 			return fmt.Sprintf("[auto-typecalc] compile passed but evidence write failed: %v", recErr)
 		}
 		return fmt.Sprintf("[auto-typecalc] %s compile passed; evidence recorded for %s (lang=%s)",
 			implPath, objectID, effectiveLang)
 	}
-	if out.Kind == typecalc.KindCompileError {
-		ce, _ := typecalc.DecodeCompileError(out)
+	if out.Kind == core.KindCompileError {
+		ce, _ := core.DecodeCompileError(out)
 		return fmt.Sprintf(
 			"[auto-typecalc] COMPILE FAILED on %s for object %s\n  errorCode: %s\n  errorLog:\n%s\n\n"+
 				"No evidence was recorded. Fix the source file and re-merge (or simply re-write the file — "+
@@ -661,7 +701,7 @@ func pickAutoCompileTarget(objectID string, patch map[string]any) string {
 		}
 	}
 	// 2. existing implFragment on the merged-into object wins next.
-	if g, err := graph.LoadOrInit(graph.DefaultPath); err == nil {
+	if g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath); err == nil {
 		if obj, ok := g.Objects[objectID]; ok && obj.ImplFragment != nil && *obj.ImplFragment != "" {
 			return *obj.ImplFragment
 		}
@@ -694,28 +734,28 @@ func indent(s, prefix string) string {
 // out of temp-focus), the closure is a no-op and current focus stays as
 // the agent left it.
 //
-// We use a closure rather than `defer session.SetFocus(prev)` directly
+// We use a closure rather than `defer persistence.SetFocus(prev)` directly
 // so the merge tools can both share the pattern without each one
 // repeating the save/restore boilerplate.
 func withTempFocus(id string) (func(), error) {
 	if id == "" {
 		return func() {}, nil
 	}
-	prev, _ := session.GetFocus(session.DefaultDir)
-	if err := session.SetFocus(session.DefaultDir, id); err != nil {
+	prev, _ := persistence.GetFocus(persistence.SessionDefaultDir)
+	if err := persistence.SetFocus(persistence.SessionDefaultDir, id); err != nil {
 		return func() {}, fmt.Errorf("temp-focus %s: %w", id, err)
 	}
 	return func() {
-		_ = session.SetFocus(session.DefaultDir, prev)
+		_ = persistence.SetFocus(persistence.SessionDefaultDir, prev)
 	}, nil
 }
 
-func graphValidateTool() llm.Tool {
-	return llm.Tool{
+func graphValidateTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_validate",
 				Description: "Run all KonceptOS structural checks against K/graph.json: produce/consume balance (with subtype substitution), refines DAG (no cycles), naming uniqueness, reference integrity, temporal causality, plus warnings for orphan attributes, missing impl files, and incomplete metadata. Returns a human-readable report ending in PASS or FAIL.",
 				Parameters: map[string]interface{}{
@@ -725,7 +765,7 @@ func graphValidateTool() llm.Tool {
 			},
 		},
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
-			g, err := graph.LoadOrInit(graph.DefaultPath)
+			g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
 			if err != nil {
 				return "", err
 			}
@@ -736,12 +776,12 @@ func graphValidateTool() llm.Tool {
 	}
 }
 
-func graphRenderTool() llm.Tool {
-	return llm.Tool{
+func graphRenderTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_render",
 				Description: "Export K/graph.json as a diagram. format='mermaid' (default, paste into a markdown file or GitHub) or format='dot' (pipe to graphviz: `dot -Tsvg`). Attributes are rectangles; objects are rounded; consume/produce edges are solid; refines edges are dashed. Status drives node color.",
 				Parameters: map[string]interface{}{
@@ -760,7 +800,7 @@ func graphRenderTool() llm.Tool {
 			if format == "" {
 				format = "mermaid"
 			}
-			g, err := graph.LoadOrInit(graph.DefaultPath)
+			g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
 			if err != nil {
 				return "", err
 			}
@@ -776,12 +816,12 @@ func graphRenderTool() llm.Tool {
 	}
 }
 
-func graphPreflightTool() llm.Tool {
-	return llm.Tool{
+func graphPreflightTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_preflight",
 				Description: "Analyze a batch of object ids for parallel-execution safety. Builds a dependency graph from consumes/produces edges (with subtype substitution) and partitions into topologically sorted waves. Returns SAFE with the wave plan, or UNSAFE if a dependency cycle is detected (the cycle path is reported). Also flags potential value-dependencies — multiple objects in the same wave consuming the same attribute, which may need serial execution if their value-space assumptions diverge. Call this BEFORE dispatching parallel sub-sessions.",
 				Parameters: map[string]interface{}{
@@ -802,7 +842,7 @@ func graphPreflightTool() llm.Tool {
 			if len(ids) == 0 {
 				return "", fmt.Errorf("objects array required and must be non-empty")
 			}
-			g, err := graph.LoadOrInit(graph.DefaultPath)
+			g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
 			if err != nil {
 				return "", err
 			}
@@ -831,12 +871,12 @@ func stringSliceArg(v any) []string {
 	return out
 }
 
-func graphAutowireTool() llm.Tool {
-	return llm.Tool{
+func graphAutowireTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "graph_autowire",
 				Description: "Query: given a producer object and a consumer object, list compatible data-flow pairs (producer's output X feeds consumer's input Y when X == Y or X refines Y in the partial order). Pure query — does not mutate the graph. Use this to discover whether two objects can already be connected via existing types before adding new attributes.",
 				Parameters: map[string]interface{}{
@@ -852,7 +892,7 @@ func graphAutowireTool() llm.Tool {
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			producer, _ := args["producer"].(string)
 			consumer, _ := args["consumer"].(string)
-			g, err := graph.LoadOrInit(graph.DefaultPath)
+			g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
 			if err != nil {
 				return "", err
 			}

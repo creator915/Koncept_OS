@@ -4,11 +4,11 @@
 // collision with internal/graph (which it wraps).
 package graphtools
 
-import "github.com/creator915/Koncept_OS/internal/llm"
+import "github.com/creator915/Koncept_OS/internal/llm/toolcall"
 
 // Tools returns the graph-area agent tools.
-func Tools() map[string]llm.Tool {
-	return map[string]llm.Tool{
+func Tools() map[string]toolcall.Tool {
+	return map[string]toolcall.Tool{
 		"graph_show":             graphShowTool(),
 		"graph_create_attribute": graphCreateAttributeTool(),
 		"graph_create_object":    graphCreateObjectTool(),

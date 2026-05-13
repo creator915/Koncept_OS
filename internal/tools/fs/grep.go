@@ -10,17 +10,18 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
 const maxGrepResults = 200
 
-func grepTool() llm.Tool {
-	return llm.Tool{
+func grepTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "grep",
 				Description: "Search file contents for a regex pattern recursively. Returns matches as path:line: content. Skips .git, node_modules, .kcpos. Caps at 200 matches.",
 				Parameters: map[string]interface{}{

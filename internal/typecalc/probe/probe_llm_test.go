@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/creator915/Koncept_OS/internal/graph"
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 func TestLocateFaultViaLLM_FallsBackWhenInvokerNil(t *testing.T) {
@@ -24,20 +24,20 @@ func TestLocateFaultViaLLM_FallsBackWhenInvokerNil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Kind != typecalc.KindFaultLocated {
+	if out.Kind != core.KindFaultLocated {
 		t.Fatalf("got %s", out.Tag())
 	}
 }
 
 func TestLocateFaultViaLLM_StubInvoker(t *testing.T) {
 	called := false
-	env := &typecalc.RuleEnv{
-		LLMInvoker: func(ctx context.Context, env *typecalc.RuleEnv, prompt string, expected typecalc.SumType) (string, error) {
+	env := &core.RuleEnv{
+		LLMInvoker: func(ctx context.Context, env *core.RuleEnv, prompt string, expected core.SumType) (string, error) {
 			called = true
 			if !strings.Contains(prompt, "locate_fault") {
 				t.Errorf("prompt should mention rule name: %s", prompt[:min(80, len(prompt))])
 			}
-			if !expected.Includes(typecalc.Tag{Kind: typecalc.KindFaultLocated}) {
+			if !expected.Includes(core.Tag{Kind: core.KindFaultLocated}) {
 				t.Errorf("expected sum should include FaultLocated")
 			}
 			return "TYPE: FaultLocated\n{\"moduleId\":\"P2\",\"attrPath\":\"b\",\"reason\":\"stub LLM verdict\"}", nil
@@ -64,7 +64,7 @@ func TestLocateFaultViaLLM_StubInvoker(t *testing.T) {
 	if !called {
 		t.Fatal("LLM invoker was not called")
 	}
-	if out.Kind != typecalc.KindFaultLocated {
+	if out.Kind != core.KindFaultLocated {
 		t.Fatalf("got %s", out.Tag())
 	}
 	d, _ := decodeFaultLocated(out)
@@ -74,8 +74,8 @@ func TestLocateFaultViaLLM_StubInvoker(t *testing.T) {
 }
 
 func TestLocateFaultViaLLM_AcceptsCannotReproduce(t *testing.T) {
-	env := &typecalc.RuleEnv{
-		LLMInvoker: func(ctx context.Context, env *typecalc.RuleEnv, prompt string, expected typecalc.SumType) (string, error) {
+	env := &core.RuleEnv{
+		LLMInvoker: func(ctx context.Context, env *core.RuleEnv, prompt string, expected core.SumType) (string, error) {
 			return "TYPE: CannotReproduce\n{\"reason\":\"observations all consistent\"}", nil
 		},
 	}
@@ -85,12 +85,12 @@ func TestLocateFaultViaLLM_AcceptsCannotReproduce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Kind != typecalc.KindCannotReproduce {
+	if out.Kind != core.KindCannotReproduce {
 		t.Fatalf("got %s", out.Tag())
 	}
 }
 
-func decodeFaultLocated(tv *typecalc.TypedValue) (*FaultLocatedDetail, error) {
+func decodeFaultLocated(tv *core.TypedValue) (*FaultLocatedDetail, error) {
 	d := &FaultLocatedDetail{}
 	return d, json.Unmarshal([]byte(tv.Payload), d)
 }

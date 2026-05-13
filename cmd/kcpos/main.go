@@ -17,8 +17,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/creator915/Koncept_OS/internal/agent"
-	"github.com/creator915/Koncept_OS/internal/protocol"
+	"github.com/creator915/Koncept_OS/cmd/kcpos/commands"
 )
 
 const usage = `kcpos — KonceptOS coding agent CLI
@@ -32,6 +31,7 @@ Usage:
   kcpos checkpoint <verb> ...      verification ledger (K/checkpoint.json)
   kcpos doc protocol               print the runtime protocol (markdown)
   kcpos doc system                 print the full LLM system prompt
+  kcpos doctor [--install] [-y]    detect / install external toolchain
   kcpos help                       this help
   kcpos <sub> --help               help for a subcommand
 
@@ -44,7 +44,7 @@ Environment:
 func main() {
 	if len(os.Args) < 2 {
 		// Default: REPL chat
-		os.Exit(runChat(nil))
+		os.Exit(commands.RunChat(nil))
 	}
 
 	sub := os.Args[1]
@@ -52,15 +52,17 @@ func main() {
 
 	switch sub {
 	case "chat":
-		os.Exit(runChat(rest))
+		os.Exit(commands.RunChat(rest))
 	case "graph":
-		os.Exit(runGraph(rest))
+		os.Exit(commands.RunGraph(rest))
 	case "session":
-		os.Exit(runSession(rest))
+		os.Exit(commands.RunSession(rest))
 	case "checkpoint":
-		os.Exit(runCheckpoint(rest))
+		os.Exit(commands.RunCheckpoint(rest))
 	case "doc":
-		os.Exit(runDoc(rest))
+		os.Exit(commands.RunDoc(rest))
+	case "doctor":
+		os.Exit(commands.RunDoctor(rest))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		os.Exit(0)
@@ -68,27 +70,6 @@ func main() {
 		// Backward-compatible legacy form: `kcpos "task"` or `kcpos task words`.
 		// If the first arg doesn't look like a subcommand name, treat the
 		// whole arg list as a chat prompt.
-		os.Exit(runChat(os.Args[1:]))
-	}
-}
-
-// runDoc prints documentation generated from kcpos's internal state.
-// `kcpos doc protocol` is the v9.0 successor to the old CLAUDE.md —
-// the runtime protocol as a single source of truth.
-func runDoc(args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: kcpos doc <protocol|system>")
-		return 2
-	}
-	switch args[0] {
-	case "protocol":
-		fmt.Print(protocol.Describe())
-		return 0
-	case "system":
-		fmt.Print(agent.SystemPrompt)
-		return 0
-	default:
-		fmt.Fprintf(os.Stderr, "unknown doc topic %q (try: protocol, system)\n", args[0])
-		return 2
+		os.Exit(commands.RunChat(os.Args[1:]))
 	}
 }

@@ -16,8 +16,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/graph"
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // ProbePoint identifies a single insertion point for the probe-based fault
@@ -133,15 +133,15 @@ func PlanFromGraph(g *graph.Graph) (*PlanData, error) {
 	return plan, nil
 }
 
-// NewPlan wraps PlanData into a typecalc.TypedValue.
-func NewPlan(d *PlanData) *typecalc.TypedValue {
+// NewPlan wraps PlanData into a core.TypedValue.
+func NewPlan(d *PlanData) *core.TypedValue {
 	raw, _ := json.Marshal(d)
-	return &typecalc.TypedValue{Kind: typecalc.KindProbePlan, Payload: string(raw)}
+	return &core.TypedValue{Kind: core.KindProbePlan, Payload: string(raw)}
 }
 
 // DecodePlan extracts PlanData from a TypedValue.
-func DecodePlan(tv *typecalc.TypedValue) (*PlanData, error) {
-	if tv == nil || tv.Kind != typecalc.KindProbePlan {
+func DecodePlan(tv *core.TypedValue) (*PlanData, error) {
+	if tv == nil || tv.Kind != core.KindProbePlan {
 		return nil, fmt.Errorf("DecodePlan: wrong kind (got %v)", tv)
 	}
 	var d PlanData
@@ -165,14 +165,14 @@ type ResultData struct {
 }
 
 // NewResult wraps observations into a typed value.
-func NewResult(d *ResultData) *typecalc.TypedValue {
+func NewResult(d *ResultData) *core.TypedValue {
 	raw, _ := json.Marshal(d)
-	return &typecalc.TypedValue{Kind: typecalc.KindProbeResult, Payload: string(raw)}
+	return &core.TypedValue{Kind: core.KindProbeResult, Payload: string(raw)}
 }
 
 // DecodeResult extracts ResultData.
-func DecodeResult(tv *typecalc.TypedValue) (*ResultData, error) {
-	if tv == nil || tv.Kind != typecalc.KindProbeResult {
+func DecodeResult(tv *core.TypedValue) (*ResultData, error) {
+	if tv == nil || tv.Kind != core.KindProbeResult {
 		return nil, fmt.Errorf("DecodeResult: wrong kind (got %v)", tv)
 	}
 	var d ResultData
@@ -191,17 +191,17 @@ type FaultLocatedDetail struct {
 }
 
 // NewFaultLocated wraps a fault-localization verdict.
-func NewFaultLocated(moduleID, attrPath, reason string) *typecalc.TypedValue {
+func NewFaultLocated(moduleID, attrPath, reason string) *core.TypedValue {
 	d := FaultLocatedDetail{ModuleID: moduleID, AttrPath: attrPath, Reason: reason}
 	raw, _ := json.Marshal(d)
-	return &typecalc.TypedValue{Kind: typecalc.KindFaultLocated, Payload: string(raw)}
+	return &core.TypedValue{Kind: core.KindFaultLocated, Payload: string(raw)}
 }
 
 // LocateFaultFromObservations is the heuristic implementation of §3
 // locate_fault used as a fallback when no LLM is available. It walks
 // observations in topological order and returns the first attribute
 // whose Note marks divergence.
-func LocateFaultFromObservations(g *graph.Graph, plan *PlanData, obs *ResultData) *typecalc.TypedValue {
+func LocateFaultFromObservations(g *graph.Graph, plan *PlanData, obs *ResultData) *core.TypedValue {
 	if plan == nil || obs == nil {
 		return NewFaultLocated("", "", "no plan or observations")
 	}
@@ -233,26 +233,26 @@ func LocateFaultFromObservations(g *graph.Graph, plan *PlanData, obs *ResultData
 // If env or env.LLMInvoker is nil, falls back to LocateFaultFromObservations
 // — keeping callers without LLM access (unit tests, headless tools)
 // functional.
-func LocateFaultViaLLM(ctx context.Context, env *typecalc.RuleEnv, g *graph.Graph,
+func LocateFaultViaLLM(ctx context.Context, env *core.RuleEnv, g *graph.Graph,
 	descriptions map[string]string, signatures map[string]string,
 	plan *PlanData, obs *ResultData,
-) (*typecalc.TypedValue, error) {
+) (*core.TypedValue, error) {
 	if env == nil || env.LLMInvoker == nil {
 		return LocateFaultFromObservations(g, plan, obs), nil
 	}
 	if plan == nil || obs == nil {
 		return NewFaultLocated("", "", "no plan or observations"), nil
 	}
-	expected := typecalc.SumType{
-		{Kind: typecalc.KindFaultLocated},
-		{Kind: typecalc.KindCannotReproduce},
+	expected := core.SumType{
+		{Kind: core.KindFaultLocated},
+		{Kind: core.KindCannotReproduce},
 	}
 	prompt := buildLocateFaultPrompt(plan, obs, descriptions, signatures)
 	raw, err := env.LLMInvoker(ctx, env, prompt, expected)
 	if err != nil {
 		return nil, fmt.Errorf("LLM invoker for locate_fault: %w", err)
 	}
-	out, err := typecalc.ParseLLMOutput(raw, expected)
+	out, err := core.ParseLLMOutput(raw, expected)
 	if err != nil {
 		return nil, err
 	}
@@ -282,10 +282,10 @@ func buildLocateFaultPrompt(plan *PlanData, obs *ResultData,
 		fmt.Fprintf(&b, "  [%d] attribute=%q producer=%q consumers=%v\n",
 			p.TopoIndex, p.Attribute, p.Producer, p.Consumers)
 		if d := descriptions[p.Producer]; d != "" {
-			fmt.Fprintf(&b, "      description: %s\n", typecalc.Trim(d, 200))
+			fmt.Fprintf(&b, "      description: %s\n", core.Trim(d, 200))
 		}
 		if s := signatures[p.Producer]; s != "" {
-			fmt.Fprintf(&b, "      signature:   %s\n", typecalc.Trim(s, 200))
+			fmt.Fprintf(&b, "      signature:   %s\n", core.Trim(s, 200))
 		}
 	}
 	b.WriteString("\nObservations:\n")
@@ -294,7 +294,7 @@ func buildLocateFaultPrompt(plan *PlanData, obs *ResultData,
 		if note == "" {
 			note = "(no divergence flagged)"
 		}
-		fmt.Fprintf(&b, "  attribute=%q value=%s note=%q\n", o.Attribute, typecalc.Trim(o.Value, 80), note)
+		fmt.Fprintf(&b, "  attribute=%q value=%s note=%q\n", o.Attribute, core.Trim(o.Value, 80), note)
 	}
 	return b.String()
 }

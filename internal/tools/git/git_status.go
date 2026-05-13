@@ -6,15 +6,16 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
-func gitStatusTool() llm.Tool {
-	return llm.Tool{
+func gitStatusTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "git_status",
 				Description: "Show git working tree status (porcelain format with branch info). Errors if not in a git repo.",
 				Parameters: map[string]interface{}{

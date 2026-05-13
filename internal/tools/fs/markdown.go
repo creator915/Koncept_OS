@@ -6,8 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
-	"github.com/creator915/Koncept_OS/internal/spec"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	"github.com/creator915/Koncept_OS/internal/domain/protocol"
 )
 
 // MarkdownInlineThresholdTokens is the size above which read_file
@@ -23,12 +24,12 @@ const MarkdownInlineThresholdTokens = 5000
 // (~1-2K tokens regardless of source size) then fetch individual
 // chapters via markdown_section. Generalizes the v9.0.4 chapter-
 // granular access mechanism to any long markdown — not just SPEC.md.
-func markdownOutlineTool() llm.Tool {
-	return llm.Tool{
+func markdownOutlineTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "markdown_outline",
 				Description: "Return the chapter outline (H2+ headings) of a markdown file: each chapter's id (numeric prefix), title, line range, and approximate token count. Use this BEFORE reading large markdown documents so you can fetch chapters individually via markdown_section instead of paying the full-document cost on every turn. Works on any markdown path — SPEC.md, DESIGN.md, README.md, third-party docs, etc.",
 				Parameters: map[string]interface{}{
@@ -45,7 +46,7 @@ func markdownOutlineTool() llm.Tool {
 			if path == "" {
 				return "", fmt.Errorf("path required")
 			}
-			chapters, _, err := spec.ParseFile(path)
+			chapters, _, err := protocol.ParseFile(path)
 			if err != nil {
 				return "", err
 			}
@@ -58,12 +59,12 @@ func markdownOutlineTool() llm.Tool {
 }
 
 // markdownSectionTool returns one chapter's body by id.
-func markdownSectionTool() llm.Tool {
-	return llm.Tool{
+func markdownSectionTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "markdown_section",
 				Description: "Read a single chapter (by its section id from markdown_outline, e.g. \"3.2\") from a markdown file. Returns only that chapter's body — heading included — keeping the result bounded regardless of the surrounding document's size. Use this in any agent (parent or child) that needs to reason about a specific section without paying the full document's context cost.",
 				Parameters: map[string]interface{}{
@@ -82,11 +83,11 @@ func markdownSectionTool() llm.Tool {
 			if path == "" || sectionID == "" {
 				return "", fmt.Errorf("path and section_id are required")
 			}
-			chapters, _, err := spec.ParseFile(path)
+			chapters, _, err := protocol.ParseFile(path)
 			if err != nil {
 				return "", err
 			}
-			ch, ok := spec.Find(chapters, sectionID)
+			ch, ok := protocol.Find(chapters, sectionID)
 			if !ok {
 				return "", fmt.Errorf("markdown_section %s: no chapter with id %q. Use markdown_outline %s to list available ids.", path, sectionID, path)
 			}
@@ -99,12 +100,12 @@ func markdownSectionTool() llm.Tool {
 // at session_start (or any time the SPEC structure changes) so the
 // agent can decide whether chapter-granular access is viable, or
 // whether the document must be restructured first.
-func markdownValidateTool() llm.Tool {
-	return llm.Tool{
+func markdownValidateTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "markdown_validate",
 				Description: "Check that a markdown file is well-structured for chapter-granular access: every chapter has a numeric prefix id, ids are unique, no single chapter exceeds the per-chapter token cap (default 5000). Returns PASS or a list of issues. Run this on long SPEC/DESIGN docs before path-B decomposition so child agents won't hit oversize chapters.",
 				Parameters: map[string]interface{}{
@@ -122,15 +123,15 @@ func markdownValidateTool() llm.Tool {
 			if path == "" {
 				return "", fmt.Errorf("path required")
 			}
-			chapters, _, err := spec.ParseFile(path)
+			chapters, _, err := protocol.ParseFile(path)
 			if err != nil {
 				return "", err
 			}
-			cfg := spec.DefaultValidationConfig()
+			cfg := protocol.DefaultValidationConfig()
 			if v, ok := args["max_chapter_tokens"].(float64); ok && v > 0 {
 				cfg.MaxChapterTokens = int(v)
 			}
-			issues := spec.Validate(chapters, cfg)
+			issues := protocol.Validate(chapters, cfg)
 			if len(issues) == 0 {
 				return fmt.Sprintf("markdown_validate %s: PASS (%d chapters, all under %d tokens, ids unique)", path, len(chapters), cfg.MaxChapterTokens), nil
 			}
@@ -147,7 +148,7 @@ func markdownValidateTool() llm.Tool {
 // renderOutline formats parsed chapters as the outline text shown to
 // the agent. Includes a header banner so future read_file interceptions
 // can reuse the same format.
-func renderOutline(path string, chapters []spec.Chapter) string {
+func renderOutline(path string, chapters []protocol.Chapter) string {
 	var b strings.Builder
 	totalTokens := 0
 	for _, c := range chapters {
@@ -170,7 +171,7 @@ func renderOutline(path string, chapters []spec.Chapter) string {
 
 // renderSection returns a chapter body wrapped with a heading line so
 // the agent has the same context cue it would see in the source.
-func renderSection(c spec.Chapter) string {
+func renderSection(c protocol.Chapter) string {
 	hashes := strings.Repeat("#", c.Level)
 	header := hashes + " "
 	if c.ID != "" {
@@ -181,7 +182,7 @@ func renderSection(c spec.Chapter) string {
 }
 
 // sortedIDs returns chapter ids in document order — used by tests.
-func sortedIDs(chapters []spec.Chapter) []string {
+func sortedIDs(chapters []protocol.Chapter) []string {
 	ids := make([]string, 0, len(chapters))
 	for _, c := range chapters {
 		ids = append(ids, c.ID)
@@ -211,7 +212,7 @@ func MaybeOutlineMarkdown(path string, content []byte, force bool) (string, bool
 	if len(content) < MarkdownInlineThresholdTokens*2 {
 		return "", false
 	}
-	chapters, _ := spec.Parse(string(content))
+	chapters, _ := protocol.Parse(string(content))
 	if len(chapters) < 2 {
 		// Not chapter-structured enough to be useful as an outline; fall
 		// through to inline read (and let the agent live with the cost).

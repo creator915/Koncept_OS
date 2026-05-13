@@ -4,18 +4,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 func TestRender_JavaScript_EmbedsCases(t *testing.T) {
-	te := &typecalc.TestsEvidence{
+	te := &core.TestsEvidence{
 		ObjectID: "Foo",
 		Lang:     "JavaScript",
-		Cases: []typecalc.TestCase{
+		Cases: []core.TestCase{
 			{
 				Name: "happy path",
 				Call: "Foo()",
-				Expect: []typecalc.Expectation{
+				Expect: []core.Expectation{
 					{Port: "y", Type: "number"},
 				},
 			},
@@ -44,10 +44,10 @@ func TestRender_JavaScript_EmbedsCases(t *testing.T) {
 }
 
 func TestRender_FallsBackForUnsupportedLang(t *testing.T) {
-	te := &typecalc.TestsEvidence{
+	te := &core.TestsEvidence{
 		ObjectID: "Foo",
 		Lang:     "Rust",
-		Cases:    []typecalc.TestCase{{Name: "x", Call: "foo()"}},
+		Cases:    []core.TestCase{{Name: "x", Call: "foo()"}},
 	}
 	if _, ok := Render(RenderInputs{Tests: te, ImplPath: "/tmp/src/foo.rs", TracePath: "/tmp/.kcpos/typecalc-runtime/Foo.json"}); ok {
 		t.Fatal("expected no harness for Rust (yet)")
@@ -55,7 +55,7 @@ func TestRender_FallsBackForUnsupportedLang(t *testing.T) {
 }
 
 func TestRender_NoCasesNoHarness(t *testing.T) {
-	te := &typecalc.TestsEvidence{
+	te := &core.TestsEvidence{
 		ObjectID: "Foo",
 		Lang:     "JavaScript",
 		TestCode: "// raw legacy code",

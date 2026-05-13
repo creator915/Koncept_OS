@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // RenderInputs bundles everything the harness needs at render time.
@@ -26,7 +26,7 @@ import (
 // the harness uses it to know HOW to read each port's value at runtime
 // (D2 redesign). Without it, port reading is undefined.
 type RenderInputs struct {
-	Tests           *typecalc.TestsEvidence
+	Tests           *core.TestsEvidence
 	InputPorts      []string
 	OutputPorts     []string
 	ImplPath        string

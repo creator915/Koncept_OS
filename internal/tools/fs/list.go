@@ -6,15 +6,16 @@ import (
 	"os"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
-func listDirTool() llm.Tool {
-	return llm.Tool{
+func listDirTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "list_dir",
 				Description: "List the entries of a directory. Returns one entry per line, with a trailing slash for directories.",
 				Parameters: map[string]interface{}{

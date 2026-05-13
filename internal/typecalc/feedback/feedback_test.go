@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/creator915/Koncept_OS/internal/graph"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
 )
 
 func TestApplyValueAdjust_UpdatesValueSpace(t *testing.T) {

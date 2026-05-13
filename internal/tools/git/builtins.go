@@ -3,11 +3,11 @@
 // future git tools (git_log, git_diff) without bloating tools/.
 package git
 
-import "github.com/creator915/Koncept_OS/internal/llm"
+import "github.com/creator915/Koncept_OS/internal/llm/toolcall"
 
 // Tools returns the git-area agent tools.
-func Tools() map[string]llm.Tool {
-	return map[string]llm.Tool{
+func Tools() map[string]toolcall.Tool {
+	return map[string]toolcall.Tool{
 		"git_status": gitStatusTool(),
 	}
 }

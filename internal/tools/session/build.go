@@ -9,8 +9,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/graph"
-	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
+	"github.com/creator915/Koncept_OS/internal/infra/persistence"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
 // sessionBuildTool exposes R2 build for single-file deliverables. It
@@ -28,28 +30,45 @@ import (
 // Pre-v9.0.3 the agent had to write the whole index.html in one
 // write_file call from the parent context — which 5/5 instances of
 // the 2026-05-11 Terraria batch died trying.
-func sessionBuildTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionBuildTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_build",
-				Description: "Assemble all per-object impl fragments (graph object.implFragment) into the shared deliverable (graph object.impl). Used in the R2 build step of the root finish flow for HTML single-file projects. Fragments are concatenated in topological order (producer before consumer) inside a single <script> block, replacing any prior kcpos-managed block. Reports the path of the written deliverable, the number of fragments included, and any object that's missing its fragment file. Idempotent: re-running with no fragment changes produces an identical deliverable.",
+				Description: "Assemble per-object impl fragments (graph object.implFragment) into the shared deliverable (graph object.impl) for single-file projects.\n\n**Mode (v9.3.1):**\n- `reference` (DEFAULT) — emit `<script src=\"K/frags/<id>.js\"></script>` references in topological order. The deliverable is index.html + K/frags/<id>.js files; ship as a folder. Cheap to re-run (small write), so the chain calls this before each runtime_smoke in the HTML branch — fragment changes become visible to the browser without rewriting the whole HTML.\n- `inline` — concatenate every fragment's body into a single inline `<script>` block. Old v9.0.3 behavior. Use only when the deliverable contract really requires one self-contained file. Rewrites the whole deliverable on every call, so expensive to invoke mid-chain.\n\nFragments order is topological (producer before consumer). Unmodeled top-level `function Foo(...)` declarations in any fragment cause refusal (AP11) — applies in both modes since the browser executes them regardless.",
 				Parameters: map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{},
+					"type": "object",
+					"properties": map[string]interface{}{
+						"mode": map[string]interface{}{
+							"type":        "string",
+							"description": "Assembly mode. `reference` (default) emits `<script src>` references; `inline` concatenates fragment bodies. See description for tradeoffs.",
+							"enum":        []string{"reference", "inline"},
+						},
+					},
 				},
 			},
 		},
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
-			return runSessionBuild()
+			mode := "reference"
+			if v, ok := args["mode"].(string); ok && v != "" {
+				mode = v
+			}
+			return runSessionBuild(mode)
 		},
 	}
 }
 
 // runSessionBuild is the testable core of session_build.
-func runSessionBuild() (string, error) {
-	g, err := graph.LoadOrInit(graph.DefaultPath)
+// mode is "reference" or "inline" (see sessionBuildTool description).
+func runSessionBuild(mode string) (string, error) {
+	if mode == "" {
+		mode = "reference"
+	}
+	if mode != "reference" && mode != "inline" {
+		return "", fmt.Errorf("session_build: unknown mode %q (allowed: reference, inline)", mode)
+	}
+	g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
 	if err != nil {
 		return "", fmt.Errorf("load graph: %w", err)
 	}
@@ -123,8 +142,13 @@ func runSessionBuild() (string, error) {
 	// permitted as a helper of THIS object (matched against the same
 	// object's def file's function set). Anything else means the agent
 	// wrote code that bypassed the verification chain; refuse to ship.
+	//
+	// v9.3.1: AP11 still applies in reference mode — the browser executes
+	// the fragments via `<script src>` so any unmodeled function still
+	// reaches global scope.
 	allowedNames := buildAllowedFunctionNames(g)
-	var fragments []string
+	var fragmentBodies []string
+	var fragmentPaths []string
 	var missing []string
 	var unmodeled []string
 	for _, e := range ordered {
@@ -133,18 +157,14 @@ func runSessionBuild() (string, error) {
 			missing = append(missing, fmt.Sprintf("%s (%s): %v", e.id, e.fragmentPath, err))
 			continue
 		}
-		// Collect any function declared in the fragment that isn't on
-		// the global allowlist. The allowlist is the union of every
-		// graph object's id and ImplSymbol — so cross-object helpers
-		// (e.g. WorldGen.js calling a helper declared in Combat.js) are
-		// fine, but a helper declared NOWHERE in the graph is rejected.
 		for _, fname := range scanFragmentFunctionNames(string(body)) {
 			if allowedNames[fname] {
 				continue
 			}
 			unmodeled = append(unmodeled, fmt.Sprintf("%s in %s", fname, e.fragmentPath))
 		}
-		fragments = append(fragments, fmt.Sprintf("// === %s (fragment: %s) ===\n%s", e.id, e.fragmentPath, string(body)))
+		fragmentBodies = append(fragmentBodies, fmt.Sprintf("// === %s (fragment: %s) ===\n%s", e.id, e.fragmentPath, string(body)))
+		fragmentPaths = append(fragmentPaths, e.fragmentPath)
 	}
 	if len(missing) > 0 {
 		return "", fmt.Errorf("session_build: %d fragment file(s) missing or unreadable:\n  %s\nWrite the fragments before assembling (each child session writes its own fragment)",
@@ -156,16 +176,37 @@ func runSessionBuild() (string, error) {
 	}
 
 	deliverable := ordered[0].implPath
-	concat := strings.Join(fragments, "\n\n")
-	assembled, err := injectKcposBlock(deliverable, concat)
+	var scriptBody string
+	switch mode {
+	case "reference":
+		// v9.3.1 default. Emit `<script src>` per fragment in topo order.
+		// Browser fetches each file (file:// scheme works for non-module
+		// scripts with relative paths). Cheap to re-run since we only
+		// rewrite a small block, not concatenate megabytes of fragment
+		// bodies. This is what makes incremental build viable — the
+		// chain can call session_build before every runtime_smoke
+		// without breaking the bank.
+		var refs []string
+		for _, p := range fragmentPaths {
+			refs = append(refs, fmt.Sprintf("<script src=%q></script>", p))
+		}
+		scriptBody = strings.Join(refs, "\n")
+	case "inline":
+		// Legacy v9.0.3 behavior. Concatenate all fragment bodies into a
+		// single inline <script> block. Used when the deliverable contract
+		// requires one self-contained file.
+		concat := strings.Join(fragmentBodies, "\n\n")
+		scriptBody = fmt.Sprintf("<script>\n%s\n</script>", concat)
+	}
+	assembled, err := injectKcposBlock(deliverable, scriptBody)
 	if err != nil {
 		return "", err
 	}
 	if err := writeFileAtomic(deliverable, assembled); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("session_build: assembled %d fragment(s) into %s (%d bytes). Fragments in topo order: %s",
-		len(ordered), deliverable, len(assembled), joinIDs(ordered)), nil
+	return fmt.Sprintf("session_build: assembled %d fragment(s) into %s (%d bytes, mode=%s). Fragments in topo order: %s",
+		len(ordered), deliverable, len(assembled), mode, joinIDs(ordered)), nil
 }
 
 func joinIDs(entries []entry) string {
@@ -334,13 +375,18 @@ const (
 	kcposBlockClose = "<!-- kcpos:session_build:end -->"
 )
 
-// injectKcposBlock inserts (or replaces) the assembled <script> block
-// inside the deliverable. If the deliverable doesn't exist, a minimal
-// HTML scaffold is created. If a prior block exists, it's replaced;
-// otherwise the block is inserted just before </body> (or appended
-// when no </body> tag is present).
+// injectKcposBlock inserts (or replaces) the assembled script block
+// inside the deliverable. v9.3.1: `scriptBody` is now the complete
+// `<script>...</script>` markup (callers decide whether it's one inline
+// block or N `<script src>` references) — injectKcposBlock just wraps
+// it in the kcpos block markers and stitches it into the deliverable.
+//
+// If the deliverable doesn't exist, a minimal HTML scaffold is created.
+// If a prior block exists, it's replaced; otherwise the block is
+// inserted just before </body> (or appended when no </body> tag is
+// present).
 func injectKcposBlock(deliverable, scriptBody string) (string, error) {
-	block := fmt.Sprintf("%s\n<script>\n%s\n</script>\n%s", kcposBlockOpen, scriptBody, kcposBlockClose)
+	block := fmt.Sprintf("%s\n%s\n%s", kcposBlockOpen, scriptBody, kcposBlockClose)
 
 	raw, err := os.ReadFile(deliverable)
 	if os.IsNotExist(err) {

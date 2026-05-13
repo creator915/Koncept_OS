@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // Actor identifies who executes a rule.
@@ -32,14 +32,14 @@ const (
 // Handler is the executable body of a Rule. It consumes a list of input
 // TypedValues (in the order declared by Rule.Input) and produces exactly
 // one TypedValue.
-type Handler func(ctx context.Context, env *typecalc.RuleEnv, inputs ...*typecalc.TypedValue) (*typecalc.TypedValue, error)
+type Handler func(ctx context.Context, env *core.RuleEnv, inputs ...*core.TypedValue) (*core.TypedValue, error)
 
 // Rule is one entry in the type calculation table from §3.
 type Rule struct {
 	Name        string
 	Actor       Actor
-	Input       []typecalc.Tag    // ordered; matched positionally against router input
-	Output      typecalc.SumType  // legal alternatives — handler picks one
+	Input       []core.Tag    // ordered; matched positionally against router input
+	Output      core.SumType  // legal alternatives — handler picks one
 	Handler     Handler
 	Description string
 }
@@ -81,7 +81,7 @@ func (r *Registry) Lookup(name string) (*Rule, bool) {
 
 // Match finds a rule whose input head matches the given tag. The return
 // is the most-specific rule.
-func (r *Registry) Match(head typecalc.Tag) (*Rule, bool) {
+func (r *Registry) Match(head core.Tag) (*Rule, bool) {
 	type cand struct {
 		rule *Rule
 		spec int
@@ -116,25 +116,25 @@ func (r *Registry) Names() []string {
 
 // tagMatches reports whether pat matches head. Empty fields in pat are
 // wildcards.
-func tagMatches(pat, head typecalc.Tag) bool {
+func tagMatches(pat, head core.Tag) bool {
 	if pat.Kind != head.Kind {
 		return false
 	}
-	if pat.State != typecalc.StateUntyped && pat.State != head.State {
+	if pat.State != core.StateUntyped && pat.State != head.State {
 		return false
 	}
-	if pat.Lang != typecalc.LangNone && pat.Lang != head.Lang {
+	if pat.Lang != core.LangNone && pat.Lang != head.Lang {
 		return false
 	}
 	return true
 }
 
-func tagSpecificity(t typecalc.Tag) int {
+func tagSpecificity(t core.Tag) int {
 	score := 1
-	if t.State != typecalc.StateUntyped {
+	if t.State != core.StateUntyped {
 		score += 2
 	}
-	if t.Lang != typecalc.LangNone {
+	if t.Lang != core.LangNone {
 		score += 4
 	}
 	return score

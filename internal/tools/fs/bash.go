@@ -6,14 +6,15 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
-func bashTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func bashTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "bash",
 				Description: "Run a bash command in the current working directory. Returns combined stdout and stderr. Default timeout 30s.",
 				Parameters: map[string]interface{}{

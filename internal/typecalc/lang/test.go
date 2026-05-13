@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // TestReview is the verdict returned by the review_test_error rule (§3,
@@ -31,21 +31,21 @@ type TestReviewResult struct {
 // to short-circuit to "always TestCorrect" (treats every failure as a
 // code bug).
 type TestLoopHooks struct {
-	ReviewError    func(ctx context.Context, env *typecalc.RuleEnv, description, signature, testErr string) (*TestReviewResult, error)
-	DebugFromTest  func(ctx context.Context, env *typecalc.RuleEnv, compiled, testErr *typecalc.TypedValue) (*typecalc.TypedValue, error)
-	RegenerateTest func(ctx context.Context, env *typecalc.RuleEnv, description, signature, rejected string) (*typecalc.TypedValue, error)
+	ReviewError    func(ctx context.Context, env *core.RuleEnv, description, signature, testErr string) (*TestReviewResult, error)
+	DebugFromTest  func(ctx context.Context, env *core.RuleEnv, compiled, testErr *core.TypedValue) (*core.TypedValue, error)
+	RegenerateTest func(ctx context.Context, env *core.RuleEnv, description, signature, rejected string) (*core.TypedValue, error)
 }
 
 // TestLoop runs the test-debug cycle from §7.2.
-func TestLoop(ctx context.Context, env *typecalc.RuleEnv,
-	compiled, suite *typecalc.TypedValue,
+func TestLoop(ctx context.Context, env *core.RuleEnv,
+	compiled, suite *core.TypedValue,
 	description, signature string,
 	hooks TestLoopHooks,
-) (*typecalc.TypedValue, error) {
-	if compiled == nil || compiled.State != typecalc.StateCompiled || compiled.Kind != typecalc.KindCode {
+) (*core.TypedValue, error) {
+	if compiled == nil || compiled.State != core.StateCompiled || compiled.Kind != core.KindCode {
 		return nil, fmt.Errorf("TestLoop: compiled must be Compiled<Code>, got %v", compiled)
 	}
-	if suite == nil || suite.Kind != typecalc.KindTestSuite {
+	if suite == nil || suite.Kind != core.KindTestSuite {
 		return nil, fmt.Errorf("TestLoop: suite must be TestSuite, got %v", suite)
 	}
 	maxRetries := env.MaxRetries
@@ -64,11 +64,11 @@ func TestLoop(ctx context.Context, env *typecalc.RuleEnv,
 		if err != nil {
 			return nil, fmt.Errorf("attempt %d test: %w", attempt, err)
 		}
-		if out.State == typecalc.StateTestedPass {
+		if out.State == core.StateTestedPass {
 			return out, nil
 		}
-		if out.Kind != typecalc.KindTestError {
-			return typecalc.FormatErr("TestLoop: tester returned unexpected %s", out.Tag()), nil
+		if out.Kind != core.KindTestError {
+			return core.FormatErr("TestLoop: tester returned unexpected %s", out.Tag()), nil
 		}
 		if hooks.ReviewError == nil {
 			fixed, err := hooks.DebugFromTest(ctx, env, curCompiled, out)
@@ -79,13 +79,13 @@ func TestLoop(ctx context.Context, env *typecalc.RuleEnv,
 			if err != nil {
 				return nil, fmt.Errorf("attempt %d recompile: %w", attempt, err)
 			}
-			if recompiled.State != typecalc.StateCompiled {
+			if recompiled.State != core.StateCompiled {
 				return recompiled, nil
 			}
 			curCompiled = recompiled
 			continue
 		}
-		te, _ := typecalc.DecodeTestError(out)
+		te, _ := core.DecodeTestError(out)
 		blob, _ := json.Marshal(te)
 		review, err := hooks.ReviewError(ctx, env, description, signature, string(blob))
 		if err != nil {
@@ -101,7 +101,7 @@ func TestLoop(ctx context.Context, env *typecalc.RuleEnv,
 			if err != nil {
 				return nil, fmt.Errorf("attempt %d recompile: %w", attempt, err)
 			}
-			if recompiled.State != typecalc.StateCompiled {
+			if recompiled.State != core.StateCompiled {
 				return recompiled, nil
 			}
 			curCompiled = recompiled
@@ -111,8 +111,8 @@ func TestLoop(ctx context.Context, env *typecalc.RuleEnv,
 			if err != nil {
 				return nil, fmt.Errorf("attempt %d regenerate test: %w", attempt, err)
 			}
-			if newSuite.Kind != typecalc.KindTestSuite {
-				return typecalc.FormatErr("TestLoop: regenerate_test returned %s, expected TestSuite",
+			if newSuite.Kind != core.KindTestSuite {
+				return core.FormatErr("TestLoop: regenerate_test returned %s, expected TestSuite",
 					newSuite.Tag()), nil
 			}
 			curSuite = newSuite
@@ -123,30 +123,30 @@ func TestLoop(ctx context.Context, env *typecalc.RuleEnv,
 				Reviewing string `json:"reviewing"`
 			}{Task: taskOf(curCompiled), Reason: review.Reason, Reviewing: string(blob)}
 			raw, _ := json.Marshal(d)
-			return &typecalc.TypedValue{Kind: typecalc.KindClarificationReq, Payload: string(raw)}, nil
+			return &core.TypedValue{Kind: core.KindClarificationReq, Payload: string(raw)}, nil
 		default:
-			return typecalc.FormatErr("TestLoop: review returned unknown verdict %q", review.Verdict), nil
+			return core.FormatErr("TestLoop: review returned unknown verdict %q", review.Verdict), nil
 		}
 	}
 	reason := fmt.Sprintf("test loop retried %d times without producing Tested<Pass>", maxRetries)
-	return typecalc.NewObstacle(taskOf(curCompiled), reason, nil), nil
+	return core.NewObstacle(taskOf(curCompiled), reason, nil), nil
 }
 
 // TestRunInvoker is the default TestInvoker. Per-language runner with
 // fallback toolchain selection. Missing toolchains fail open (return Pass).
-func TestRunInvoker(ctx context.Context, env *typecalc.RuleEnv, compiled, suite *typecalc.TypedValue) (*typecalc.TypedValue, error) {
-	if compiled == nil || compiled.State != typecalc.StateCompiled || compiled.Kind != typecalc.KindCode {
+func TestRunInvoker(ctx context.Context, env *core.RuleEnv, compiled, suite *core.TypedValue) (*core.TypedValue, error) {
+	if compiled == nil || compiled.State != core.StateCompiled || compiled.Kind != core.KindCode {
 		return nil, fmt.Errorf("TestRunInvoker: compiled must be Compiled<Code>, got %v", compiled)
 	}
-	if suite == nil || suite.Kind != typecalc.KindTestSuite {
+	if suite == nil || suite.Kind != core.KindTestSuite {
 		return nil, fmt.Errorf("TestRunInvoker: suite must be TestSuite, got %v", suite)
 	}
 	switch compiled.Lang {
-	case typecalc.LangGo:
+	case core.LangGo:
 		return runGoTest(ctx, env, compiled, suite)
-	case typecalc.LangTypeScript, typecalc.LangJavaScript:
+	case core.LangTypeScript, core.LangJavaScript:
 		return runJSTest(ctx, env, compiled, suite)
-	case typecalc.LangHTML:
+	case core.LangHTML:
 		// D5 integration fix (2026-05-09 v7→v8): HTML deliverables now
 		// route through the JS harness instead of returning Insufficient.
 		// The harness's loadImpl already extracts <script> tags from
@@ -157,55 +157,54 @@ func TestRunInvoker(ctx context.Context, env *typecalc.RuleEnv, compiled, suite 
 		// that crashed at runtime — both files passed checkpoint but
 		// the deliverable was broken.
 		return runJSTest(ctx, env, compiled, suite)
-	case typecalc.LangPython:
+	case core.LangPython:
 		return runPythonTest(ctx, env, compiled, suite)
 	}
-	// CRITICAL (D1): no in-tree test runner for this language.
-	// We used to return Tested<Pass> as a "fail-open" — that lied.
-	// Now we return Insufficient with a reason. The caller writes
-	// kind=insufficient evidence; the gate refuses to confirm without
-	// a paired waiver. The agent must either change the impl into a
-	// language we can run, or escalate via typecalc_waive.
-	return typecalc.NewInsufficient(fmt.Sprintf(
-		"no in-tree test runner for language %q — kcpos cannot mechanically verify this code. To proceed, either (a) restructure the impl into a language with a runner (Go / TypeScript / JavaScript / Python / HTML) or (b) record an explicit waiver with typecalc_waive describing how this object will be verified out-of-band.",
-		compiled.Lang)), nil
+	// CRITICAL: no in-tree test runner for this language. We return
+	// Insufficient with a reason. v9.2 — the waiver escape was removed,
+	// so the gate WILL refuse to confirm this object until either (a)
+	// the impl is restructured into a verifiable language, or (b) kcpos
+	// gains a runner for this language (see internal/typecalc/lang/).
+	return core.NewInsufficient(fmt.Sprintf(
+		"no in-tree test runner for language %q — kcpos cannot mechanically verify this code. v9.2 has no waiver escape; resolve by restructuring the impl into a runner-supported language (Go / TypeScript / JavaScript / Python / HTML), OR extend internal/typecalc/lang/ with a TestRunInvoker for %q.",
+		compiled.Lang, compiled.Lang)), nil
 }
 
-func runGoTest(ctx context.Context, env *typecalc.RuleEnv, compiled, suite *typecalc.TypedValue) (*typecalc.TypedValue, error) {
+func runGoTest(ctx context.Context, env *core.RuleEnv, compiled, suite *core.TypedValue) (*core.TypedValue, error) {
 	dir, cleanup, err := newScratchDir(env, "kcpos-gotest-")
 	if err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	defer cleanup()
 	if err := writeFile(dir, "code.go", compiled.Payload); err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	if err := writeFile(dir, "code_test.go", suite.Payload); err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	out, err := runCmd(ctx, dir, "go", "test", ".")
 	if err != nil {
-		return typecalc.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)), nil
+		return core.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)), nil
 	}
-	return compiled.WithState(typecalc.StateTestedPass), nil
+	return compiled.WithState(core.StateTestedPass), nil
 }
 
-func runJSTest(ctx context.Context, env *typecalc.RuleEnv, compiled, suite *typecalc.TypedValue) (*typecalc.TypedValue, error) {
+func runJSTest(ctx context.Context, env *core.RuleEnv, compiled, suite *core.TypedValue) (*core.TypedValue, error) {
 	if !commandExists("npx") && !commandExists("node") {
-		return compiled.WithState(typecalc.StateTestedPass), nil
+		return compiled.WithState(core.StateTestedPass), nil
 	}
 	dir, cleanup, err := newScratchDir(env, "kcpos-jstest-")
 	if err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	defer cleanup()
 	codeName := "code.ts"
 	testName := "code.test.ts"
-	if compiled.Lang == typecalc.LangJavaScript {
+	if compiled.Lang == core.LangJavaScript {
 		codeName = "code.js"
 		testName = "code.test.js"
 	}
-	if compiled.Lang == typecalc.LangHTML {
+	if compiled.Lang == core.LangHTML {
 		// Harness loadImpl detects ext === '.html' and extracts <script>
 		// tags into globalThis + IMPL — so the same deliverable users
 		// open in a browser is the source under test. No parallel
@@ -214,17 +213,17 @@ func runJSTest(ctx context.Context, env *typecalc.RuleEnv, compiled, suite *type
 		testName = "code.test.js"
 	}
 	if err := writeFile(dir, codeName, compiled.Payload); err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	if err := writeFile(dir, testName, suite.Payload); err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	if !commandExists("npx") {
 		out, err := runCmd(ctx, dir, "node", "--test", testName)
 		if err != nil {
-			return typecalc.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)), nil
+			return core.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)), nil
 		}
-		return compiled.WithState(typecalc.StateTestedPass), nil
+		return compiled.WithState(core.StateTestedPass), nil
 	}
 	// 2026-05-09 v8 fix: dropped --reporter=basic. Modern vitest
 	// (v3+) removed that reporter; the npx --yes pulls latest, so
@@ -240,46 +239,46 @@ func runJSTest(ctx context.Context, env *typecalc.RuleEnv, compiled, suite *type
 		// generates, so it works for both LangJavaScript AND LangHTML.
 		// Pre-v8 the fallback was JavaScript-only, which left HTML
 		// runs stuck on vitest infra failures.
-		if compiled.Lang == typecalc.LangJavaScript || compiled.Lang == typecalc.LangHTML {
+		if compiled.Lang == core.LangJavaScript || compiled.Lang == core.LangHTML {
 			out2, err2 := runCmd(ctx, dir, "node", "--test", testName)
 			if err2 == nil {
-				return compiled.WithState(typecalc.StateTestedPass), nil
+				return compiled.WithState(core.StateTestedPass), nil
 			}
-			return typecalc.NewTestError(extractFailingCase(string(out2)), "tests pass", string(out2)), nil
+			return core.NewTestError(extractFailingCase(string(out2)), "tests pass", string(out2)), nil
 		}
-		return typecalc.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)), nil
+		return core.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)), nil
 	}
-	return compiled.WithState(typecalc.StateTestedPass), nil
+	return compiled.WithState(core.StateTestedPass), nil
 }
 
-func runPythonTest(ctx context.Context, env *typecalc.RuleEnv, compiled, suite *typecalc.TypedValue) (*typecalc.TypedValue, error) {
+func runPythonTest(ctx context.Context, env *core.RuleEnv, compiled, suite *core.TypedValue) (*core.TypedValue, error) {
 	pyExe := "python3"
 	if !commandExists(pyExe) {
 		pyExe = "python"
 		if !commandExists(pyExe) {
-			return compiled.WithState(typecalc.StateTestedPass), nil
+			return compiled.WithState(core.StateTestedPass), nil
 		}
 	}
 	dir, cleanup, err := newScratchDir(env, "kcpos-pytest-")
 	if err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	defer cleanup()
 	if err := writeFile(dir, "code.py", compiled.Payload); err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	if err := writeFile(dir, "test_code.py", suite.Payload); err != nil {
-		return typecalc.NewTestError("setup", "no error", err.Error()), nil
+		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	out, err := runCmd(ctx, dir, pyExe, "-m", "pytest", "-q", dir)
 	if err != nil {
 		out2, err2 := runCmd(ctx, dir, pyExe, "-m", "unittest", "discover", "-s", dir)
 		if err2 == nil {
-			return compiled.WithState(typecalc.StateTestedPass), nil
+			return compiled.WithState(core.StateTestedPass), nil
 		}
-		return typecalc.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)+"\n"+string(out2)), nil
+		return core.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)+"\n"+string(out2)), nil
 	}
-	return compiled.WithState(typecalc.StateTestedPass), nil
+	return compiled.WithState(core.StateTestedPass), nil
 }
 
 func extractFailingCase(output string) string {

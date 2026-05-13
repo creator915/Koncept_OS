@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/creator915/Koncept_OS/internal/graph"
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // Verdict is the discriminator for the result of receive_feedback (§3).
@@ -181,30 +181,30 @@ func contains(xs []string, x string) bool {
 }
 
 // NewValueAdjust constructs a ValueAdjust typed value.
-func NewValueAdjust(attrPath string, newValue any) *typecalc.TypedValue {
+func NewValueAdjust(attrPath string, newValue any) *core.TypedValue {
 	rawNew, _ := json.Marshal(newValue)
 	d := ValueAdjustDetail{AttrPath: attrPath, NewValue: rawNew}
 	raw, _ := json.Marshal(d)
-	return &typecalc.TypedValue{Kind: typecalc.KindValueAdjust, Payload: string(raw)}
+	return &core.TypedValue{Kind: core.KindValueAdjust, Payload: string(raw)}
 }
 
 // NewLawMissing constructs a LawMissing typed value.
-func NewLawMissing(attrPath, law string) *typecalc.TypedValue {
+func NewLawMissing(attrPath, law string) *core.TypedValue {
 	d := LawMissingDetail{AttrPath: attrPath, NewLaw: law}
 	raw, _ := json.Marshal(d)
-	return &typecalc.TypedValue{Kind: typecalc.KindLawMissing, Payload: string(raw)}
+	return &core.TypedValue{Kind: core.KindLawMissing, Payload: string(raw)}
 }
 
 // NewDesignChange constructs a DesignChange typed value.
-func NewDesignChange(reason string) *typecalc.TypedValue {
+func NewDesignChange(reason string) *core.TypedValue {
 	d := DesignChangeDetail{Reason: reason}
 	raw, _ := json.Marshal(d)
-	return &typecalc.TypedValue{Kind: typecalc.KindDesignChange, Payload: string(raw)}
+	return &core.TypedValue{Kind: core.KindDesignChange, Payload: string(raw)}
 }
 
 // NewCannotReproduce constructs a CannotReproduce typed value.
-func NewCannotReproduce(reason string) *typecalc.TypedValue {
+func NewCannotReproduce(reason string) *core.TypedValue {
 	d := CannotReproduceDetail{Reason: reason}
 	raw, _ := json.Marshal(d)
-	return &typecalc.TypedValue{Kind: typecalc.KindCannotReproduce, Payload: string(raw)}
+	return &core.TypedValue{Kind: core.KindCannotReproduce, Payload: string(raw)}
 }

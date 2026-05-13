@@ -8,17 +8,18 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
 const maxGlobResults = 500
 
-func globTool() llm.Tool {
-	return llm.Tool{
+func globTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "glob",
 				Description: "Find files matching a filename pattern (e.g. '*.go', 'main_*.ts') recursively. Skips .git, node_modules, .kcpos. Pattern uses Go filepath.Match syntax (no '**'); recursion is implicit.",
 				Parameters: map[string]interface{}{

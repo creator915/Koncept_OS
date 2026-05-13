@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // FormatChecker validates that a payload conforms to the structural
@@ -26,10 +26,10 @@ type FormatChecker func(payload string) error
 const formatCheckTimeout = 4 * time.Second
 
 // CheckFormat dispatches on the typed value's tag. Returns nil if the
-// payload's format matches expectations, or a *typecalc.TypedValue of
+// payload's format matches expectations, or a *core.TypedValue of
 // Kind KindFormatError otherwise. Unknown tags are treated as "no check
 // available".
-func CheckFormat(tv *typecalc.TypedValue) *typecalc.TypedValue {
+func CheckFormat(tv *core.TypedValue) *core.TypedValue {
 	if tv == nil {
 		return nil
 	}
@@ -38,40 +38,40 @@ func CheckFormat(tv *typecalc.TypedValue) *typecalc.TypedValue {
 		return nil
 	}
 	if err := checker(tv.Payload); err != nil {
-		return typecalc.FormatErr("format check failed for %s: %v", tv.Tag(), err)
+		return core.FormatErr("format check failed for %s: %v", tv.Tag(), err)
 	}
 	return nil
 }
 
-func lookupFormatChecker(t typecalc.Tag) FormatChecker {
-	if t.Kind == typecalc.KindCode {
+func lookupFormatChecker(t core.Tag) FormatChecker {
+	if t.Kind == core.KindCode {
 		switch t.Lang {
-		case typecalc.LangGo:
+		case core.LangGo:
 			return checkGoSyntax
-		case typecalc.LangTypeScript:
+		case core.LangTypeScript:
 			return checkTypeScriptSyntax
-		case typecalc.LangJavaScript:
+		case core.LangJavaScript:
 			return checkJavaScriptSyntax
-		case typecalc.LangPython:
+		case core.LangPython:
 			return checkPythonSyntax
-		case typecalc.LangRust:
+		case core.LangRust:
 			return checkRustSyntax
-		case typecalc.LangJava:
+		case core.LangJava:
 			return checkJavaSyntax
-		case typecalc.LangHTML:
+		case core.LangHTML:
 			return checkHTMLShape
 		default:
 			return nonEmpty("Code")
 		}
 	}
 	switch t.Kind {
-	case typecalc.KindSignature:
+	case core.KindSignature:
 		return checkSignature
-	case typecalc.KindTestSuite:
+	case core.KindTestSuite:
 		return checkTestSuite
-	case typecalc.KindArchitecture:
+	case core.KindArchitecture:
 		return checkArchitecture
-	case typecalc.KindTask, typecalc.KindReason, typecalc.KindDescription, typecalc.KindErrorLog, typecalc.KindErrorCode:
+	case core.KindTask, core.KindReason, core.KindDescription, core.KindErrorLog, core.KindErrorCode:
 		return nonEmpty(string(t.Kind))
 	}
 	return nil

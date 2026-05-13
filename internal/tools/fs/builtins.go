@@ -5,12 +5,12 @@
 // contained.
 package fs
 
-import "github.com/creator915/Koncept_OS/internal/llm"
+import "github.com/creator915/Koncept_OS/internal/llm/toolcall"
 
 // Tools returns the set of fs-area agent tools, ready to be merged into
 // the global tools registry by tools.Builtins().
-func Tools() map[string]llm.Tool {
-	return map[string]llm.Tool{
+func Tools() map[string]toolcall.Tool {
+	return map[string]toolcall.Tool{
 		"read_file":         readFileTool(),
 		"write_file":        writeFileTool(),
 		"edit":              editTool(),

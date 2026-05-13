@@ -7,17 +7,18 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
-	"github.com/creator915/Koncept_OS/internal/graph"
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	"github.com/creator915/Koncept_OS/internal/infra/persistence"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 	"github.com/creator915/Koncept_OS/internal/typecalc/lang"
 )
 
-func writeFileTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func writeFileTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name: "write_file",
 				Description: "Write content to a file. Creates the file if it does not exist, overwrites if it does. Creates parent directories as needed.\n\nIf the path matches an implementation file (an `impl` field of any object on the graph, OR matches the `*.impl.*` naming convention), this tool ALSO runs `typecalc_compile` on the content immediately after writing. A compile failure surfaces in the tool result; a passing compile auto-records typecalc evidence on disk so the agent does not need a separate typecalc_compile call before merging the corresponding object to confirmed.",
 				Parameters: map[string]interface{}{
@@ -82,25 +83,25 @@ func autoCompileAfterWrite(ctx context.Context, path, content string) string {
 	if len(objectIDs) == 0 {
 		return ""
 	}
-	if langTag == typecalc.LangNone {
+	if langTag == core.LangNone {
 		return "" // no language inference possible
 	}
-	tv := typecalc.New(typecalc.KindCode, content).
-		WithState(typecalc.StateUncompiled).
+	tv := core.New(core.KindCode, content).
+		WithState(core.StateUncompiled).
 		WithLang(langTag)
-	env := &typecalc.RuleEnv{WorkDir: "."}
+	env := &core.RuleEnv{WorkDir: "."}
 	out, err := lang.CompileLanguageInvoker(ctx, env, tv)
 	if err != nil {
 		return fmt.Sprintf("auto-typecalc: invoker error: %v", err)
 	}
-	if out.State == typecalc.StateCompiled {
+	if out.State == core.StateCompiled {
 		// HTML containing inline <script> is effectively a JS container
 		// — record evidence under JavaScript so the gate requires test
 		// evidence (you can't dodge testing by writing JS inside HTML).
-		effectiveLang := typecalc.DetectEffectiveLang(content, langTag)
+		effectiveLang := core.DetectEffectiveLang(content, langTag)
 		var written []string
 		for _, id := range objectIDs {
-			if recErr := typecalc.RecordEvidence(id, "compile", string(effectiveLang), true); recErr == nil {
+			if recErr := core.RecordEvidence(id, "compile", string(effectiveLang), true); recErr == nil {
 				written = append(written, id)
 			}
 		}
@@ -110,8 +111,8 @@ func autoCompileAfterWrite(ctx context.Context, path, content string) string {
 		return fmt.Sprintf("[auto-typecalc] compile passed; evidence recorded for: %s (lang=%s)",
 			strings.Join(written, ", "), effectiveLang)
 	}
-	if out.Kind == typecalc.KindCompileError {
-		ce, _ := typecalc.DecodeCompileError(out)
+	if out.Kind == core.KindCompileError {
+		ce, _ := core.DecodeCompileError(out)
 		// Critically, do NOT record evidence. The file is on disk but
 		// "implementing" semantics demand a passing compile.
 		return fmt.Sprintf(
@@ -124,10 +125,10 @@ func autoCompileAfterWrite(ctx context.Context, path, content string) string {
 
 // resolveAutoCompileTarget figures out which graph object(s) and language
 // to attribute an auto-compile to.
-func resolveAutoCompileTarget(path string) ([]string, typecalc.Lang) {
+func resolveAutoCompileTarget(path string) ([]string, core.Lang) {
 	// Step 1: graph lookup — find any object whose impl == path.
 	var matched []string
-	if g, err := graph.LoadOrInit(graph.DefaultPath); err == nil {
+	if g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath); err == nil {
 		for id, obj := range g.Objects {
 			if obj.Impl != nil && *obj.Impl == path {
 				matched = append(matched, id)
@@ -146,12 +147,12 @@ func resolveAutoCompileTarget(path string) ([]string, typecalc.Lang) {
 	}
 
 	if len(matched) == 0 {
-		return nil, typecalc.LangNone
+		return nil, core.LangNone
 	}
 
 	// Language inference from extension.
 	ext := filepath.Ext(path)
-	return matched, typecalc.LangFromExt(ext)
+	return matched, core.LangFromExt(ext)
 }
 
 func indent(s, prefix string) string {

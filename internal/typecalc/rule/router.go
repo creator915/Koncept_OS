@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 	"github.com/creator915/Koncept_OS/internal/typecalc/lang"
 )
 
@@ -12,7 +12,7 @@ import (
 // modeled after §8.2 of the design doc.
 type Router struct {
 	Registry *Registry
-	Env      *typecalc.RuleEnv
+	Env      *core.RuleEnv
 
 	// MaxSteps caps the number of router iterations. A handler returning
 	// the same tag repeatedly (which a buggy rule might) is bounded here
@@ -21,27 +21,27 @@ type Router struct {
 
 	// Terminals declares which kinds halt the loop and return the value.
 	// Defaults to TerminalKinds() if empty.
-	Terminals []typecalc.Kind
+	Terminals []core.Kind
 }
 
 // TerminalKinds returns the kinds the router halts on by default. These
 // are escalation/error/handoff tags the caller is expected to act on
 // rather than feed back into the rule loop.
-func TerminalKinds() []typecalc.Kind {
-	return []typecalc.Kind{
-		typecalc.KindObstacle,
-		typecalc.KindClarificationReq,
-		typecalc.KindFormatError,
-		typecalc.KindPermissionDenied,
-		typecalc.KindFaultLocated,
-		typecalc.KindDesignChange,
-		typecalc.KindCannotReproduce,
+func TerminalKinds() []core.Kind {
+	return []core.Kind{
+		core.KindObstacle,
+		core.KindClarificationReq,
+		core.KindFormatError,
+		core.KindPermissionDenied,
+		core.KindFaultLocated,
+		core.KindDesignChange,
+		core.KindCannotReproduce,
 	}
 }
 
 // Run drives a typed value through the rule registry. Returns either the
 // terminal value, or the value at the point of an error.
-func (r *Router) Run(ctx context.Context, initial *typecalc.TypedValue) (*typecalc.TypedValue, error) {
+func (r *Router) Run(ctx context.Context, initial *core.TypedValue) (*core.TypedValue, error) {
 	if r.Registry == nil {
 		return initial, fmt.Errorf("router has no registry")
 	}
@@ -53,7 +53,7 @@ func (r *Router) Run(ctx context.Context, initial *typecalc.TypedValue) (*typeca
 	if len(terminals) == 0 {
 		terminals = TerminalKinds()
 	}
-	terminalSet := make(map[typecalc.Kind]struct{}, len(terminals))
+	terminalSet := make(map[core.Kind]struct{}, len(terminals))
 	for _, k := range terminals {
 		terminalSet[k] = struct{}{}
 	}
@@ -65,7 +65,7 @@ func (r *Router) Run(ctx context.Context, initial *typecalc.TypedValue) (*typeca
 		}
 		// State==Confirmed is also terminal (success). It can apply to
 		// any content kind (Code, Description, Architecture).
-		if current.State == typecalc.StateConfirmed {
+		if current.State == core.StateConfirmed {
 			return current, nil
 		}
 		// Format-check before dispatch so a malformed value short-circuits.
@@ -88,7 +88,7 @@ func (r *Router) Run(ctx context.Context, initial *typecalc.TypedValue) (*typeca
 			producedTag := next.Tag()
 			if !rule.Output.Includes(producedTag) {
 				if _, kindMatches := rule.Output.FindKind(producedTag.Kind); !kindMatches {
-					return typecalc.FormatErr("rule %s produced %s, not in declared output %s",
+					return core.FormatErr("rule %s produced %s, not in declared output %s",
 						rule.Name, producedTag, rule.Output.String()), nil
 				}
 			}
@@ -99,11 +99,11 @@ func (r *Router) Run(ctx context.Context, initial *typecalc.TypedValue) (*typeca
 }
 
 // IsTerminal reports whether a value's kind is in the default terminal set.
-func IsTerminal(tv *typecalc.TypedValue) bool {
+func IsTerminal(tv *core.TypedValue) bool {
 	if tv == nil {
 		return true
 	}
-	if tv.State == typecalc.StateConfirmed {
+	if tv.State == core.StateConfirmed {
 		return true
 	}
 	for _, k := range TerminalKinds() {

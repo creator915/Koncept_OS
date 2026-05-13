@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
-func readFileTool() llm.Tool {
-	return llm.Tool{
+func readFileTool() toolcall.Tool {
+	return toolcall.Tool{
 		Concurrent: true,
-		Spec: llm.ToolSpec{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "read_file",
 				Description: "Read the contents of a file at the given path. Returns the file content as text.\n\n**v9.0.4 markdown auto-outline**: when the target is a .md/.markdown file longer than ~5K tokens, read_file returns the chapter OUTLINE instead of the full body. Fetch individual chapters via markdown_section. Pass force=true to read the whole file anyway (NOT recommended — every parent / child agent that opens a long markdown in this mode multiplies its context footprint).",
 				Parameters: map[string]interface{}{

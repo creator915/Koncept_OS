@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/creator915/Koncept_OS/internal/session"
+	"github.com/creator915/Koncept_OS/internal/app/workflow"
+	"github.com/creator915/Koncept_OS/internal/domain/session"
+	"github.com/creator915/Koncept_OS/internal/infra/persistence"
 )
 
 // Tests for the withTempFocus closure that powers the optional session_id
@@ -29,10 +31,10 @@ func chdirTempProject(t *testing.T) string {
 
 func TestWithTempFocus_NoOpWhenIDEmpty(t *testing.T) {
 	chdirTempProject(t)
-	if _, err := session.Create(session.DefaultDir, "s_a", "", "", session.Input{}); err != nil {
+	if _, err := workflow.Create(persistence.SessionDefaultDir, "s_a", "", "", session.Input{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.SetFocus(session.DefaultDir, "s_a"); err != nil {
+	if err := persistence.SetFocus(persistence.SessionDefaultDir, "s_a"); err != nil {
 		t.Fatal(err)
 	}
 	restore, err := withTempFocus("")
@@ -40,7 +42,7 @@ func TestWithTempFocus_NoOpWhenIDEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restore()
-	cur, _ := session.GetFocus(session.DefaultDir)
+	cur, _ := persistence.GetFocus(persistence.SessionDefaultDir)
 	if cur != "s_a" {
 		t.Errorf("focus changed unexpectedly: %s", cur)
 	}
@@ -49,11 +51,11 @@ func TestWithTempFocus_NoOpWhenIDEmpty(t *testing.T) {
 func TestWithTempFocus_SwapsAndRestores(t *testing.T) {
 	chdirTempProject(t)
 	for _, id := range []string{"s_root", "s_child"} {
-		if _, err := session.Create(session.DefaultDir, id, "", "", session.Input{}); err != nil {
+		if _, err := workflow.Create(persistence.SessionDefaultDir, id, "", "", session.Input{}); err != nil {
 			t.Fatalf("create %s: %v", id, err)
 		}
 	}
-	if err := session.SetFocus(session.DefaultDir, "s_root"); err != nil {
+	if err := persistence.SetFocus(persistence.SessionDefaultDir, "s_root"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -61,12 +63,12 @@ func TestWithTempFocus_SwapsAndRestores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mid, _ := session.GetFocus(session.DefaultDir)
+	mid, _ := persistence.GetFocus(persistence.SessionDefaultDir)
 	if mid != "s_child" {
 		t.Errorf("expected focus s_child during merge, got %s", mid)
 	}
 	restore()
-	after, _ := session.GetFocus(session.DefaultDir)
+	after, _ := persistence.GetFocus(persistence.SessionDefaultDir)
 	if after != "s_root" {
 		t.Errorf("expected focus restored to s_root, got %s", after)
 	}
@@ -74,7 +76,7 @@ func TestWithTempFocus_SwapsAndRestores(t *testing.T) {
 
 func TestWithTempFocus_RestoresEmptyWhenNoneFocused(t *testing.T) {
 	chdirTempProject(t)
-	if _, err := session.Create(session.DefaultDir, "s_x", "", "", session.Input{}); err != nil {
+	if _, err := workflow.Create(persistence.SessionDefaultDir, "s_x", "", "", session.Input{}); err != nil {
 		t.Fatal(err)
 	}
 	// Nothing focused — withTempFocus should still restore "no focus".
@@ -83,7 +85,7 @@ func TestWithTempFocus_RestoresEmptyWhenNoneFocused(t *testing.T) {
 		t.Fatal(err)
 	}
 	restore()
-	after, _ := session.GetFocus(session.DefaultDir)
+	after, _ := persistence.GetFocus(persistence.SessionDefaultDir)
 	if after != "" {
 		t.Errorf("expected focus cleared, got %q", after)
 	}

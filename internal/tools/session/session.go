@@ -7,10 +7,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
-	"github.com/creator915/Koncept_OS/internal/checkpoint"
-	"github.com/creator915/Koncept_OS/internal/graph"
-	"github.com/creator915/Koncept_OS/internal/session"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	"github.com/creator915/Koncept_OS/internal/app/workflow"
+	"github.com/creator915/Koncept_OS/internal/domain/session"
+	"github.com/creator915/Koncept_OS/internal/infra/persistence"
 )
 
 // Session tools manage work-sessions stored under K/sessions/. These are
@@ -18,11 +19,11 @@ import (
 // implementation work over the hypergraph (lifecycle, parent/child tree,
 // graphDiff for rollback).
 
-func sessionCreateTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionCreateTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_create",
 				Description: "Create a new KonceptOS work-session (lives in K/sessions/, distinct from the chat transcript). Status starts as 'waiting'. Pass parent='' for a root session, or parent=<existing session id> to make this a child. Provide task (one-line description), and optionally input.signatures (graph object IDs this session will work on) and input.context (graph attribute IDs in scope). Returns the session id.",
 				Parameters: map[string]interface{}{
@@ -71,7 +72,7 @@ func sessionCreateTool() llm.Tool {
 				Signatures: stringList(args["signatures"]),
 				Context:    stringList(args["context"]),
 			}
-			s, err := session.Create(session.DefaultDir, id, parent, task, input)
+			s, err := workflow.Create(persistence.SessionDefaultDir, id, parent, task, input)
 			if err != nil {
 				return "", err
 			}
@@ -84,11 +85,11 @@ func sessionCreateTool() llm.Tool {
 	}
 }
 
-func sessionStartTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionStartTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_start",
 				Description: "Atomically create + activate + focus a new KonceptOS work-session. Equivalent to session_create → session_status active → session_focus, but inseparable so any graph mutations you make next get correctly recorded to this session's graphDiff. **Use this instead of the three-step combo whenever you're starting fresh work** — it eliminates the common bug where a session is created but graph operations happen before focus, leaving graphDiff empty.",
 				Parameters: map[string]interface{}{
@@ -128,7 +129,7 @@ func sessionStartTool() llm.Tool {
 				Signatures: stringList(args["signatures"]),
 				Context:    stringList(args["context"]),
 			}
-			s, err := session.Start(session.DefaultDir, id, parent, task, input)
+			s, err := workflow.Start(persistence.SessionDefaultDir, id, parent, task, input)
 			if err != nil {
 				return "", err
 			}
@@ -141,11 +142,11 @@ func sessionStartTool() llm.Tool {
 	}
 }
 
-func sessionShowTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionShowTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_show",
 				Description: "Show one KonceptOS session: id, status, parent, children, task, input/output summary. Pass the session id.",
 				Parameters: map[string]interface{}{
@@ -163,7 +164,7 @@ func sessionShowTool() llm.Tool {
 			if err != nil {
 				return "", err
 			}
-			s, err := session.Load(session.DefaultDir, id)
+			s, err := persistence.LoadSession(persistence.SessionDefaultDir, id)
 			if err != nil {
 				return "", err
 			}
@@ -172,11 +173,11 @@ func sessionShowTool() llm.Tool {
 	}
 }
 
-func sessionListTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionListTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_list",
 				Description: "List KonceptOS sessions. Optional status filter (waiting/active/finished); omit to list all. Returns a table-style summary, one session per line.",
 				Parameters: map[string]interface{}{
@@ -191,7 +192,7 @@ func sessionListTool() llm.Tool {
 			},
 		},
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
-			ids, err := session.List(session.DefaultDir)
+			ids, err := persistence.ListSessions(persistence.SessionDefaultDir)
 			if err != nil {
 				return "", err
 			}
@@ -201,7 +202,7 @@ func sessionListTool() llm.Tool {
 			}
 			var rows []string
 			for _, id := range ids {
-				s, err := session.Load(session.DefaultDir, id)
+				s, err := persistence.LoadSession(persistence.SessionDefaultDir, id)
 				if err != nil {
 					rows = append(rows, fmt.Sprintf("  %s · [load error: %v]", id, err))
 					continue
@@ -224,13 +225,13 @@ func sessionListTool() llm.Tool {
 	}
 }
 
-func sessionStatusTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionStatusTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_status",
-				Description: "Transition a session's status. Valid moves: waiting→active (start work), active→finished (succeeded). Other moves error — to abandon a session use session_delete.\n\nFinish guard: when transitioning a ROOT session to finished, the same checks as session_gate_check run inline; gate FAIL is a hard rejection. This stops the failure mode where a stuck agent flips status to finished to escape an unsatisfied gate. Non-root sessions skip the guard (their gate enforcement happens at the root level via children-finished).",
+				Description: "Transition a session's status. Valid moves: waiting→active (start work), active→finished (succeeded). Other moves error — to undo work use session_rollback (destructive), or to retire a finished session entry use session_dismiss (additive cleanup).\n\nFinish guard: when transitioning a ROOT session to finished, the same checks as session_gate_check run inline; gate FAIL is a hard rejection. This stops the failure mode where a stuck agent flips status to finished to escape an unsatisfied gate. Non-root sessions skip the guard (their gate enforcement happens at the root level via children-finished).",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -257,9 +258,9 @@ func sessionStatusTool() llm.Tool {
 			// trusted to gate at their parent level (children-finished
 			// rule already cascades to root) and skip this guard.
 			if session.Status(to) == session.StatusFinished {
-				existing, lerr := session.Load(session.DefaultDir, id)
+				existing, lerr := persistence.LoadSession(persistence.SessionDefaultDir, id)
 				if lerr == nil && existing.Parent == "" {
-					report, gerr := session.CheckGate(session.DefaultDir, graph.DefaultPath, checkpoint.DefaultPath, id)
+					report, gerr := workflow.CheckGate(persistence.SessionDefaultDir, persistence.GraphDefaultPath, persistence.CheckpointDefaultPath, id)
 					if gerr == nil && report != nil && report.Status != "PASS" {
 						return "", fmt.Errorf(
 							"refusing to mark root session %s as finished: gate FAIL with %d issue(s) — fix them first or call session_gate_check for the full list. Top issues:\n  %s",
@@ -268,7 +269,7 @@ func sessionStatusTool() llm.Tool {
 					}
 				}
 			}
-			s, err := session.SetStatus(session.DefaultDir, id, session.Status(to))
+			s, err := workflow.SetStatus(persistence.SessionDefaultDir, id, session.Status(to))
 			if err != nil {
 				return "", err
 			}
@@ -286,13 +287,22 @@ func truncateIssues(issues []string, n int) []string {
 	return out
 }
 
-func sessionDeleteTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+// sessionRollbackTool — v9.3 renamed from session_delete. The name now
+// matches the actual semantics. Three Terraria incidents (v9.0.6 03,
+// v92-01, v92-02) all came from agents reading "delete" as "cleanup"
+// and being surprised that graphDiff + def/impl files got wiped. v92-02
+// went furthest: deleted ROOT session, lost 20 source files including
+// index.html itself.
+//
+// Companion: sessionDismissTool() — the safe additive cleanup most
+// agents actually want.
+func sessionRollbackTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "session_delete",
-				Description: "Roll back a session: depth-first roll back all children (reverse-applying their graphDiff to K/graph.json), then reverse-apply this session's graphDiff, then delete the session JSON. Also deletes def/impl files this session created. Use when a session fails or is abandoned. If the rolled-back session was the focused one, focus is cleared.",
+			Function: transport.ToolFunction{
+				Name:        "session_rollback",
+				Description: "**DESTRUCTIVE — reverses everything this session did.** Depth-first rolls back all child sessions (reverse-applying their graphDiff), then reverse-applies this session's graphDiff, then deletes def/impl files this session created, then removes the session JSON. Use ONLY when the work is genuinely wrong and you want to undo it.\n\nFor cleaning up a *successfully* finished session, use `session_dismiss` instead — it only removes the session entry without touching graphDiff or files.\n\nIf the rolled-back session is the focused one, focus is cleared. Rolling back ROOT empties the entire project.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -308,7 +318,7 @@ func sessionDeleteTool() llm.Tool {
 			if err != nil {
 				return "", err
 			}
-			deleted, err := session.Rollback(session.DefaultDir, graph.DefaultPath, id)
+			deleted, err := workflow.Rollback(persistence.SessionDefaultDir, persistence.GraphDefaultPath, id)
 			if err != nil {
 				return "", err
 			}
@@ -316,16 +326,70 @@ func sessionDeleteTool() llm.Tool {
 				return fmt.Sprintf("no session %s found (already gone)", id), nil
 			}
 			return fmt.Sprintf("rolled back %d session(s): %s · graphDiff reverse-applied to %s",
-				len(deleted), strings.Join(deleted, ", "), graph.DefaultPath), nil
+				len(deleted), strings.Join(deleted, ", "), persistence.GraphDefaultPath), nil
 		},
 	}
 }
 
-func sessionFocusTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+// sessionDismissTool — v9.3 new. Removes a session entry from K/sessions/
+// without rolling back anything. Use when a subagent finished its work
+// successfully and you want to retire its session record. Does NOT touch
+// graphDiff, def files, impl files, or any other state — only the session
+// JSON. Refuses to dismiss a session that's still `active` (you should
+// transition to `finished` first via session_status).
+func sessionDismissTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
+				Name:        "session_dismiss",
+				Description: "Remove a finished session's entry from K/sessions/ without touching anything else. **Additive cleanup, NOT destructive.** Does NOT roll back graphDiff. Does NOT delete def/impl files. Does NOT affect child sessions. Use this when a subagent has completed its work and you want to retire the session record. The session must be in status `finished` or `waiting` (refuses `active`). If you want destructive rollback, use `session_rollback` instead.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id": map[string]interface{}{"type": "string"},
+					},
+					"required": []string{"id"},
+				},
+			},
+		},
+		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			rawID, _ := args["id"].(string)
+			id, err := session.NormalizeID(rawID)
+			if err != nil {
+				return "", err
+			}
+			s, err := persistence.LoadSession(persistence.SessionDefaultDir, id)
+			if err != nil {
+				return "", fmt.Errorf("session_dismiss: load %s: %w", id, err)
+			}
+			if s.Status == session.StatusActive {
+				return "", fmt.Errorf("session_dismiss refuses to remove %q: status=active. Transition to finished first via session_status, OR use session_rollback for destructive cleanup", id)
+			}
+			// Refuse to dismiss a session that still has active children
+			// hanging off it — that would orphan them.
+			var active []string
+			for _, c := range s.Children {
+				if cs, err := persistence.LoadSession(persistence.SessionDefaultDir, c); err == nil && cs.Status == session.StatusActive {
+					active = append(active, c)
+				}
+			}
+			if len(active) > 0 {
+				return "", fmt.Errorf("session_dismiss refuses to remove %q: %d child session(s) still active: %s. Finish or dismiss children first", id, len(active), strings.Join(active, ", "))
+			}
+			if err := persistence.DeleteSession(persistence.SessionDefaultDir, id); err != nil {
+				return "", fmt.Errorf("session_dismiss: delete %s: %w", id, err)
+			}
+			return fmt.Sprintf("dismissed session %s (status was %s) — session JSON removed, graphDiff and files intact", id, s.Status), nil
+		},
+	}
+}
+
+func sessionFocusTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
+			Type: "function",
+			Function: transport.ToolFunction{
 				Name:        "session_focus",
 				Description: "Set the currently-focused session. While a session is focused AND active, every mutating graph_* call appends its diff to that session's graphDiff (used later for rollback). Pass id=<session id> to set focus, or id='' to clear it. The session must already be in 'active' status.",
 				Parameters: map[string]interface{}{
@@ -344,7 +408,7 @@ func sessionFocusTool() llm.Tool {
 			rawID, _ := args["id"].(string)
 			rawID = strings.TrimSpace(rawID)
 			if rawID == "" {
-				if err := session.SetFocus(session.DefaultDir, ""); err != nil {
+				if err := persistence.SetFocus(persistence.SessionDefaultDir, ""); err != nil {
 					return "", err
 				}
 				return "focus cleared · graph mutations no longer recorded to any session", nil
@@ -353,14 +417,14 @@ func sessionFocusTool() llm.Tool {
 			if err != nil {
 				return "", err
 			}
-			s, err := session.Load(session.DefaultDir, id)
+			s, err := persistence.LoadSession(persistence.SessionDefaultDir, id)
 			if err != nil {
 				return "", err
 			}
 			if s.Status != session.StatusActive {
 				return "", fmt.Errorf("cannot focus on %s: status is %s, must be active first (use session_status to transition)", id, s.Status)
 			}
-			if err := session.SetFocus(session.DefaultDir, id); err != nil {
+			if err := persistence.SetFocus(persistence.SessionDefaultDir, id); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("focus → %s · subsequent graph mutations recorded to its graphDiff", id), nil
@@ -368,11 +432,11 @@ func sessionFocusTool() llm.Tool {
 	}
 }
 
-func sessionAggregateTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionAggregateTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_aggregate",
 				Description: "Walk a session and all its descendants, dedupe-merging their output.{implementations, newSignatures, newAttributes, tests} into the named session. Use this on the root session before final gate-check. graphDiff is intentionally NOT merged — each session keeps its own for rollback purposes.",
 				Parameters: map[string]interface{}{
@@ -390,7 +454,7 @@ func sessionAggregateTool() llm.Tool {
 			if err != nil {
 				return "", err
 			}
-			s, err := session.Aggregate(session.DefaultDir, id)
+			s, err := workflow.Aggregate(persistence.SessionDefaultDir, id)
 			if err != nil {
 				return "", err
 			}
@@ -401,11 +465,11 @@ func sessionAggregateTool() llm.Tool {
 	}
 }
 
-func sessionSetArchitectureTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionSetArchitectureTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_set_architecture",
 				Description: "Write the architecture description for a session — a markdown-style list of sub-modules and intermediate variables produced BEFORE any implementation code is written. Required for root session finish (gate rule [architecture-non-empty]).\n\nCLAUDE.md §5.4 path A: \"even if a one-shot implementation, first list sub-modules and intermediate variables\". This step is the design artifact that justifies the hypergraph structure that follows. Format is free-form markdown — typical content: a bullet list of sub-modules with their responsibilities, and a bullet list of intermediate variables with their roles.",
 				Parameters: map[string]interface{}{
@@ -428,7 +492,7 @@ func sessionSetArchitectureTool() llm.Tool {
 			if err != nil {
 				return "", err
 			}
-			s, err := session.SetArchitecture(session.DefaultDir, id, description)
+			s, err := workflow.SetArchitecture(persistence.SessionDefaultDir, id, description)
 			if err != nil {
 				return "", err
 			}
@@ -437,11 +501,11 @@ func sessionSetArchitectureTool() llm.Tool {
 	}
 }
 
-func sessionGateCheckTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func sessionGateCheckTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "session_gate_check",
 				Description: "Verify a SESSION is ready to be finished. Cross-object scope: children finished or deleted; aggregated outputs; attribute backfill; checkpoint PASS; waiver-flood threshold; root architecture set. Per-object rules (impl-on-disk, evidence-pass, accepted-evidence-required) are delegated to gate_object — check individual objects with that tool for finer-grained feedback. Mechanical verification only.",
 				Parameters: map[string]interface{}{
@@ -459,7 +523,7 @@ func sessionGateCheckTool() llm.Tool {
 			if err != nil {
 				return "", err
 			}
-			r, err := session.CheckGate(session.DefaultDir, graph.DefaultPath, checkpoint.DefaultPath, id)
+			r, err := workflow.CheckGate(persistence.SessionDefaultDir, persistence.GraphDefaultPath, persistence.CheckpointDefaultPath, id)
 			if err != nil {
 				return "", err
 			}
@@ -484,11 +548,11 @@ func sessionGateCheckTool() llm.Tool {
 // graph_merge_object after-hook on status=confirmed transitions so the
 // agent sees object-level issues immediately rather than discovering
 // them at root-finish time.
-func gateObjectTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func gateObjectTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "gate_object",
 				Description: "Run the gate's per-object checks against ONE graph object: confirmed status, impl on disk, produces-or-mutates non-empty, typecalc evidence present and passing (or substituted by obstacle+waiver), reasonableness review accepted (or waived). Use this for early feedback while iterating on a single object — the same rules that the root-finish gate runs at the end. The graph_merge_object hook also auto-calls this on status=confirmed transitions, so most usage is reactive (read the hook output) rather than ad-hoc.",
 				Parameters: map[string]interface{}{
@@ -505,18 +569,18 @@ func gateObjectTool() llm.Tool {
 			if objID == "" {
 				return "", fmt.Errorf("object_id is required")
 			}
-			g, err := graph.LoadOrInit(graph.DefaultPath)
+			g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
 			if err != nil {
 				return "", err
 			}
 			cwd, _ := os.Getwd()
-			issues, info := session.CheckObjectGate(g, objID, cwd)
+			issues, info := workflow.CheckObjectGate(g, objID, cwd)
 			var b strings.Builder
 			status := "PASS"
 			if len(issues) > 0 {
 				status = "FAIL"
 			}
-			fmt.Fprintf(&b, "gate_object: %s · %s (has_evidence=%v, pass_via_waiver=%v)\n", status, objID, info.HasEvidence, info.PassViaWaiver)
+			fmt.Fprintf(&b, "gate_object: %s · %s (has_evidence=%v)\n", status, objID, info.HasEvidence)
 			for _, iss := range issues {
 				fmt.Fprintf(&b, "  ✗ %s\n", iss)
 			}

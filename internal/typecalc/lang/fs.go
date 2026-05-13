@@ -4,14 +4,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/creator915/Koncept_OS/internal/typecalc"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // newScratchDir makes a working directory under .kcpos/typecalc-tmp/ for
 // transient compile/test artefacts. The cleanup function removes the dir
 // and its contents. Sandboxing under .kcpos rather than /tmp keeps stray
 // files inside the project tree where they're easy to inspect post-mortem.
-func newScratchDir(env *typecalc.RuleEnv, prefix string) (string, func(), error) {
+func newScratchDir(env *core.RuleEnv, prefix string) (string, func(), error) {
 	base := os.TempDir()
 	if env != nil && env.WorkDir != "" {
 		base = filepath.Join(env.WorkDir, ".kcpos", "typecalc-tmp")

@@ -6,14 +6,15 @@ import (
 	"os"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
-func editTool() llm.Tool {
-	return llm.Tool{
-		Spec: llm.ToolSpec{
+func editTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: transport.ToolFunction{
 				Name:        "edit",
 				Description: "Replace exact text in a file. The old_string must appear exactly once unless replace_all is true. Use this for targeted edits instead of rewriting whole files.",
 				Parameters: map[string]interface{}{
