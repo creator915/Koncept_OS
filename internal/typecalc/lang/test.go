@@ -270,9 +270,14 @@ func runPythonTest(ctx context.Context, env *core.RuleEnv, compiled, suite *core
 	if err := writeFile(dir, "test_code.py", suite.Payload); err != nil {
 		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
-	out, err := runCmd(ctx, dir, pyExe, "-m", "pytest", "-q", dir)
+	// cmd.Dir is already set to `dir` by runCmd, so use "." for the
+	// test target. (Passing `dir` here is harmless now that fs.go's
+	// newScratchDir returns an absolute path, but redundant. Using "."
+	// matches runGoTest's convention and avoids surprises if the
+	// absolute-path guarantee ever slips back to a relative one.)
+	out, err := runCmd(ctx, dir, pyExe, "-m", "pytest", "-q", ".")
 	if err != nil {
-		out2, err2 := runCmd(ctx, dir, pyExe, "-m", "unittest", "discover", "-s", dir)
+		out2, err2 := runCmd(ctx, dir, pyExe, "-m", "unittest", "discover", "-s", ".")
 		if err2 == nil {
 			return compiled.WithState(core.StateTestedPass), nil
 		}

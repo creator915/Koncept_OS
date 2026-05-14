@@ -56,8 +56,66 @@ func Render(in RenderInputs) (string, bool) {
 	switch in.Tests.Lang {
 	case "JavaScript", "TypeScript", "HTML":
 		return renderJavaScript(in), true
+	case "Python":
+		return renderPython(in), true
 	}
 	return "", false
+}
+
+// renderPython is the Python counterpart of renderJavaScript. The test
+// runner (lang.runPythonTest) writes the rendered source to test_code.py
+// alongside code.py in a scratch dir, then runs pytest -q (falling back
+// to unittest discover). Cases compile into methods on a single
+// unittest.TestCase subclass, with one method per case; pytest collects
+// these automatically.
+//
+// Mirrors the JS flow: setup → snapshot inputs → call → snapshot outputs
+// → appendTrace BEFORE assertions → assertions. Trace lives in the same
+// .kcpos/typecalc/<id>.json bundle as JS so the static-check rules see
+// identical evidence shape regardless of language.
+func renderPython(in RenderInputs) string {
+	cases, _ := json.Marshal(in.Tests.Cases)
+	// Normalize nil slices to []string{} so json.Marshal emits "[]"
+	// (Python list) instead of "null" (Python None) — snapshot_ports
+	// iterates over the port list and can't iterate None.
+	inputPorts := in.InputPorts
+	if inputPorts == nil {
+		inputPorts = []string{}
+	}
+	outputPorts := in.OutputPorts
+	if outputPorts == nil {
+		outputPorts = []string{}
+	}
+	inJSON, _ := json.Marshal(inputPorts)
+	outJSON, _ := json.Marshal(outputPorts)
+	po := in.PortObservation
+	if po == nil {
+		po = map[string]string{}
+	}
+	poJSON, _ := json.Marshal(po)
+	implSym := in.ImplSymbol
+	if implSym == "" {
+		implSym = in.Tests.ObjectID
+	}
+	src := pythonHarnessTemplate
+	src = strings.ReplaceAll(src, "__OBJECT_ID__", pyString(in.Tests.ObjectID))
+	src = strings.ReplaceAll(src, "__IMPL_SYMBOL__", pyString(implSym))
+	src = strings.ReplaceAll(src, "__IMPL_PATH__", pyString(in.ImplPath))
+	src = strings.ReplaceAll(src, "__TRACE_PATH__", pyString(in.TracePath))
+	src = strings.ReplaceAll(src, "__CASES_JSON__", pyString(string(cases)))
+	src = strings.ReplaceAll(src, "__INPUT_PORTS_JSON__", pyString(string(inJSON)))
+	src = strings.ReplaceAll(src, "__OUTPUT_PORTS_JSON__", pyString(string(outJSON)))
+	src = strings.ReplaceAll(src, "__PORT_OBSERVATION_JSON__", pyString(string(poJSON)))
+	return src
+}
+
+// pyString returns the value as a Python string literal (JSON-encoded
+// strings are valid Python string literals — double-quoted, with the
+// same escape sequences). Used to embed JSON payloads as quoted strings
+// that json.loads() reads back at module load.
+func pyString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // renderJavaScript inlines the case data and per-port extractor map as
@@ -504,3 +562,272 @@ for (const c of CASES) {
 func LegacyFallbackNotice(lang string) string {
 	return fmt.Sprintf("[harness] no harness for language %q; using legacy TestCode (LLM-written test source)", lang)
 }
+
+// pythonHarnessTemplate mirrors jsHarnessTemplate but produces a
+// unittest.TestCase subclass. pytest -q (lang.runPythonTest's primary
+// path) auto-collects unittest.TestCase methods; unittest discover
+// (its fallback) also picks them up. Cases compile to test_<i>_<name>
+// methods so collection order matches CASES order.
+//
+// All payload data — case array, port lists, port-observation map — is
+// JSON-encoded and embedded as Python string literals, then re-parsed
+// with json.loads() at module load. This is the only safe way to embed
+// JSON (which has true/false/null) into Python source.
+const pythonHarnessTemplate = `# kcpos Python harness — auto-generated, do not edit
+import json
+import os
+import sys
+import hashlib
+import datetime
+import importlib.util
+import unittest
+
+OBJECT_ID = __OBJECT_ID__
+IMPL_SYMBOL = __IMPL_SYMBOL__
+IMPL_PATH = __IMPL_PATH__
+TRACE_FILE = __TRACE_PATH__
+CASES = json.loads(__CASES_JSON__)
+INPUT_PORTS = json.loads(__INPUT_PORTS_JSON__)
+OUTPUT_PORTS = json.loads(__OUTPUT_PORTS_JSON__)
+# PORT_OBSERVATION: per-port extractor strings, matching the JS harness.
+#   "global"          -> module global namespace (the impl module's attrs)
+#   "return"          -> the call's return value
+#   "return.<path>"   -> resolve <path> on the return value
+#   "args.<n>.<path>" -> resolve <path> on the n-th call argument
+#   "side_effect"     -> port has only externally-observable effects
+PORT_OBSERVATION = json.loads(__PORT_OBSERVATION_JSON__)
+
+
+def compute_impl_hash():
+    try:
+        with open(IMPL_PATH, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception:
+        return ''
+
+
+IMPL_HASH = compute_impl_hash()
+RUN_CALLS = []
+
+
+def load_bundle():
+    try:
+        if os.path.exists(TRACE_FILE):
+            with open(TRACE_FILE, 'r', encoding='utf-8') as f:
+                parsed = json.load(f)
+            if isinstance(parsed, dict) and parsed.get('objectId') == OBJECT_ID:
+                return parsed
+    except Exception:
+        pass
+    return {'objectId': OBJECT_ID, 'version': 1, 'updatedAt': datetime.datetime.utcnow().isoformat() + 'Z'}
+
+
+def save_trace():
+    d = os.path.dirname(TRACE_FILE)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    bundle = load_bundle()
+    bundle['objectId'] = OBJECT_ID
+    bundle['version'] = bundle.get('version', 1)
+    bundle['sourceHash'] = IMPL_HASH
+    bundle['updatedAt'] = datetime.datetime.utcnow().isoformat() + 'Z'
+    bundle['runtimeTrace'] = {'calls': RUN_CALLS}
+    with open(TRACE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(bundle, f, indent=2)
+
+
+def reset_trace():
+    save_trace()
+
+
+def append_trace(inputs, outputs):
+    RUN_CALLS.append({'inputs': inputs, 'outputs': outputs})
+    save_trace()
+
+
+# Load impl module from IMPL_PATH so cases can call IMPL.<symbol>(...).
+_spec = importlib.util.spec_from_file_location('kcpos_impl', IMPL_PATH)
+IMPL = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(IMPL)
+
+# v8.8 symbol-alias bridge — when graph object id differs from the
+# impl-side function name (e.g. PascalCase "AllPrefixes" vs snake_case
+# "all_prefixes"), expose both names on IMPL so synthesized tests can
+# call IMPL.<OBJECT_ID>(...) regardless.
+if IMPL_SYMBOL and IMPL_SYMBOL != OBJECT_ID:
+    if hasattr(IMPL, IMPL_SYMBOL) and not hasattr(IMPL, OBJECT_ID):
+        setattr(IMPL, OBJECT_ID, getattr(IMPL, IMPL_SYMBOL))
+    elif hasattr(IMPL, OBJECT_ID) and not hasattr(IMPL, IMPL_SYMBOL):
+        setattr(IMPL, IMPL_SYMBOL, getattr(IMPL, OBJECT_ID))
+
+
+# Reset on module load — even a zero-test run produces a fresh trace
+# with the current implHash (mirrors JS behaviour).
+reset_trace()
+
+
+# _setup_globals holds setup port values so "global" extractor reads
+# get the values the case set up. Python has no globalThis-style
+# implicit binding; we use this dict instead.
+_setup_globals = {}
+
+
+def resolve_path(obj, path):
+    if obj is None:
+        return None
+    if not path:
+        return obj
+    cur = obj
+    for s in path.split('.'):
+        if cur is None:
+            return None
+        if isinstance(cur, dict) and s in cur:
+            cur = cur[s]
+        elif hasattr(cur, s):
+            cur = getattr(cur, s)
+        else:
+            try:
+                cur = cur[int(s)] if isinstance(cur, (list, tuple)) else None
+            except (ValueError, IndexError, TypeError):
+                return None
+    return cur
+
+
+def snapshot_ports(ports, last_return, call_args):
+    out = {}
+    for p in ports:
+        ex = PORT_OBSERVATION.get(p, 'global')
+        if ex == 'side_effect':
+            out[p] = '__side_effect__'
+            continue
+        if ex == 'global':
+            out[p] = _setup_globals.get(p)
+            continue
+        if ex == 'return':
+            out[p] = last_return
+            continue
+        if ex.startswith('return.'):
+            out[p] = resolve_path(last_return, ex[len('return.'):])
+            continue
+        if ex.startswith('args.'):
+            rest = ex[len('args.'):]
+            dot = rest.find('.')
+            idx_str = rest if dot < 0 else rest[:dot]
+            sub = '' if dot < 0 else rest[dot + 1:]
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                out[p] = None
+                continue
+            arg = call_args[idx] if call_args and 0 <= idx < len(call_args) else None
+            val = resolve_path(arg, sub) if sub else arg
+            if val is None and p in _setup_globals:
+                val = _setup_globals[p]
+            out[p] = val
+            continue
+        out[p] = None
+    return out
+
+
+def _eq_json(a, b):
+    """Structural equality via canonical JSON. Matches the JS harness's
+    JSON.stringify(a) === JSON.stringify(b) check, modulo type tolerance
+    for int vs float (Python's 1 == 1.0 is True, JSON's "1" vs "1.0"
+    isn't). For tests this tolerance is what users expect."""
+    return a == b
+
+
+def check_expectation(exp, value):
+    if 'equals' in exp:
+        expected = exp['equals']
+        return (_eq_json(value, expected), 'expected ' + repr(expected) + ', got ' + repr(value))
+    if 'between' in exp:
+        lo, hi = exp['between']
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and lo <= value <= hi
+        return (ok, 'expected in [' + str(lo) + ',' + str(hi) + '], got ' + repr(value))
+    if 'type' in exp:
+        t = exp['type']
+        if t == 'integer':
+            ok = isinstance(value, int) and not isinstance(value, bool)
+        elif t == 'number':
+            ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+        elif t == 'string':
+            ok = isinstance(value, str)
+        elif t == 'boolean':
+            ok = isinstance(value, bool)
+        elif t == 'array':
+            ok = isinstance(value, (list, tuple))
+        elif t == 'object':
+            ok = isinstance(value, dict) or value is None
+        else:
+            ok = False
+        return (ok, 'expected type ' + t + ', got ' + type(value).__name__)
+    if 'enum' in exp:
+        ok = any(value == v for v in exp['enum'])
+        return (ok, 'expected one of ' + repr(exp['enum']) + ', got ' + repr(value))
+    if 'truthy' in exp:
+        ok = bool(value) == bool(exp['truthy'])
+        return (ok, 'expected ' + ('truthy' if exp['truthy'] else 'falsy') + ', got ' + repr(value))
+    return (True, '')
+
+
+class HarnessTests(unittest.TestCase):
+    pass
+
+
+def _make_test(case):
+    def _t(self):
+        # 1. setup — assign each setup.set name into _setup_globals so
+        #    snapshot_ports (extractor="global") can read it back. We
+        #    do NOT touch the impl module's namespace; the case "call"
+        #    string is responsible for any arguments it needs.
+        for s in case.get('setup', []) or []:
+            _setup_globals[s['set']] = s['value']
+        # 2. snapshot inputs BEFORE the call
+        inputs = snapshot_ports(INPUT_PORTS, None, None)
+        # 3. invoke the case's "call" string as a Python expression.
+        #    'IMPL' resolves to the loaded impl module; any setup
+        #    globals are NOT auto-injected — cases should pass values
+        #    through their own arguments.
+        call_error = None
+        last_return = None
+        try:
+            last_return = eval(case['call'], {'IMPL': IMPL, '__builtins__': __builtins__})
+        except Exception as e:
+            call_error = e
+        # 4. snapshot outputs
+        outputs = snapshot_ports(OUTPUT_PORTS, last_return, None)
+        # 5. trace BEFORE assertions (D2/B1 ordering invariant — even
+        #    when the assert below raises, the trace is already on disk)
+        append_trace(inputs, outputs)
+        if call_error is not None:
+            raise call_error
+        # 6. assertions
+        for exp in (case.get('expect', []) or []):
+            port = exp.get('port', '')
+            dot = port.find('.')
+            top = port if dot < 0 else port[:dot]
+            rest = '' if dot < 0 else port[dot + 1:]
+            v = resolve_path(outputs.get(top), rest) if rest else outputs.get(top)
+            ok, msg = check_expectation(exp, v)
+            self.assertTrue(ok, '[' + port + '] ' + msg)
+    return _t
+
+
+def _safe_method_name(name, idx):
+    out = []
+    for ch in (name or ''):
+        out.append(ch if (ch.isalnum() or ch == '_') else '_')
+    s = ''.join(out).strip('_')
+    if not s:
+        s = 'case'
+    return 'test_' + str(idx) + '_' + s
+
+
+for _i, _c in enumerate(CASES):
+    setattr(HarnessTests, _safe_method_name(_c.get('name', ''), _i), _make_test(_c))
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
+`

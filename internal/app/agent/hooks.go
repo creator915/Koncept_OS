@@ -35,6 +35,42 @@ func hookInternalErr(hookName, reason string) string {
 	)
 }
 
+// parseMergeObjectArgs decodes a graph_merge_object argsJSON into its
+// id and patch map. Accepts patch as EITHER a JSON-encoded string
+// (the original tool contract: `{"patch": "{\"status\":\"confirmed\"}"}`)
+// OR a nested JSON object (`{"patch": {"status": "confirmed"}}`). LLMs
+// frequently send the latter despite the schema declaring string, and
+// the four hooks that decode this field would all bail with "could not
+// run" warnings when they did — disengaging anti-theater enforcement
+// at the very moment confirmed was being asserted.
+func parseMergeObjectArgs(argsJSON string) (string, map[string]any, error) {
+	var args struct {
+		ID    string          `json:"id"`
+		Patch json.RawMessage `json:"patch"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", nil, fmt.Errorf("argsJSON parse: %w", err)
+	}
+	if len(args.Patch) == 0 {
+		return args.ID, nil, nil
+	}
+	// Try object form first (what schema-non-compliant LLMs send).
+	var asObj map[string]any
+	if err := json.Unmarshal(args.Patch, &asObj); err == nil {
+		return args.ID, asObj, nil
+	}
+	// Fall back to stringified-JSON form (what the schema declares).
+	var asStr string
+	if err := json.Unmarshal(args.Patch, &asStr); err != nil {
+		return args.ID, nil, fmt.Errorf("patch field must be JSON object or JSON-encoded string")
+	}
+	var nested map[string]any
+	if err := json.Unmarshal([]byte(asStr), &nested); err != nil {
+		return args.ID, nil, fmt.Errorf("patch JSON parse: %w", err)
+	}
+	return args.ID, nested, nil
+}
+
 // SpecHook is the contract for "did the agent's last action need follow-up
 // that the agent did not perform?" — a post-tool-call audit. If a hook
 // returns a non-empty string, the loop injects it as a user message into
@@ -125,16 +161,12 @@ func (h *confirmedImplHook) After(toolName, argsJSON, _ string) string {
 	if toolName != "graph_merge_object" {
 		return ""
 	}
-	var args struct {
-		ID    string `json:"id"`
-		Patch string `json:"patch"`
+	id, patch, err := parseMergeObjectArgs(argsJSON)
+	if err != nil {
+		return hookInternalErr("confirmed-impl", err.Error())
 	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return hookInternalErr("confirmed-impl", fmt.Sprintf("argsJSON parse: %v", err))
-	}
-	var patch map[string]any
-	if err := json.Unmarshal([]byte(args.Patch), &patch); err != nil {
-		return hookInternalErr("confirmed-impl", fmt.Sprintf("patch JSON parse: %v", err))
+	if patch == nil {
+		return ""
 	}
 	statusVal, hasStatus := patch["status"]
 	if !hasStatus {
@@ -154,9 +186,9 @@ func (h *confirmedImplHook) After(toolName, argsJSON, _ string) string {
 		if err != nil {
 			return hookInternalErr("confirmed-impl", fmt.Sprintf("graph load: %v", err))
 		}
-		obj, present := g.Objects[args.ID]
+		obj, present := g.Objects[id]
 		if !present {
-			return hookInternalErr("confirmed-impl", fmt.Sprintf("object %q not found in graph mid-hook (race?)", args.ID))
+			return hookInternalErr("confirmed-impl", fmt.Sprintf("object %q not found in graph mid-hook (race?)", id))
 		}
 		if obj.Impl != nil {
 			implPath = *obj.Impl
@@ -168,14 +200,14 @@ func (h *confirmedImplHook) After(toolName, argsJSON, _ string) string {
 				"(neither in this patch nor in current graph). "+
 				"A confirmed object must point at the file containing its implementation. "+
 				"Required next turn: graph_merge_object id=%q patch='{\"impl\":\"<file>\"}' before declaring confirmed.",
-			args.ID, args.ID,
+			id, id,
 		)
 	}
 	if !fileExistsAndNonEmpty(implPath) {
 		return fmt.Sprintf(
 			"[confirmed-impl] object %q was set to status=confirmed with impl=%q but that file is missing or empty on disk. "+
 				"Required next turn: write the implementation, then re-run merge if needed.",
-			args.ID, implPath,
+			id, implPath,
 		)
 	}
 	return ""
@@ -339,16 +371,12 @@ func (h *statusTransitionHook) After(toolName, argsJSON, result string) string {
 	if strings.HasPrefix(result, "error:") {
 		return ""
 	}
-	var args struct {
-		ID    string `json:"id"`
-		Patch string `json:"patch"`
+	id, patch, err := parseMergeObjectArgs(argsJSON)
+	if err != nil {
+		return hookInternalErr("status-transition", err.Error())
 	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return hookInternalErr("status-transition", fmt.Sprintf("argsJSON parse: %v", err))
-	}
-	var patch map[string]any
-	if err := json.Unmarshal([]byte(args.Patch), &patch); err != nil {
-		return hookInternalErr("status-transition", fmt.Sprintf("patch JSON parse: %v", err))
+	if patch == nil {
+		return ""
 	}
 	statusVal, hasStatus := patch["status"]
 	if !hasStatus {
@@ -364,11 +392,11 @@ func (h *statusTransitionHook) After(toolName, argsJSON, result string) string {
 	}
 	var from string
 	if toolName == "graph_merge_attribute" {
-		if attr, ok := g.Attributes[args.ID]; ok {
+		if attr, ok := g.Attributes[id]; ok {
 			from = attr.Status
 		}
 	} else {
-		if obj, ok := g.Objects[args.ID]; ok {
+		if obj, ok := g.Objects[id]; ok {
 			from = obj.Status
 		}
 	}
@@ -390,7 +418,7 @@ func (h *statusTransitionHook) After(toolName, argsJSON, result string) string {
 		return fmt.Sprintf(
 			"[status-transition] entity %q is in status %q (terminal); transition to %q is not allowed. "+
 				"To revisit a confirmed entity, roll back the session that confirmed it instead.",
-			args.ID, from, to,
+			id, from, to,
 		)
 	}
 	if to != expectedNext {
@@ -398,7 +426,7 @@ func (h *statusTransitionHook) After(toolName, argsJSON, result string) string {
 			"[status-transition] entity %q tried %s → %s, but the only legal next step is %s. "+
 				"Status must follow declared → implementing → confirmed (docs/TypeCalculator.md §5.2). "+
 				"Required next turn: graph_merge_<kind> with patch '{\"status\":%q}' first, finish the implementation, then advance to %q.",
-			args.ID, from, to, expectedNext, expectedNext, to,
+			id, from, to, expectedNext, expectedNext, to,
 		)
 	}
 	return ""
@@ -427,16 +455,12 @@ func (h *typecalcUseHook) After(toolName, argsJSON, _ string) string {
 	if toolName != "graph_merge_object" {
 		return ""
 	}
-	var args struct {
-		ID    string `json:"id"`
-		Patch string `json:"patch"`
+	id, patch, err := parseMergeObjectArgs(argsJSON)
+	if err != nil {
+		return hookInternalErr("typecalc-use", err.Error())
 	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return hookInternalErr("typecalc-use", fmt.Sprintf("argsJSON parse: %v", err))
-	}
-	var patch map[string]any
-	if err := json.Unmarshal([]byte(args.Patch), &patch); err != nil {
-		return hookInternalErr("typecalc-use", fmt.Sprintf("patch JSON parse: %v", err))
+	if patch == nil {
+		return ""
 	}
 	statusVal, hasStatus := patch["status"]
 	if !hasStatus {
@@ -445,7 +469,7 @@ func (h *typecalcUseHook) After(toolName, argsJSON, _ string) string {
 	if s, _ := statusVal.(string); s != graph.StatusConfirmed {
 		return ""
 	}
-	if typecalcEvidenceExists(args.ID) {
+	if typecalcEvidenceExists(id) {
 		return ""
 	}
 	return fmt.Sprintf(
@@ -456,7 +480,7 @@ func (h *typecalcUseHook) After(toolName, argsJSON, _ string) string {
 			"actual implementation payload, then re-issue the merge. If you have already merged, "+
 			"the evidence file will be created on the next typecalc call and the next finish gate "+
 			"will pass — but if you skip this step the gate at root-finish will block you.",
-		args.ID, typecalcEvidenceDirRel, args.ID, args.ID,
+		id, typecalcEvidenceDirRel, id, id,
 	)
 }
 
@@ -498,16 +522,12 @@ func (h *objectGateHook) After(toolName, argsJSON, _ string) string {
 	if toolName != "graph_merge_object" {
 		return ""
 	}
-	var args struct {
-		ID    string `json:"id"`
-		Patch string `json:"patch"`
+	id, patch, err := parseMergeObjectArgs(argsJSON)
+	if err != nil {
+		return hookInternalErr("object-gate", err.Error())
 	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return hookInternalErr("object-gate", fmt.Sprintf("argsJSON parse: %v", err))
-	}
-	var patch map[string]any
-	if err := json.Unmarshal([]byte(args.Patch), &patch); err != nil {
-		return hookInternalErr("object-gate", fmt.Sprintf("patch JSON parse: %v", err))
+	if patch == nil {
+		return ""
 	}
 	statusVal, hasStatus := patch["status"]
 	if !hasStatus {
@@ -521,12 +541,12 @@ func (h *objectGateHook) After(toolName, argsJSON, _ string) string {
 		return hookInternalErr("object-gate", fmt.Sprintf("graph load: %v", err))
 	}
 	cwd, _ := os.Getwd()
-	issues, _ := workflow.CheckObjectGate(g, args.ID, cwd)
+	issues, _ := workflow.CheckObjectGate(g, id, cwd)
 	if len(issues) == 0 {
 		return ""
 	}
 	var b []byte
-	b = append(b, fmt.Sprintf("[object-gate] %s flipped to status=confirmed but per-object gate found %d issue(s):\n", args.ID, len(issues))...)
+	b = append(b, fmt.Sprintf("[object-gate] %s flipped to status=confirmed but per-object gate found %d issue(s):\n", id, len(issues))...)
 	for _, iss := range issues {
 		b = append(b, "  ✗ "...)
 		b = append(b, iss...)

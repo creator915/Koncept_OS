@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/domain/graph"
+	"github.com/creator915/Koncept_OS/internal/domain/protocol"
 	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 	"github.com/creator915/Koncept_OS/internal/app/workflow"
@@ -122,15 +123,17 @@ func graphCreateObjectTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name:        "graph_create_object",
-				Description: "Add a new object (function type / hyperedge) to K/graph.json. Errors if id already exists. Status starts as 'declared'.\n\nDefault `def` is `defs/<id>.ts` (TypeScript-first convention). For non-TS projects, pass `def` explicitly. After creation you must (a) create the def file with the function signature and (b) once implemented, call `graph_merge_object --patch '{\"impl\":\"<actual file>\",\"status\":\"confirmed\"}'` to mark the work done — otherwise the §root-deliver gate will block session finish.",
+				Description: "Add a new object (function type / hyperedge) to K/graph.json. Errors if id already exists. Status starts as 'declared'.\n\nDefault `def` is `defs/<id>.ts` (TypeScript-first convention). For non-TS projects, pass `def` explicitly.\n\nv9.5: storyPoints (Fibonacci scale 1/2/3/5/8/13) and storyRationale (≥10 chars) are required at creation time — they anchor decomposition discipline BEFORE writing begins. storyPoints ≥ 8 blocks status=implementing until graph_split_object decomposes the object. Scale: 1=arithmetic, 2=single loop, 3=multi-branch, 5=multi-step workflow, 8=must-split, 13=unrepresentable.\n\nAfter creation: (a) create the def file with the function signature and (b) once implemented, call `graph_merge_object --patch '{\"impl\":\"<actual file>\",\"status\":\"confirmed\"}'` to mark the work done — otherwise the §root-deliver gate will block session finish.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":     map[string]interface{}{"type": "string", "description": "PascalCase identifier, e.g. 'NormalizeWeather'."},
-						"intent": map[string]interface{}{"type": "string", "description": "Design intent — what this object computes."},
-						"def":    map[string]interface{}{"type": "string", "description": "Path to the signature file. Defaults to 'defs/<id>.ts' (TS-first spec). Override for non-TS projects."},
+						"id":             map[string]interface{}{"type": "string", "description": "PascalCase identifier, e.g. 'NormalizeWeather'."},
+						"intent":         map[string]interface{}{"type": "string", "description": "Design intent — what this object computes."},
+						"def":            map[string]interface{}{"type": "string", "description": "Path to the signature file. Defaults to 'defs/<id>.ts' (TS-first spec). Override for non-TS projects."},
+						"storyPoints":    map[string]interface{}{"type": "integer", "description": "Required (v9.5). Fibonacci scale: 1/2/3/5/8/13. Pick the smallest value the object plausibly fits — overestimates force unnecessary splits; underestimates hide growing complexity until the chain blows up at confirm."},
+						"storyRationale": map[string]interface{}{"type": "string", "description": "Required (v9.5, ≥10 chars). One sentence justifying the storyPoints choice, e.g. 'single loop with one boundary check' for a 2-point object."},
 					},
-					"required": []string{"id", "intent"},
+					"required": []string{"id", "intent", "storyPoints", "storyRationale"},
 				},
 			},
 		},
@@ -138,21 +141,60 @@ func graphCreateObjectTool() toolcall.Tool {
 			id, _ := args["id"].(string)
 			intent, _ := args["intent"].(string)
 			def, _ := args["def"].(string)
+			storyRationale, _ := args["storyRationale"].(string)
+			// JSON numbers arrive as float64 from encoding/json; tolerate
+			// the LLM serializing storyPoints as either number or string.
+			var storyPoints int
+			spPresent := false
+			switch v := args["storyPoints"].(type) {
+			case float64:
+				storyPoints = int(v)
+				spPresent = true
+			case int:
+				storyPoints = v
+				spPresent = true
+			case string:
+				// Some providers stringify integers in tool arguments.
+				if v != "" {
+					if _, err := fmt.Sscanf(v, "%d", &storyPoints); err == nil {
+						spPresent = true
+					}
+				}
+			}
 			if id == "" {
 				return "", fmt.Errorf("id required")
 			}
 			if intent == "" {
 				return "", fmt.Errorf("intent required")
 			}
+			if !spPresent {
+				return "", fmt.Errorf("storyPoints required (v9.5) — Fibonacci scale 1/2/3/5/8/13. Pick the smallest value the object plausibly fits")
+			}
+			if !protocol.ValidStoryPoints(storyPoints) {
+				return "", fmt.Errorf("storyPoints must be one of 1, 2, 3, 5, 8, 13 (Fibonacci scale); got %d", storyPoints)
+			}
+			if len(storyRationale) < 10 {
+				return "", fmt.Errorf("storyRationale required (v9.5, >=10 chars) — one sentence justifying the chosen storyPoints; got %d chars", len(storyRationale))
+			}
 			if def == "" {
 				def = "defs/" + id + ".ts"
 			}
 			if err := mutateGraph(func(g *graph.Graph) error {
-				return g.AddObject(id, graph.NewObject(def, intent))
+				if err := g.AddObject(id, graph.NewObject(def, intent)); err != nil {
+					return err
+				}
+				// AddObject writes a baseline Object via NewObject — backfill
+				// storyPoints/storyRationale post-add to avoid widening
+				// NewObject's signature (8+ callers, mostly tests).
+				obj := g.Objects[id]
+				obj.StoryPoints = storyPoints
+				obj.StoryRationale = storyRationale
+				g.Objects[id] = obj
+				return nil
 			}); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("created object %s (def=%s, status=declared)", id, def), nil
+			return fmt.Sprintf("created object %s (def=%s, status=declared, storyPoints=%d)", id, def, storyPoints), nil
 		},
 	}
 }
@@ -426,20 +468,23 @@ func graphMergeAttributeTool() toolcall.Tool {
 		},
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			id, _ := args["id"].(string)
-			patchStr, _ := args["patch"].(string)
 			sessionID, _ := args["session_id"].(string)
-			if id == "" || patchStr == "" {
-				return "", fmt.Errorf("id and patch required")
+			if id == "" {
+				return "", fmt.Errorf("id required")
 			}
-			var patch map[string]any
-			if err := json.Unmarshal([]byte(patchStr), &patch); err != nil {
-				return "", fmt.Errorf("patch must be valid JSON object: %w", err)
+			// Accept patch as string or object — see graph_merge_object
+			// Run for the rationale (LLMs often send nested object form
+			// despite the schema declaring string).
+			patch, err := decodePatchArg(args["patch"])
+			if err != nil {
+				return "", err
 			}
 			restore, err := withTempFocus(sessionID)
 			if err != nil {
 				return "", err
 			}
 			defer restore()
+			injectStatusSessionFromFocus(patch)
 			if err := mutateGraph(func(g *graph.Graph) error {
 				return g.MergeAttribute(id, patch)
 			}); err != nil {
@@ -447,6 +492,58 @@ func graphMergeAttributeTool() toolcall.Tool {
 			}
 			return fmt.Sprintf("merged %d field(s) into attribute %s", len(patch), id), nil
 		},
+	}
+}
+
+// injectStatusSessionFromFocus mutates patch in place: when the agent
+// merges `status` but not `statusSession`, fill the latter from the
+// currently-focused session id (set by the optional session_id arg via
+// withTempFocus, else the persistent project focus). Without this,
+// agents that drive status=confirmed via direct graph_merge_attribute /
+// graph_merge_object — the common path; the confirm_object service's
+// MarkConfirmed only covers chained confirmation — leave statusSession
+// null, erasing the audit trail of "which session confirmed this entity".
+//
+// Honor explicit values in patch, including explicit null: if the agent
+// passed statusSession, do not overwrite. If there is no current focus
+// (atypical — usually means the project has no active session at all),
+// leave statusSession unset to avoid lying about provenance.
+func injectStatusSessionFromFocus(patch map[string]any) {
+	if _, hasStatus := patch["status"]; !hasStatus {
+		return
+	}
+	if _, hasSess := patch["statusSession"]; hasSess {
+		return
+	}
+	focus, _ := persistence.GetFocus(persistence.SessionDefaultDir)
+	if focus == "" {
+		return
+	}
+	patch["statusSession"] = focus
+}
+
+// decodePatchArg accepts either a JSON-encoded string (schema-compliant)
+// or a nested JSON object (what LLMs often send), returning the patch
+// map. Centralized here so graph_merge_attribute and graph_merge_object
+// stay in sync; see graph_merge_object Run for the full rationale.
+func decodePatchArg(raw any) (map[string]any, error) {
+	switch v := raw.(type) {
+	case string:
+		if v == "" {
+			return nil, fmt.Errorf("patch required")
+		}
+		var patch map[string]any
+		if err := json.Unmarshal([]byte(v), &patch); err != nil {
+			return nil, fmt.Errorf("patch must be valid JSON object: %w", err)
+		}
+		return patch, nil
+	case map[string]any:
+		if len(v) == 0 {
+			return nil, fmt.Errorf("patch required")
+		}
+		return v, nil
+	default:
+		return nil, fmt.Errorf("patch required (string or object)")
 	}
 }
 
@@ -470,14 +567,20 @@ func graphMergeObjectTool() toolcall.Tool {
 		},
 		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
 			id, _ := args["id"].(string)
-			patchStr, _ := args["patch"].(string)
 			sessionID, _ := args["session_id"].(string)
-			if id == "" || patchStr == "" {
-				return "", fmt.Errorf("id and patch required")
+			if id == "" {
+				return "", fmt.Errorf("id required")
 			}
-			var patch map[string]any
-			if err := json.Unmarshal([]byte(patchStr), &patch); err != nil {
-				return "", fmt.Errorf("patch must be valid JSON object: %w", err)
+			// Accept patch as EITHER a JSON-encoded string (schema-compliant)
+			// OR a nested JSON object. LLMs frequently send the latter
+			// despite the schema declaring string; without dual-accept the
+			// agent burns a turn AND the four hooks downstream of merge
+			// (confirmed-impl, typecalc-use, object-gate, status-transition)
+			// disengage that turn with "could not run" warnings, silencing
+			// the very anti-theater enforcement we need active at confirm.
+			patch, err := decodePatchArg(args["patch"])
+			if err != nil {
+				return "", err
 			}
 			// 2026-05-09 v8.5 — typecalc-use becomes BLOCKING for the
 			// status=confirmed transition. Previously the typecalc-use
@@ -588,6 +691,7 @@ func graphMergeObjectTool() toolcall.Tool {
 				return "", err
 			}
 			defer restore()
+			injectStatusSessionFromFocus(patch)
 			if err := mutateGraph(func(g *graph.Graph) error {
 				return g.MergeObject(id, patch)
 			}); err != nil {
