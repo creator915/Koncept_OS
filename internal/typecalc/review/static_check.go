@@ -303,8 +303,11 @@ func StaticCheck(cwd string, g *graph.Graph, objID string) core.CheckReport {
 	// evidence (4.3 spec-stale storm). Fall back to SourceHash when
 	// SymbolHash isn't available (non-HTML impl, symbol extraction
 	// failure, evidence from a pre-v9.0.2 run).
-	// evidence-stale rule
+	// v10: when implContent is set, the chain reads from graph (not files),
+	// so evidence-stale doesn't apply — skip it.
 	switch {
+	case obj.ImplContent != "":
+		rb.Skip("evidence-stale", "v10-impl-content")
 	case obj.Impl == nil || *obj.Impl == "":
 		rb.Skip("evidence-stale", "impl-missing")
 	case rec == nil:
@@ -389,7 +392,12 @@ func StaticCheck(cwd string, g *graph.Graph, objID string) core.CheckReport {
 		rb.Skip("spec-stale", "spec-missing")
 	} else {
 		rb.Pass("spec-missing")
-		if obj.Impl == nil {
+		// v10: implContent means chain reads impl from graph, not from file.
+		// Spec staleness (does description still match impl?) is irrelevant
+		// in v10 mode because evidence comparison uses content hash.
+		if obj.ImplContent != "" {
+			rb.Skip("spec-stale", "v10-impl-content")
+		} else if obj.Impl == nil {
 			rb.Skip("spec-stale", "impl-missing")
 		} else {
 			path := *obj.Impl

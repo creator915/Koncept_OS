@@ -83,27 +83,44 @@ func typecalcCompileTool() toolcall.Tool {
 			if !ok {
 				return "", fmt.Errorf("object %q not found in K/graph.json", objectID)
 			}
-			if obj.Impl == nil || *obj.Impl == "" {
-				return "", fmt.Errorf("object %q has no impl path set", objectID)
+			if obj.Impl == nil && obj.ImplContent == "" {
+				return "", fmt.Errorf("object %q has no impl path or implContent set", objectID)
 			}
-			// v9.0.5: when implFragment is set, the per-object code lives
-			// there (e.g. K/frags/Foo.js), and obj.Impl is the assembled
-			// deliverable (e.g. index.html) which won't have THIS object's
-			// code until session_build runs in R2. Compile against the
-			// fragment so child sessions get meaningful evidence during
-			// their confirm_object loop, not against an empty / not-yet-
-			// built deliverable.
-			compileTarget := *obj.Impl
-			if obj.ImplFragment != nil && *obj.ImplFragment != "" {
-				compileTarget = *obj.ImplFragment
+			var implBody string
+			var compileTarget string
+			// v10: prefer ImplContent directly from graph (source of truth).
+			// Fall back to file-based reading for backward compatibility.
+			if obj.ImplContent != "" {
+				implBody = obj.ImplContent
+				compileTarget = "(implContent)" // for error messages
+			} else {
+				// v9.0.5: when implFragment is set, the per-object code lives
+				// there (e.g. K/frags/Foo.js), and obj.Impl is the assembled
+				// deliverable (e.g. index.html) which won't have THIS object's
+				// code until session_build runs in R2. Compile against the
+				// fragment so child sessions get meaningful evidence during
+				// their confirm_object loop, not against an empty / not-yet-
+				// built deliverable.
+				compileTarget = *obj.Impl
+				if obj.ImplFragment != nil && *obj.ImplFragment != "" {
+					compileTarget = *obj.ImplFragment
+				}
+				var err error
+				implBodyBytes, err := os.ReadFile(compileTarget)
+				if err != nil {
+					return "", fmt.Errorf("read impl %s: %w", compileTarget, err)
+				}
+				implBody = string(implBodyBytes)
 			}
-			implBody, err := os.ReadFile(compileTarget)
-			if err != nil {
-				return "", fmt.Errorf("read impl %s: %w", compileTarget, err)
+			// Language: prefer ImplLang (v10) if set, else infer from file extension.
+			var langTag core.Lang
+			if obj.ImplLang != "" {
+				langTag = core.Lang(obj.ImplLang)
+			} else {
+				langTag = core.LangFromExt(extOf(compileTarget))
 			}
-			langTag := core.LangFromExt(extOf(compileTarget))
 			if langTag == core.LangNone {
-				return "", fmt.Errorf("cannot infer language from impl extension %q", compileTarget)
+				return "", fmt.Errorf("cannot infer language from impl extension %q (set implLang in graph or use a recognized extension)", compileTarget)
 			}
 			tv := core.New(core.KindCode, string(implBody)).
 				WithState(core.StateUncompiled).
@@ -230,8 +247,8 @@ func typecalcTestTool() toolcall.Tool {
 			if !ok {
 				return "", fmt.Errorf("object %q not found in K/graph.json", objectID)
 			}
-			if obj.Impl == nil || *obj.Impl == "" {
-				return "", fmt.Errorf("object %q has no impl path set", objectID)
+			if obj.Impl == nil && obj.ImplContent == "" {
+				return "", fmt.Errorf("object %q has no impl path or implContent set", objectID)
 			}
 			// v9.3: HTML deliverables are verified by runtime_smoke, not
 			// the synth/test chain. See typecalc_synthesize_tests for the
@@ -239,16 +256,30 @@ func typecalcTestTool() toolcall.Tool {
 			// implFragment is set, the agent should call confirm_object —
 			// that routes through the JS-fragment path automatically.
 			// Direct typecalc_test on an HTML impl is a category error.
-			if strings.HasSuffix(strings.ToLower(*obj.Impl), ".html") {
+			if obj.Impl != nil && strings.HasSuffix(strings.ToLower(*obj.Impl), ".html") {
 				return "", fmt.Errorf("typecalc_test: object %q has impl=%s (HTML deliverable). HTML objects are verified by runtime_smoke — call `runtime_smoke object_id=%s` instead. (If you have an extracted JS fragment in implFragment, invoke confirm_object to use it.)", objectID, *obj.Impl, objectID)
 			}
-			testTarget := *obj.Impl
-			cleanupTempHTML := func() {}
-			defer cleanupTempHTML()
-			implBody, err := os.ReadFile(testTarget)
-			if err != nil {
-				return "", fmt.Errorf("read impl %s: %w", testTarget, err)
+			var implBody string
+			var testTarget string
+			var cleanupTempHTML func()
+			// v10: prefer ImplContent from graph (source of truth).
+			// Write to a temp file for the harness (which needs a file path).
+			if obj.ImplContent != "" {
+				implBody = obj.ImplContent
+				testTarget = writeTempImpl(objectID, obj.ImplContent)
+				cleanupTempHTML = func() {
+					os.Remove(testTarget)
+				}
+			} else {
+				testTarget = *obj.Impl
+				implBodyBytes, err := os.ReadFile(testTarget)
+				if err != nil {
+					return "", fmt.Errorf("read impl %s: %w", testTarget, err)
+				}
+				implBody = string(implBodyBytes)
+				cleanupTempHTML = func() {}
 			}
+			defer cleanupTempHTML()
 			t, ok := core.ReadTests(objectID)
 			if !ok || (len(t.Cases) == 0 && len(t.TestCode) == 0) {
 				return "", fmt.Errorf("no synthesized tests for %s — call typecalc_synthesize_tests object_id=%q first", objectID, objectID)
@@ -557,4 +588,31 @@ func renderTypedValue(tv *core.TypedValue) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("TYPE: %s\n%s", tv.Tag(), string(body)), nil
+}
+
+// writeTempImpl writes implContent to a temp file with an appropriate
+// extension based on the object's ImplLang. Returns the temp file path.
+// Used when running tests with ImplContent (v10 source-of-truth path) —
+// the test harness needs a file path to execute against.
+func writeTempImpl(objectID, implContent string) string {
+	ext := ".txt"
+	switch {
+	case strings.Contains(implContent, "function "):
+		ext = ".js"
+	case strings.HasPrefix(strings.TrimSpace(implContent), "def "):
+		ext = ".py"
+	case strings.HasPrefix(strings.TrimSpace(implContent), "func "):
+		ext = ".go"
+	}
+	f, err := os.CreateTemp("", "kcpos-"+objectID+"-*"+ext)
+	if err != nil {
+		// Fallback: write to a persistent temp location
+		f, err = os.Create("/tmp/kcpos-" + objectID + ext)
+	}
+	if err != nil {
+		return ""
+	}
+	f.WriteString(implContent)
+	f.Close()
+	return f.Name()
 }

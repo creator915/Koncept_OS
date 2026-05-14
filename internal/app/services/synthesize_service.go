@@ -137,6 +137,7 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 				Intent:          obj.Intent,
 				Description:     spec.Description,
 				Signature:       string(defBody),
+				ImplSymbol:      obj.ImplSymbol,
 				Consumes:        obj.Consumes,
 				Produces:        obj.Produces,
 				Mutates:         obj.Mutates,

@@ -51,6 +51,18 @@ type Object struct {
 	// makes the mapping explicit: an agent writing camelCase functions
 	// declares it via graph_merge_object patch='{"implSymbol":"updatePhysics"}'.
 	ImplSymbol string `json:"implSymbol,omitempty"`
+	// ImplContent (v10) is the actual source code content directly stored
+	// in the graph node. This replaces the file-path indirect reference
+	// model (impl/implFragment). Files are now pure projections that can
+	// be regenerated from ImplContent. The chain reads ImplContent directly
+	// for verification; files do not participate in evidence.
+	ImplContent string `json:"implContent,omitempty"`
+	// ImplLang (v10) is the programming language of ImplContent, detected
+	// from the content. Valid values: TypeScript, JavaScript, Go, Python,
+	// Rust, Java, Haskell, HTML, or "" (unknown). Stored as string to
+	// avoid import cycle with core.Lang; conversion to core.Lang happens
+	// in the typecalc layer when needed.
+	ImplLang string `json:"implLang,omitempty"`
 	Consumes   []string `json:"consumes"`
 	Produces   []string `json:"produces"`
 	// Mutates names attributes the object reads AND writes in place
@@ -83,8 +95,17 @@ type Object struct {
 	Temporal        *Temporal         `json:"temporal"`
 	Preconditions   string            `json:"preconditions"`
 	Postconditions  string            `json:"postconditions"`
-	Status          string            `json:"status"`
-	StatusSession   *string           `json:"statusSession"`
+	// StoryPoints is the v9.5 decomposition size gauge using Fibonacci
+	// scale: 1/2/3/5/8/13. Objects with storyPoints >= 8 MUST be split
+	// (via graph_split_object) before status can move to implementing.
+	// See docs/experiments/v10-design-2026-05-13.md §6.
+	StoryPoints    int    `json:"storyPoints,omitempty"`
+	// StoryRationale explains WHY this object got its story point value
+	// (e.g. "单循环遍历前缀" for a 2-pointer algorithm). Required when
+	// storyPoints is set. Must be >= 10 characters.
+	StoryRationale string `json:"storyRationale,omitempty"`
+	Status         string `json:"status"`
+	StatusSession  *string `json:"statusSession"`
 }
 
 type Temporal struct {

@@ -97,6 +97,44 @@ const (
 // looped retrying the same write.
 const FileSizeLimitLines = 1500
 
+// StoryPointScale is the v9.5 Fibonacci-based complexity gauge for
+// objects. storyPoints >= 8 blocks status transition to implementing
+// until the object is split via graph_split_object. The scale is
+// anchored to real-code examples from batches v94/v93.
+//
+// Examples:
+//   - 1pt: pure arithmetic (`add(a,b)`, `int_to_str(n)`)
+//   - 2pt: single loop/iterate (`has_close_elements`, `all_prefixes`)
+//   - 3pt: multi-branch / boundary handling (`validate_email`, `PollInput`)
+//   - 5pt: multi-step workflow (`ComputeCamera`, `SaveLoad`)
+//   - 8pt: split point — must decompose (`GenerateWorld`, `RenderFrame`)
+//   - 13pt: unrepresentable — rewrite spec ("entire game loop", "Player subsystem")
+type StoryPointScale int
+
+const (
+	StoryPoint1  StoryPointScale = 1
+	StoryPoint2  StoryPointScale = 2
+	StoryPoint3  StoryPointScale = 3
+	StoryPoint5  StoryPointScale = 5
+	StoryPoint8  StoryPointScale = 8  // mandatory split threshold
+	StoryPoint13 StoryPointScale = 13 // unrepresentable
+)
+
+// ValidStoryPoints returns true if n is a valid Fibonacci story point.
+func ValidStoryPoints(n int) bool {
+	switch n {
+	case 1, 2, 3, 5, 8, 13:
+		return true
+	default:
+		return false
+	}
+}
+
+// StoryPointSplitThreshold is the minimum story point value that
+// requires decomposition before implementation. Objects with this
+// or higher points MUST be split via graph_split_object.
+const StoryPointSplitThreshold = 8
+
 // v9.2 — WaiverFloodThreshold* constants removed along with the
 // obstacle/waiver mechanism. The gate is now binary; there's no flood
 // to threshold against.

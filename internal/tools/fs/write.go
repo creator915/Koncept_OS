@@ -37,6 +37,20 @@ func writeFileTool() toolcall.Tool {
 			if path == "" {
 				return "", fmt.Errorf("path required")
 			}
+			// v10: graph 结构不通过 write_file 直接编辑。K/graph.json 和
+			// K/graph.* 是 chain 的 source of truth，直接写会导致图状态
+			// 与 evidence 脱钩。K/frags/* 也已废弃——implContent 必须通过
+			// graph_merge_object 写入（这样 chain 才能读到）。
+			dir := filepath.Dir(path)
+			base := filepath.Base(path)
+			if dir == "K" || strings.HasPrefix(dir, "K/") {
+				if base == "graph.json" || strings.HasPrefix(base, "graph.") {
+					return "", fmt.Errorf("write_file: K/graph.json 是图的 source of truth，不能直接写。修改图结构请用 graph_merge_object 或 graph_link_* 工具。")
+				}
+			}
+			if strings.HasPrefix(path, "K/frags/") {
+				return "", fmt.Errorf("write_file: K/frags/* 已废弃（v10）。代码内容请通过 graph_merge_object patch='{impl_content:\"...\"}' 写入，图会持有源码内容。")
+			}
 			if dir := filepath.Dir(path); dir != "" && dir != "." {
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					return "", err

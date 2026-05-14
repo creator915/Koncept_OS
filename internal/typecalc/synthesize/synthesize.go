@@ -21,6 +21,13 @@ type SynthesizeInputs struct {
 	Intent      string
 	Description string
 	Signature   string
+	// ImplSymbol is the actual function name in the impl source (e.g.
+	// "all_prefixes" for a Python object whose graph id is "AllPrefixes").
+	// When non-empty, the LLM uses this for the import/function name in
+	// generated test code. When empty, ObjectID is used as-is.
+	// v9.5: fixes HE/14 where PascalCase object id conflicted with
+	// snake_case Python function name in SPEC.
+	ImplSymbol string
 	// Consumes / Produces / Mutates carry the graph's port declarations
 	// so the LLM can name them consistently when emitting the runtime
 	// trace JSON.
@@ -171,7 +178,7 @@ Rules:
 
 1. Use the EXACT port names from the consumes/produces/mutates blocks. Setup port names should appear in consumes; expect port names should appear in produces or mutates.
 2. The "call" string is a single expression in the project's primary language. For JavaScript / HTML+script projects, write valid JS; for other languages, the harness may not be available yet — in that case fall back to the legacy raw-test-code mode by setting "testCode" instead of "cases".
-2a. CRITICAL — call-expression naming: for JS/HTML, the function name in "call" MUST match the graph object id EXACTLY (same case, same spelling) and MUST be prefixed with "IMPL.". The harness binds the impl module to globalThis.IMPL and looks up IMPL.<exactObjectId>. Common failure mode: synthesizer writes "IMPL.initGame(...)" while the graph object is "InitGame" — harness throws "is not a function" and every case fails. Always copy the object id verbatim from the "Object id:" header above.
+2a. CRITICAL — call-expression naming: for JS/HTML, the function name in "call" MUST match the graph object id EXACTLY (same case, same spelling) and MUST be prefixed with "IMPL.". The harness binds the impl module to globalThis.IMPL and looks up IMPL.<exactObjectId>. Common failure mode: synthesizer writes "IMPL.initGame(...)" while the graph object is "InitGame" — harness throws "is not a function" and every case fails. Always copy the object id verbatim from the "Object id:" header above. For Python or other languages: if an "ImplSymbol" header is present above, use that name (the impl-side function name) instead of the graph object id for imports and function calls. This resolves the common mismatch where the graph id is PascalCase ("AllPrefixes") but the actual Python function is snake_case ("all_prefixes").
 3. Cover: a typical happy-path case, boundary cases (empty, max value, edges of declared valueSpace), and any explicit invariants from the description.
 4. Each "case" should test ONE specific behavior. Use multiple cases for multiple invariants — do not pile assertions for unrelated behaviors into one case.
 5. The harness automatically: snapshots input ports before each call, snapshots output ports after, appends to .kcpos/typecalc-runtime/<id>.json BEFORE running assertions (so traces are captured even on assertion failure), and runs the assertions. You do NOT need to write any of that.
@@ -196,6 +203,9 @@ The host inspects the field and routes accordingly. Prefer "cases" — the harne
 func buildSynthesizePrompt(in SynthesizeInputs) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Object id: %s\nLanguage: %s\n\n", in.ObjectID, nonEmpty(in.Lang, "(unknown)"))
+	if in.ImplSymbol != "" {
+		fmt.Fprintf(&b, "ImplSymbol: %s  (use this for the function/import name in generated code — it differs from ObjectID)\n\n", in.ImplSymbol)
+	}
 	fmt.Fprintf(&b, "## Intent (immutable user contract)\n%s\n\n", nonEmpty(in.Intent, "(empty)"))
 	fmt.Fprintf(&b, "## Description (post-hoc behaviour catalogue)\n%s\n\n", nonEmpty(in.Description, "(none)"))
 	if in.Signature != "" {

@@ -8,6 +8,19 @@ You have these kinds of tools:
 
 **Object granularity guideline**: each object you create runs the full evidence chain (compile → describe → synthesize_tests → test → review). That cost is meaningful — roughly 4 LLM calls per object. Choose granularity accordingly: an object should correspond to a meaningfully testable contract (a pure function with clear inputs/outputs, a state transition with verifiable pre/post-conditions, etc.). Functions that only orchestrate other functions (game loops, dispatchers, glue) are POOR object candidates — their contract is "call X then Y", which has nothing to spec-derive tests against. Either fold them into the caller or accept that synthesize will return CANNOT_SYNTHESIZE. Target counts are in the protocol section above (ObjectsPerProjectMin..Max).
 
+**v9.5 — Story points (Fibonacci scale).** Every object MUST declare `storyPoints` (1/2/3/5/8/13) and `storyRationale` when created via `graph_create_object`. The scale anchors decomposition before writing begins:
+
+| Points | Complexity | Real examples |
+|--------|------------|---------------|
+| 1 | Pure arithmetic / literal transform | `add(a,b)`, `int_to_str(n)` |
+| 2 | Single loop or iteration | `has_close_elements`, `all_prefixes` |
+| 3 | Multi-branch / boundary handling | `validate_email`, `PollInput` |
+| 5 | Multi-step workflow | `ComputeCamera`, `SaveLoad` |
+| **8** | **Split required — must decompose** | `GenerateWorld`, `RenderFrame` |
+| 13 | Unrepresentable — rewrite spec | "entire game loop", "Player subsystem" |
+
+**Rule**: objects with `storyPoints >= 8` are BLOCKED from `status=implementing` until split via `graph_split_object`. The 8/13 split is NOT advisory — the gate enforces it. When in doubt, prefer smaller: a 5-point object that turns out to need 8 is a failed decomposition; an 8-point object that splits cleanly into two 3-point objects is a successful one.
+
   **Edge types between objects and attributes**:
   - `consumes` — read-only input (graph_link_consume)
   - `produces` — fresh output, replaces prior value (graph_link_produce)

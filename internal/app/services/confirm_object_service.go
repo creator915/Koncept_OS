@@ -307,6 +307,12 @@ func (p typecalchainProductionDeps) toDeps() chains.Deps {
 		},
 
 		MarkConfirmed: func(ctx context.Context, id string) error {
+			// Get current session for audit trail.
+			currentSession, _ := persistence.GetFocus(persistence.SessionDefaultDir)
+			sessionPtr := (*string)(nil)
+			if currentSession != "" {
+				sessionPtr = &currentSession
+			}
 			return mutateGraph(func(g *graph.Graph) error {
 				obj, ok := g.Objects[id]
 				if !ok {
@@ -318,10 +324,10 @@ func (p typecalchainProductionDeps) toDeps() chains.Deps {
 				// sequence here so confirm_object can drive it.
 				if obj.Status == graph.StatusDeclared {
 					obj.Status = graph.StatusImplementing
-					obj.StatusSession = nil
+					obj.StatusSession = sessionPtr
 				}
 				obj.Status = graph.StatusConfirmed
-				obj.StatusSession = nil
+				obj.StatusSession = sessionPtr
 				g.Objects[id] = obj
 				return nil
 			})

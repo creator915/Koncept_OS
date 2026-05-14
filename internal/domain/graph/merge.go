@@ -22,12 +22,16 @@ var mergeableObjectFields = map[string]bool{
 	"impl":            true,
 	"implFragment":    true,
 	"implSymbol":      true,
+	"implContent":     true,  // v10: direct content storage
+	"implLang":        true,  // v10: detected language
 	"status":          true,
 	"statusSession":   true,
 	"temporal":        true,
 	"preconditions":   true,
 	"postconditions":  true,
 	"portObservation": true,
+	"storyPoints":     true,
+	"storyRationale":  true,
 }
 
 // MergeAttribute applies a partial JSON patch to an existing attribute.
@@ -104,7 +108,7 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 	}
 	for k := range patch {
 		if !mergeableObjectFields[k] {
-			return fmt.Errorf("object merge: field %q is not mergeable (allowed: intent/impl/implFragment/implSymbol/status/statusSession/temporal/preconditions/postconditions/portObservation)", k)
+			return fmt.Errorf("object merge: field %q is not mergeable (allowed: intent/impl/implFragment/implSymbol/implContent/implLang/status/statusSession/temporal/preconditions/postconditions/portObservation/storyPoints/storyRationale)", k)
 		}
 	}
 	if v, has := patch["intent"]; has {
@@ -146,6 +150,11 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 		}
 		if err := validStatusTransition(o.Status, s); err != nil {
 			return fmt.Errorf("object %q: %w", id, err)
+		}
+		// v9.5: storyPoints >= 8 means the object must be split before
+		// implementation can begin. Block declared -> implementing.
+		if o.Status == StatusDeclared && s == StatusImplementing && o.StoryPoints >= 8 {
+			return fmt.Errorf("object %q has storyPoints=%d (≥8) and must be split via graph_split_object before implementation begins", id, o.StoryPoints)
 		}
 		o.Status = s
 	}
@@ -198,6 +207,55 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 			out[k] = s
 		}
 		o.PortObservation = out
+	}
+	// storyPoints: Fibonacci values only (1, 2, 3, 5, 8, 13)
+	if v, has := patch["storyPoints"]; has {
+		f, ok := v.(float64)
+		if !ok {
+			return fmt.Errorf("storyPoints must be a number")
+		}
+		n := int(f)
+		validSP := map[int]bool{1: true, 2: true, 3: true, 5: true, 8: true, 13: true}
+		if !validSP[n] {
+			return fmt.Errorf("storyPoints must be one of 1, 2, 3, 5, 8, 13 (Fibonacci scale); got %d", n)
+		}
+		o.StoryPoints = n
+	}
+	// storyRationale: required when storyPoints is set, >= 10 chars
+	if v, has := patch["storyRationale"]; has {
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("storyRationale must be string")
+		}
+		if o.StoryPoints > 0 && len(s) < 10 {
+			return fmt.Errorf("storyRationale must be at least 10 characters when storyPoints is set; got %d chars", len(s))
+		}
+		o.StoryRationale = s
+	}
+	// implContent (v10): direct source code content stored in graph.
+	// The chain reads this directly; files are projections only.
+	if v, has := patch["implContent"]; has {
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("implContent must be string")
+		}
+		o.ImplContent = s
+	}
+	// implLang (v10): detected programming language of implContent.
+	// Valid values: TypeScript, JavaScript, Go, Python, Rust, Java, Haskell, HTML, or "" (unknown).
+	if v, has := patch["implLang"]; has {
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("implLang must be string")
+		}
+		validLangs := map[string]bool{
+			"TypeScript": true, "JavaScript": true, "Go": true, "Python": true,
+			"Rust": true, "Java": true, "Haskell": true, "HTML": true, "": true,
+		}
+		if !validLangs[s] {
+			return fmt.Errorf("implLang must be one of TypeScript, JavaScript, Go, Python, Rust, Java, Haskell, HTML, or empty; got %q", s)
+		}
+		o.ImplLang = s
 	}
 	return nil
 }
