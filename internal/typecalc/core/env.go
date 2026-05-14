@@ -17,6 +17,28 @@ type RuleEnv struct {
 	SessionID string
 	Caps      CapSet
 
+	// ImplPath is the path (relative to WorkDir or absolute) of the impl
+	// file currently being compiled or tested. Language runners use it to
+	// pull in sibling files for multi-file package languages — Go in
+	// particular fails when its compiler sees an isolated file that
+	// references a type defined in another file of the same package.
+	// The 2026-05-14 walk batch lost ~13 minutes to the agent fighting
+	// this exact case. Empty for legacy callers / unit tests.
+	ImplPath string
+
+	// TracePath is the absolute path of the runtime-trace bundle
+	// (.kcpos/typecalc/<id>.json) the test runner should append to.
+	// Compiled languages (Go) bake this into a generated helper file so
+	// the test process knows where to write; interpreted languages
+	// (Python/JS) use it inside their harness template. Empty for
+	// legacy callers.
+	TracePath string
+
+	// ObjectID identifies the graph object under test. Go's generated
+	// trace helper writes this into the bundle so the bundle is
+	// self-describing.
+	ObjectID string
+
 	// LLMInvoker is the function the rule registry calls when a rule's
 	// Actor is ActorLLM. Decoupled as a function pointer so unit tests
 	// can stub it.

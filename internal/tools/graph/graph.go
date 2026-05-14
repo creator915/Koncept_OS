@@ -553,7 +553,7 @@ func graphMergeObjectTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name:        "graph_merge_object",
-				Description: "Apply a partial JSON patch to an existing object. Allowed fields: intent, impl, status, statusSession, temporal, preconditions, postconditions. Structural fields (def, consumes, produces) are not patchable — use unlink/relink. Patch must be a JSON object string.\n\nOptional `session_id` temporarily swaps the focused session for the duration of the merge so the diff is recorded against that session — saves the focus / merge / re-focus cycle when ticking many child sessions through implementing→confirmed in a batch.",
+				Description: "Apply a partial JSON patch to an existing object. Allowed fields: intent, impl, implFragment, implSymbol, implContent, implLang, status, statusSession, temporal, preconditions, postconditions, portObservation, storyPoints, storyRationale. Structural fields (def, consumes, produces) are not patchable — use unlink/relink. Patch must be a JSON object string.\n\nportObservation values (MUST be exact — common mistake is using \"return value\"): \"global\" / \"return\" / \"return.<dotted.path>\" / \"args.<n>.<dotted.path>\" / \"side_effect\". Example: '{\"portObservation\":{\"flags_config\":\"return\",\"ball_x\":\"return.ball.x\"}}'.\n\nOptional `session_id` temporarily swaps the focused session for the duration of the merge so the diff is recorded against that session — saves the focus / merge / re-focus cycle when ticking many child sessions through implementing→confirmed in a batch.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{

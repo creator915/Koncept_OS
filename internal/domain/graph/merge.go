@@ -199,10 +199,18 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 		for k, val := range m {
 			s, ok := val.(string)
 			if !ok {
-				return fmt.Errorf("portObservation[%q] must be string (e.g. \"global\", \"return.ball\", \"side_effect\"), got %T", k, val)
+				return fmt.Errorf("portObservation[%q] must be string (one of: \"global\", \"return\", \"return.<path>\", \"args.<n>.<path>\", \"side_effect\"), got %T", k, val)
 			}
 			if !validPortObservation(s) {
-				return fmt.Errorf("portObservation[%q]=%q is not a recognised extractor (allowed: \"global\", \"return.<path>\", \"args.<n>.<path>\", \"side_effect\")", k, s)
+				return fmt.Errorf(
+					"portObservation[%q]=%q is not a recognised extractor. Allowed values:\n"+
+						"  \"global\"            — port read from module/globalThis namespace\n"+
+						"  \"return\"            — port IS the call's whole return value (Go single return; JS IIFE return)\n"+
+						"  \"return.<path>\"     — port is a dotted-path field on the return value, e.g. \"return.ball.x\"\n"+
+						"  \"args.<n>.<path>\"   — port is a field on the n-th positional argument (for mutating-arg APIs)\n"+
+						"  \"side_effect\"       — port has only externally-observable effects (skip runtime check)\n"+
+						"Common mistakes: \"return value\" / \"function return\" / \"output\" are NOT valid — use bare \"return\" for the whole return, or \"return.<field>\" for nested access.",
+					k, s)
 			}
 			out[k] = s
 		}

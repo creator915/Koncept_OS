@@ -193,12 +193,65 @@ Rules:
 
 **Why these rules**: tests must verify the *contract* (description-level invariants), not the *implementation* (specific numeric coincidences). A test that fires ` + "`equals: 192`" + ` breaks when the impl is rewritten with a different rounding order producing 192.00001 — even though the contract is satisfied. The harness supports ` + "`between` / `type` / `enum` / `truthy`" + ` precisely so synthesized tests can stay contract-anchored.
 
-Legacy fallback (only when a harness for the language doesn't exist): instead of "cases", output:
+Legacy fallback (when a runtime-eval harness for the language doesn't exist — currently Go): instead of "cases", output:
 {
   "objectId": "<id>",
-  "testCode": "<raw test source in the target language, including any framework imports, runner integration, and the appendTrace helper exactly as previously documented>"
+  "testCode": "<raw test source in the target language>"
 }
-The host inspects the field and routes accordingly. Prefer "cases" — the harness path is more robust.`
+The host inspects the field and routes accordingly. Prefer "cases" — the harness path is more robust.
+
+**Go (LangGo) — testCode mode specifics (MANDATORY when language is Go):**
+
+Go has no runtime eval, so synthesized tests must be complete Go test code. The runner stages this as code_test.go in a scratch directory alongside the impl and same-package siblings, then runs ` + "`go test ./...`" + `. The runner also drops in kcpos_helpers_test.go which provides:
+
+- ` + "`appendTrace(inputs map[string]interface{}, outputs map[string]interface{})`" + ` — record one (inputs, outputs) pair into the runtime trace bundle. Call BEFORE assertions so failing tests still leave a trace on disk.
+- Trace bundle path, object id, and impl hash are baked in by the helper. Your testCode MUST NOT redeclare appendTrace or its globals.
+
+**Hard requirement**: every test case in your synthesized testCode MUST call ` + "`appendTrace(inputs, outputs)`" + ` BEFORE its assertions. The runner statically checks for ` + "`appendTrace(`" + ` substring and rejects testCode that omits it (rerun synthesize). One call per case minimum.
+
+Example Go testCode (testCase + appendTrace usage):
+
+` + "```" + `go
+package main
+
+import (
+	"testing"
+)
+
+func TestParseFlags_Icons(t *testing.T) {
+	args := []string{"--icons"}
+	got, err := ParseFlags(args)
+	inputs := map[string]interface{}{"args": args}
+	outputs := map[string]interface{}{"flags_config": got, "error": err}
+	appendTrace(inputs, outputs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Icons {
+		t.Errorf("expected Icons=true, got false")
+	}
+}
+
+func TestParseFlags_Empty(t *testing.T) {
+	args := []string{}
+	got, err := ParseFlags(args)
+	inputs := map[string]interface{}{"args": args}
+	outputs := map[string]interface{}{"flags_config": got, "error": err}
+	appendTrace(inputs, outputs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Icons || got.DirOnly {
+		t.Errorf("expected all flags false on empty args, got %+v", got)
+	}
+}
+` + "```" + `
+
+Notes:
+- ` + "`package main`" + ` — kcpos co-locates impl + def + tests in the same package.
+- No need to ` + "`import \"./trace\"`" + ` or declare appendTrace — it's a sibling file at test time.
+- Use ` + "`map[string]interface{}`" + ` literals (not custom structs) for inputs/outputs — keeps the trace JSON-encodable across all object types.
+- Skip cases that are unreasonable to test (e.g. interactive TUI in a non-TTY scratch dir) — emit CANNOT_SYNTHESIZE with reason instead.`
 
 func buildSynthesizePrompt(in SynthesizeInputs) string {
 	var b strings.Builder

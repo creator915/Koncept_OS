@@ -160,6 +160,7 @@ func (r *SubAgentRunner) Run(ctx context.Context, req tools.SubAgentRequest) (st
 		MaxIterations: maxIters,
 		SkipSystem:    true, // we already added subAgentSystemPrompt above
 		Caps:          childCaps,
+		Depth:         childDepth,
 	})
 
 	fmt.Fprintf(os.Stderr, "%s%s\x1b[2m└─ subagent done ─\x1b[0m\n", Stamp(), indent)

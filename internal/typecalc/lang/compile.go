@@ -88,12 +88,26 @@ func CompileLanguageInvoker(ctx context.Context, env *core.RuleEnv, src *core.Ty
 }
 
 func runGoCompile(ctx context.Context, env *core.RuleEnv, src *core.TypedValue) (*core.TypedValue, error) {
-	tmp, cleanup, err := writeTempFile(env, "kcpos-go-*.go", src.Payload)
+	// 2026-05-14 v9.6 — Go must be checked at package granularity, not
+	// per file. The pre-v9.6 single-file `go vet <tmp>` failed any object
+	// whose impl referenced a type defined elsewhere in the same package
+	// (the 2026-05-14 walk batch lost ~13 minutes to this exact case;
+	// the agent ended up duplicating type decls into impl files to coerce
+	// isolation, breaking the real multi-file build). Strategy: stage a
+	// scratch package holding the impl + every sibling .go in its dir
+	// (and K/defs/ as fallback), then run `go vet ./...`. Single-file
+	// impls (no siblings) still work — the staging just copies one file.
+	dir, cleanup, err := stageGoPackage(env, src.Payload, "code.go")
 	if err != nil {
 		return core.NewCompileError(taskOf(src), "internal", err.Error()), nil
 	}
 	defer cleanup()
-	out, err := runCmd(ctx, env.WorkDir, "go", "vet", tmp)
+	// `go vet ./...` requires a module; stamp one in scratch.
+	if err := writeFile(dir, "go.mod", "module kcposscratch\n\ngo 1.21\n"); err != nil {
+		cleanup()
+		return core.NewCompileError(taskOf(src), "internal", err.Error()), nil
+	}
+	out, err := runCmd(ctx, dir, "go", "vet", "./...")
 	if err != nil {
 		return core.NewCompileError(taskOf(src), "go vet", string(out)+"\n"+err.Error()), nil
 	}

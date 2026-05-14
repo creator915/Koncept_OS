@@ -9,6 +9,7 @@ import (
 
 	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	"github.com/creator915/Koncept_OS/internal/shared/agentctx"
 	"github.com/creator915/Koncept_OS/internal/tools"
 	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
@@ -62,7 +63,19 @@ type RunOptions struct {
 	// is then authorized against this set before execution, and a denial
 	// becomes a PermissionDenied tool result the model can react to.
 	Caps core.CapSet
+
+	// Depth is the agent's nesting level. 0 = top-level user-facing
+	// (main conversation); 1, 2, ... = subagents at increasing depth.
+	// Threaded into ctx so tool Run functions can gate on "main
+	// conversation only" rules — e.g. the v9.6 dispatch-mode hardening
+	// that blocks the main conversation from writing impl files once
+	// the graph has ≥5 objects (forces it to spawn subagents instead).
+	Depth int
 }
+
+// Depth plumbing has moved to internal/shared/agentctx so tool packages
+// can read it without an import cycle (agent → tools, not the other
+// way). See agentctx.Depth() for the reader API.
 
 // RunTurn executes one user turn — append the prompt, drive the agent loop
 // until the model produces a turn with no tool_calls (or the iteration cap
@@ -74,6 +87,11 @@ func RunTurn(ctx context.Context, client *transport.Client, messages *[]transpor
 
 // RunTurnOpts is the workhorse. RunTurn is a thin wrapper.
 func RunTurnOpts(ctx context.Context, client *transport.Client, messages *[]transport.Message, userPrompt string, opts RunOptions) error {
+	// Thread Depth onto ctx so every tool Run downstream can branch on
+	// "is this the main conversation?". Subagents at depth>=1 are
+	// permitted to write impl files; the main conversation is not (once
+	// the graph crosses a size threshold) — see write_file v9.6 guard.
+	ctx = agentctx.WithDepth(ctx, opts.Depth)
 	if !opts.SkipSystem {
 		ensureSystem(messages)
 	}

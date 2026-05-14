@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"strings"
 )
 
 // HasID reports whether id is taken in either the attribute or object namespace.
@@ -16,7 +17,8 @@ func (g *Graph) HasID(id string) bool {
 	return false
 }
 
-// AddAttribute inserts a new attribute. Errors if id is already used.
+// AddAttribute inserts a new attribute. Errors if id is already used
+// or if its Go-symbol form collides with any existing entity.
 func (g *Graph) AddAttribute(id string, attr *Attribute) error {
 	if id == "" {
 		return fmt.Errorf("attribute id required")
@@ -24,11 +26,15 @@ func (g *Graph) AddAttribute(id string, attr *Attribute) error {
 	if g.HasID(id) {
 		return fmt.Errorf("id %q already exists in graph", id)
 	}
+	if other := g.SymbolCollides(id); other != "" {
+		return symbolCollisionError("attribute", id, other)
+	}
 	g.Attributes[id] = attr
 	return nil
 }
 
-// AddObject inserts a new object. Errors if id is already used.
+// AddObject inserts a new object. Errors if id is already used or if
+// its Go-symbol form collides with any existing entity.
 func (g *Graph) AddObject(id string, obj *Object) error {
 	if id == "" {
 		return fmt.Errorf("object id required")
@@ -36,8 +42,84 @@ func (g *Graph) AddObject(id string, obj *Object) error {
 	if g.HasID(id) {
 		return fmt.Errorf("id %q already exists in graph", id)
 	}
+	if other := g.SymbolCollides(id); other != "" {
+		return symbolCollisionError("object", id, other)
+	}
 	g.Objects[id] = obj
 	return nil
+}
+
+// SymbolCollides returns the id of any existing object/attribute whose
+// Go-style PascalCase symbol form matches that of the given new id, or
+// "" if none collides. The check is lang-agnostic — even non-Go projects
+// benefit from disjoint identifier namespaces, and being strict here
+// prevents the 2026-05-14 walk batch failure where attribute id
+// "preview_content" (→ type PreviewContent) and object id
+// "PreviewContent" (→ func PreviewContent) both compiled to the same
+// Go symbol and broke the multi-file package staging.
+//
+// Exact-match ids are not flagged here — HasID covers those — so the
+// returned collision is always a *different* id that normalizes to the
+// same symbol form.
+func (g *Graph) SymbolCollides(newID string) string {
+	target := toPascalCase(newID)
+	if target == "" {
+		return ""
+	}
+	for oid := range g.Objects {
+		if oid == newID {
+			continue
+		}
+		if toPascalCase(oid) == target {
+			return oid
+		}
+	}
+	for aid := range g.Attributes {
+		if aid == newID {
+			continue
+		}
+		if toPascalCase(aid) == target {
+			return aid
+		}
+	}
+	return ""
+}
+
+// toPascalCase normalises an identifier (snake_case, kebab-case, or
+// already-Pascal) to the Go-symbol form a code-generator would emit.
+// "preview_content" / "preview-content" / "PreviewContent" all map to
+// "PreviewContent". Empty / all-separator input yields "".
+func toPascalCase(s string) string {
+	if s == "" {
+		return ""
+	}
+	// Split on underscore and hyphen; collapse multiple separators.
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '_' || r == '-'
+	})
+	if len(parts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		first := strings.ToUpper(p[:1])
+		b.WriteString(first)
+		if len(p) > 1 {
+			b.WriteString(p[1:])
+		}
+	}
+	return b.String()
+}
+
+func symbolCollisionError(newKind, newID, existingID string) error {
+	return fmt.Errorf(
+		"%s id %q would generate the same Go-style symbol (%q) as existing entity %q. "+
+			"Disjoint symbol names prevent multi-file Go builds from hitting 'X redeclared in this block' (2026-05-14 walk batch class of failure). "+
+			"Rename %q (e.g. add a suffix like _value, _result, _kind) or rename %q so the PascalCase forms differ.",
+		newKind, newID, toPascalCase(newID), existingID, newID, existingID)
 }
 
 // LinkRefine records that child <: parent in the partial order.

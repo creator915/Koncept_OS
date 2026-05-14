@@ -14,6 +14,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 	"github.com/creator915/Koncept_OS/internal/router"
 	"github.com/creator915/Koncept_OS/internal/router/chains"
+	"github.com/creator915/Koncept_OS/internal/shared/agentctx"
 	runtimetools "github.com/creator915/Koncept_OS/internal/tools/runtime"
 	sessiontools "github.com/creator915/Koncept_OS/internal/tools/session"
 	"github.com/creator915/Koncept_OS/internal/typecalc/core"
@@ -64,6 +65,23 @@ func confirmObjectTool() toolcall.Tool {
 			maxRetries := 0
 			if v, ok := args["max_retries"].(float64); ok {
 				maxRetries = int(v)
+			}
+			// v9.6 — confirm_object is the heaviest chain trigger:
+			// compile + describe + synthesize_tests + test + review +
+			// MarkConfirmed all funnel their output back into the
+			// caller's message history. Run that in the main conversation
+			// once the graph has ≥DispatchModeThreshold objects and the
+			// caller's context bloats per-object. Dispatch to a subagent
+			// instead — the subagent gets its own message history that
+			// dies with it.
+			g, _ := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+			count := 0
+			if g != nil {
+				count = len(g.Objects)
+			}
+			action := fmt.Sprintf("confirm_object object_id=%s", objectID)
+			if err := agentctx.CheckMainImplWork(ctx, count, action); err != nil {
+				return "", err
 			}
 
 			deps, err := buildProductionDeps(ctx)

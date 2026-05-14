@@ -125,7 +125,7 @@ func typecalcCompileTool() toolcall.Tool {
 			tv := core.New(core.KindCode, string(implBody)).
 				WithState(core.StateUncompiled).
 				WithLang(langTag)
-			env := &core.RuleEnv{WorkDir: "."}
+			env := &core.RuleEnv{WorkDir: ".", ImplPath: compileTarget}
 			out, err := lang.CompileLanguageInvoker(ctx, env, tv)
 			if err != nil {
 				return "", err
@@ -349,7 +349,17 @@ func typecalcTestTool() toolcall.Tool {
 				WithState(core.StateCompiled).
 				WithLang(langTag)
 			suite := core.New(core.KindTestSuite, testSource).WithLang(langTag)
-			env := &core.RuleEnv{WorkDir: "."}
+			// Compute trace path identical to what harness.Render received
+			// above, so the Go runner's generated helper writes to the
+			// same bundle the JS/Python harness would.
+			cwdForEnv, _ := os.Getwd()
+			absTracePath := cwdForEnv + string(os.PathSeparator) + core.RuntimeTracePath(objectID)
+			env := &core.RuleEnv{
+				WorkDir:   ".",
+				ImplPath:  testTarget,
+				TracePath: absTracePath,
+				ObjectID:  objectID,
+			}
 			out, err := lang.TestRunInvoker(ctx, env, compiled, suite)
 			if err != nil {
 				return "", err

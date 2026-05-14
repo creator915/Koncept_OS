@@ -6,13 +6,61 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 	"github.com/creator915/Koncept_OS/internal/infra/persistence"
+	"github.com/creator915/Koncept_OS/internal/shared/agentctx"
 	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 	"github.com/creator915/Koncept_OS/internal/typecalc/lang"
 )
+
+// isObjectDefPath returns true for K/defs/<PascalCaseId>.<ext> paths —
+// these are object def stubs that should be written by the subagent
+// owning that object, not by the main conversation. Attribute defs
+// (K/defs/<snake_case_id>.<ext>) are NOT flagged: they're simple type
+// aliases the main conversation can produce in bulk without context
+// bloat.
+func isObjectDefPath(path string) bool {
+	norm := strings.ReplaceAll(path, "\\", "/")
+	if !strings.HasPrefix(norm, "K/defs/") {
+		return false
+	}
+	base := filepath.Base(norm)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	if stem == "" {
+		return false
+	}
+	first := rune(stem[0])
+	if !unicode.IsUpper(first) {
+		return false
+	}
+	// Reject snake_case (attribute names like "flags_config") even if
+	// the first letter happened to be uppercase — PascalCase has no
+	// underscores between identifiers.
+	if strings.Contains(stem, "_") {
+		return false
+	}
+	return true
+}
+
+// isLikelyImplPath returns true for paths that look like real code
+// (impl files outside K/defs/). Heuristic: extension matches a known
+// source-code language. Excludes K/defs/ entirely so attribute defs
+// don't get caught.
+func isLikelyImplPath(path string) bool {
+	norm := strings.ReplaceAll(path, "\\", "/")
+	if strings.HasPrefix(norm, "K/defs/") {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(norm))
+	switch ext {
+	case ".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".rs", ".c", ".cpp", ".cc", ".java", ".kt", ".swift":
+		return true
+	}
+	return false
+}
 
 func writeFileTool() toolcall.Tool {
 	return toolcall.Tool{
@@ -50,6 +98,32 @@ func writeFileTool() toolcall.Tool {
 			}
 			if strings.HasPrefix(path, "K/frags/") {
 				return "", fmt.Errorf("write_file: K/frags/* 已废弃（v10）。代码内容请通过 graph_merge_object patch='{impl_content:\"...\"}' 写入，图会持有源码内容。")
+			}
+			// v9.6 — dispatch-mode hardening. Once the graph has reached
+			// DispatchModeThreshold objects, the main conversation must
+			// stop doing impl-side work inline (the 2026-05-14 fx batch
+			// died because the main conversation wrote 15 def files + was
+			// in the middle of emitting 20+ link edges when the LLM
+			// stream timed out). Subagents are unrestricted; main-conv
+			// is restricted ONLY at the impl-related path patterns:
+			//   - K/defs/<PascalCaseId>.<ext>  (object def files)
+			//   - any explicit impl file (heuristic: extension that
+			//     looks like a code language, NOT inside K/defs/<id>
+			//     that's an attribute type decl).
+			// Attribute def files are still fine in main conv (they're
+			// type aliases / simple structs and the LLM produces them
+			// quickly), and writes outside K/ entirely (docs, scratch)
+			// are unrestricted.
+			if isObjectDefPath(path) || isLikelyImplPath(path) {
+				g, _ := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+				count := 0
+				if g != nil {
+					count = len(g.Objects)
+				}
+				action := fmt.Sprintf("write_file path=%s", path)
+				if err := agentctx.CheckMainImplWork(ctx, count, action); err != nil {
+					return "", err
+				}
 			}
 			if dir := filepath.Dir(path); dir != "" && dir != "." {
 				if err := os.MkdirAll(dir, 0o755); err != nil {
