@@ -87,6 +87,21 @@ type Deps struct {
 	// confirmed. Equivalent to graph_merge_object id=X patch={status:confirmed}.
 	MarkConfirmed func(ctx context.Context, objectID string) error
 
+	// Characterize runs the brownfield characterization front stage
+	// (屎山代码维护Agent设计文档 v1.0 Part 6.6): synthesize probes →
+	// run them against the UNTRUSTED legacy artifact → transcribe
+	// observed behavior into a golden lock → persist Finite/Reproducible
+	// evidence + Oracle into the object's bundle. Returns (locked,
+	// unlocked, err).
+	//
+	// OPTIONAL — unlike every Dep above, this is NOT required by
+	// validateDeps. When nil the StartCharacterize/Characterized
+	// handlers are simply not registered: the chain is exactly the
+	// pre-existing greenfield machine. When wired, it adds a brownfield
+	// entry that feeds the recovered contract into the same compile→…→
+	// confirm pipeline (now guarded by the gate's [method-use-rule]).
+	Characterize func(ctx context.Context, objectID string) (locked int, unlocked int, err error)
+
 	// GraphPath optionally overrides the default K/graph.json location
 	// (used by tests). Empty = production default.
 	GraphPath string
@@ -371,6 +386,47 @@ func BuildChain(d Deps) (*router.Router, error) {
 			return out, nil
 		},
 	})
+
+	// Brownfield front stage — registered ONLY when wired (additive;
+	// keeps every existing caller/test byte-compatible). StartCharacterize
+	// recovers the legacy artifact's behavior into a golden lock, then
+	// Characterized feeds it into the existing pipeline via the SAME
+	// runCompile shared with StartConfirm — so the recovered contract is
+	// verified by the unchanged compile→describe→…→review machine, now
+	// guarded by the gate's [method-use-rule].
+	if d.Characterize != nil {
+		r.Register(&router.HandlerFunc{
+			In:  TypeStartCharacterize,
+			Out: []string{TypeCharacterized, TypeObstacle},
+			Run: func(ctx context.Context, in router.TypedValue) (router.TypedValue, error) {
+				var p StartCharacterizePayload
+				if err := in.Unmarshal(&p); err != nil {
+					return router.TypedValue{}, err
+				}
+				locked, unlocked, err := d.Characterize(ctx, p.ObjectID)
+				if err != nil {
+					return makeObstacle(p.ObjectID, "characterize failed: "+err.Error(), TypeStartCharacterize), nil
+				}
+				out, _ := router.NewTypedValue(TypeCharacterized, CharacterizedPayload{
+					ObjectID: p.ObjectID, Locked: locked, Unlocked: unlocked,
+				})
+				return out, nil
+			},
+		})
+		r.Register(&router.HandlerFunc{
+			In:  TypeCharacterized,
+			Out: []string{TypeCompiled, TypeCompileError, TypeObstacle},
+			Run: func(ctx context.Context, in router.TypedValue) (router.TypedValue, error) {
+				var p CharacterizedPayload
+				if err := in.Unmarshal(&p); err != nil {
+					return router.TypedValue{}, err
+				}
+				// The golden lock is on disk; verify the (now-locked)
+				// artifact through the existing pipeline unchanged.
+				return runCompile(ctx, d, p.ObjectID, 0)
+			},
+		})
+	}
 
 	r.RegisterTerminal(TypeConfirmed)
 	r.RegisterTerminal(TypeObstacle)

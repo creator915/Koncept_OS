@@ -409,7 +409,44 @@ func CheckObjectGate(g *graph.Graph, objID string, cwd string) ([]string, Object
 			objID, reasons))
 	}
 
+	// [method-use-rule] — Feathers hard rule (屎山代码维护Agent设计文档
+	// v1.0 Part 6.6): an object that was characterized must not be
+	// shipped while its golden lock no longer matches the artifact it
+	// characterized. LEGACY-PATH-ONLY and purely additive: greenfield
+	// objects have no Characterization section, so ReadCharacterization
+	// returns (nil,false) and this block is inert — greenfield gating is
+	// byte-identical to before this rule existed.
+	if cs, ok := core.ReadCharacterization(objID); ok && cs != nil {
+		if cs.LockedCount == 0 {
+			issues = append(issues, fmt.Sprintf(
+				"[method-use-rule] object %s entered via the characterize front stage but its lock characterizes ZERO behavior (all %d probes unlocked) — a lock that locks nothing is not a behavior-preservation net. Re-run characterize with probes that produce observable output, or escalate that this symbol is not characterizable.",
+				objID, cs.UnlockedCount))
+		}
+		path := *obj.Impl
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, path)
+		}
+		if body, err := os.ReadFile(path); err == nil {
+			if cur := core.HashSource(string(body)); cur != cs.CodeHash {
+				issues = append(issues, fmt.Sprintf(
+					"[method-use-rule] object %s artifact changed since characterization (locked hash %s, current %s) but was NOT re-characterized — the behavior-preservation guarantee is void. Re-run the characterization lock against the current artifact (Feathers Method Use Rule: never call a method that isn't characterization-locked).",
+					objID, shortGateHash(cs.CodeHash), shortGateHash(cur)))
+			}
+		}
+	}
+
 	return issues, info
+}
+
+// shortGateHash trims a hex hash for human-readable gate messages.
+func shortGateHash(h string) string {
+	if len(h) >= 12 {
+		return h[:12]
+	}
+	if h == "" {
+		return "(none)"
+	}
+	return h
 }
 
 func implFileOK(implPath, cwd string) bool {

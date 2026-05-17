@@ -20,6 +20,25 @@ type StartConfirmPayload struct {
 	MaxRetries int `json:"maxRetries,omitempty"`
 }
 
+// StartCharacterizePayload is the brownfield entry value: an untrusted
+// legacy artifact to characterize before the normal chain runs. The
+// engine reads the artifact path from the graph object's Impl (same
+// place the greenfield chain does), so the payload stays ID-only.
+type StartCharacterizePayload struct {
+	ObjectID   string `json:"objectId"`
+	MaxRetries int    `json:"maxRetries,omitempty"`
+}
+
+// CharacterizedPayload — the golden lock has been written to the
+// object's bundle. Locked/Unlocked are carried for progress display
+// and to make "characterized but locked nothing" visible at the next
+// hop; the canonical record is the bundle's Characterization section.
+type CharacterizedPayload struct {
+	ObjectID string `json:"objectId"`
+	Locked   int    `json:"locked"`
+	Unlocked int    `json:"unlocked"`
+}
+
 // CompiledPayload — kind=compile passed. Carries the lang so the next
 // step can decide if test evidence is mandatory (Go/JS/TS/Python) vs
 // optional (HTML/Rust without an in-tree runner).

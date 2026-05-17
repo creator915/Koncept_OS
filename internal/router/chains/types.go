@@ -64,3 +64,19 @@ const (
 	TypeConfirmed = "Confirmed<Object>"
 	TypeObstacle  = "Obstacle<Object,Reason>"
 )
+
+// Brownfield characterization front stage (屎山代码维护Agent设计文档
+// v1.0). ADDITIVE and optional: these tags only participate when
+// Deps.Characterize is wired. The greenfield entry (StartConfirm) and
+// every mechanical transition above are untouched.
+//
+//	StartCharacterize<obj>   — entry for an UNTRUSTED legacy artifact:
+//	                           "recover this artifact's behavior before
+//	                           it is safe to verify/modify it"
+//	Characterized<obj>       — golden lock written; flows into the
+//	                           existing chain at compile (the recovered
+//	                           contract is now consumed like any spec)
+const (
+	TypeStartCharacterize = "StartCharacterize"
+	TypeCharacterized     = "Characterized<Object>"
+)

@@ -83,6 +83,16 @@ type EvidenceBundle struct {
 	// DOM events) cannot be verified by the vm.Script harness. Empty for
 	// non-HTML deliverables.
 	RuntimeSmoke *RuntimeSmokeSection `json:"runtimeSmoke,omitempty"`
+
+	// Characterization (屎山代码维护Agent v1.0 Part 6.6 / 2.4b) records
+	// the brownfield characterization lock for an UNTRUSTED legacy
+	// artifact: the golden behavior recovered by observation, plus the
+	// Finite/Reproducible evidence and conditional confidence backing it.
+	// Purely additive: nil on every greenfield object (the normal kcpos
+	// chain never sets it), so greenfield gate/readers are unaffected.
+	// Present only when an object entered via the characterize front
+	// stage. The gate's Method-Use-Rule (legacy-path-only) consults it.
+	Characterization *CharacterizationSection `json:"characterization,omitempty"`
 }
 
 // RuntimeSmokeSection captures one runtime_smoke invocation. OK reflects

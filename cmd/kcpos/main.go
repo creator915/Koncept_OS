@@ -32,6 +32,7 @@ Usage:
   kcpos doc protocol               print the runtime protocol (markdown)
   kcpos doc system                 print the full LLM system prompt
   kcpos doctor [--install] [-y]    detect / install external toolchain
+  kcpos characterize <file>        recover an untrusted legacy artifact's behavior (brownfield)
   kcpos help                       this help
   kcpos <sub> --help               help for a subcommand
 
@@ -63,6 +64,12 @@ func main() {
 		os.Exit(commands.RunDoc(rest))
 	case "doctor":
 		os.Exit(commands.RunDoctor(rest))
+	case "characterize":
+		os.Exit(commands.RunCharacterize(rest))
+	case "pb-run":
+		os.Exit(commands.RunPB(rest))
+	case "pb-solve":
+		os.Exit(commands.RunPBSolve(rest))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		os.Exit(0)
