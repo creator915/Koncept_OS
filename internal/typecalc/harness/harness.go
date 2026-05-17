@@ -792,7 +792,7 @@ def _make_test(case):
         call_error = None
         last_return = None
         try:
-            last_return = eval(case['call'], {'IMPL': IMPL, '__builtins__': __builtins__})
+            last_return = eval(case['call'], {'IMPL': IMPL, '__builtins__': __builtins__, **_setup_globals})
         except Exception as e:
             call_error = e
         # 4. snapshot outputs
