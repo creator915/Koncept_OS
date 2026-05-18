@@ -106,6 +106,14 @@ func RunTurnOpts(ctx context.Context, client *transport.Client, messages *[]tran
 		runner := NewSubAgentRunner(client, 0)
 		builtins = tools.BuiltinsWithSubAgent(runner)
 	}
+	// Capability non-exposure (forensic §7.2): if a contract is active,
+	// drop every run_tool:<name> the CapSet does not authorize BEFORE
+	// computing specs, so the model never even sees `bash` (or any other
+	// non-permitted exec tool) in its advertised tool list. This is
+	// strictly stronger than the per-call authorizeToolCall gate (which
+	// stays as defense-in-depth): a tool the model can't see is one it
+	// can't try to smuggle a curl/git/docker through.
+	builtins = filterToolsByCaps(builtins, opts.Caps)
 	specs := tools.Specs(builtins)
 
 	maxIters := opts.MaxIterations
@@ -321,4 +329,31 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// filterToolsByCaps removes every run_tool:<name> the active CapSet does
+// not authorize, so disallowed exec tools (notably `bash`) are not even
+// advertised to the model. Empty caps = no contract = unchanged behavior
+// (returns the map as-is). Path-verb tools (read_file/write_file/edit)
+// and spawn_agent are kept here because their authorization depends on
+// the per-call argument (path/role), which is unknown at advertise time;
+// they remain constrained by the per-call authorizeToolCall gate.
+//
+// This is the capability-non-exposure layer of the forensic §7.2 fix.
+// It is intentionally conservative: it only drops tools whose capability
+// (verb,arg) is fully determined by the tool name (the run_tool class),
+// so it can never false-drop a legitimately-needed path tool.
+func filterToolsByCaps(builtins map[string]toolcall.Tool, caps core.CapSet) map[string]toolcall.Tool {
+	if len(caps) == 0 {
+		return builtins
+	}
+	out := make(map[string]toolcall.Tool, len(builtins))
+	for name, t := range builtins {
+		verb, arg := mapToolToCapability(name, "")
+		if verb == "run_tool" && caps.Authorize(verb, arg) != nil {
+			continue // not permitted → do not advertise it
+		}
+		out[name] = t
+	}
+	return out
 }

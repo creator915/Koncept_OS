@@ -308,7 +308,7 @@ func runSessionResume(args []string) int {
 	if err := persistence.SetFocus(persistence.SessionDefaultDir, id); err != nil {
 		return printErr(err)
 	}
-	return runChatWithPrompt("", "", id)
+	return runChatWithPrompt("", "", id, "")
 }
 
 func truncateText(s string, n int) string {

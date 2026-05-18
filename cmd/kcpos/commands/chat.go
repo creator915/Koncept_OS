@@ -13,6 +13,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/llm/provider"
 	"github.com/creator915/Koncept_OS/internal/app/repl"
 	"github.com/creator915/Koncept_OS/internal/llm/memory"
+	core "github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // runChat handles `kcpos chat [flags] [prompt...]`. The prompt may also be
@@ -20,6 +21,7 @@ import (
 func RunChat(args []string) int {
 	fs := flag.NewFlagSet("kcpos chat", flag.ExitOnError)
 	resume := fs.String("resume", "", "resume a chat transcript: <id> or 'latest'")
+	contract := fs.String("contract", "", "capability contract preset (e.g. 'blackbox'); fail-closed — an unknown name aborts rather than running unrestricted. Use for harnessed/untrusted runs (ProgramBench etc.).")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, `kcpos chat — interactive AI agent
 
@@ -43,13 +45,13 @@ Flags:`)
 			prompt = strings.TrimSpace(string(b))
 		}
 	}
-	return runChatWithPrompt(*resume, prompt, "")
+	return runChatWithPrompt(*resume, prompt, "", *contract)
 }
 
 // runChatWithPrompt is the shared entry point for chat-mode dispatch. focusID
 // is non-empty only when the caller (e.g. `kcpos session resume`) wants the
 // REPL to start with a KonceptOS session focused.
-func runChatWithPrompt(resumeID, prompt, focusID string) int {
+func runChatWithPrompt(resumeID, prompt, focusID, contract string) int {
 	cfg, err := provider.ProviderFromEnv()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -79,9 +81,28 @@ func runChatWithPrompt(resumeID, prompt, focusID string) int {
 	}
 	ctx := context.Background()
 
+	// Capability contract (forensic §7.2): fail-closed. An unknown name
+	// aborts — we never silently fall back to the unrestricted (nil
+	// Caps) gate, since that silent fallback is exactly what let the
+	// 2026-05-17 PB-kcpos runs cheat through `bash`.
+	var runOpts agent.RunOptions
+	if contract != "" {
+		caps, ok := core.PresetByName(contract)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "error: unknown --contract %q (fail-closed; refusing to run with the capability gate disabled)\n", contract)
+			return 1
+		}
+		if prompt == "" {
+			fmt.Fprintln(os.Stderr, "error: --contract requires a one-shot prompt; REPL contract scoping is not yet wired (fail-closed, see forensic §7.3)")
+			return 1
+		}
+		runOpts.Caps = caps
+		fmt.Fprintf(os.Stderr, "%s[contract: %s — %d capabilities, deny-by-default; bash/exec excluded]\n", agent.Stamp(), contract, len(caps))
+	}
+
 	if prompt != "" {
 		// one-shot
-		if err := agent.RunTurn(ctx, client, &tr.Messages, prompt); err != nil {
+		if err := agent.RunTurnOpts(ctx, client, &tr.Messages, prompt, runOpts); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			_ = tr.Save()
 			return 1

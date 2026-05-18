@@ -231,6 +231,66 @@ var (
 		"run_tool:*",
 		"spawn_agent:*",
 	}
+
+	// CapsBlackbox is the deny-by-default profile for greenfield
+	// black-box reconstruction tasks (ProgramBench-class). It exists
+	// because of the 2026-05-17 PB-kcpos forensic finding
+	// (docs/experiments/pb-kcpos-FORENSIC-2026-05-18.md): `kcpos chat`
+	// ran with Caps==nil, so the §6 gate was OFF, and every observed
+	// cheat (curl/git clone/go get/docker exec strings|readelf,
+	// overwriting the reference binary) went through the single general
+	// shell tool `run_tool:bash`.
+	//
+	// The mechanical guarantee here is NOT a command blacklist — it is
+	// capability non-exposure: this set has NO `run_tool:*` wildcard and
+	// NO `run_tool:bash`, and CapSet.Authorize is deny-by-default, so
+	// `bash` (the only general-exec/network entry point in the catalog)
+	// is unreachable. The legitimate verification chain is admitted via
+	// family-prefix globs that, by construction, do not match "bash".
+	//
+	// NOT self-sufficient (see forensic §7.3): until a sandboxed
+	// `compile`/`run_candidate` sidecar tool replaces shell-driven build,
+	// a PB task under this profile cannot build. Path access is
+	// intentionally broad here — the filesystem jail is a separate
+	// OS-layer wall (deferred), not this profile's job. The claimed,
+	// CI-pinned property of this profile is exactly: bash denied, no
+	// wildcard that re-admits a shell.
+	CapsBlackbox = CapSet{
+		// Source + docs read/write within the workspace. (Path jail is
+		// the deferred OS wall, not enforced by this profile.)
+		"read_file:*",
+		"read_file:**",
+		"read_file:**/*",
+		"write_file:*",
+		"write_file:**",
+		"write_file:**/*",
+		// Command-locked build/run/observe tools that REPLACE the general
+		// shell under this profile (forensic §7.5 先决A). Each runs a
+		// FIXED program with typed argv — no command string, no pipeline,
+		// no curl/git/docker. These are the explicit, non-wildcard grants
+		// that make the profile usable without re-admitting bash.
+		"run_tool:compile",
+		"run_tool:run_local",
+		"run_tool:probe",
+		// Read-only / navigation helpers (no exec).
+		"run_tool:list_dir",
+		"run_tool:grep",
+		"run_tool:glob",
+		"run_tool:git_status",
+		"run_tool:markdown_*",
+		// kcpos verification chain — the whole point of running PB
+		// through kcpos rather than a bare agent.
+		"run_tool:graph_*",
+		"run_tool:gate_object",
+		"run_tool:session_*",
+		"run_tool:checkpoint_*",
+		"run_tool:confirm_object",
+		"run_tool:typecalc_*",
+		"run_tool:runtime_smoke",
+		// Deliberately absent: run_tool:bash, run_tool:* , spawn_agent:* ,
+		// and any future general-exec/network tool (must be added here
+		// explicitly — a visible, CI-guarded diff).
+	}
 )
 
 // PresetByName looks up one of the named profiles. Used by spawn_subagent
@@ -245,6 +305,8 @@ func PresetByName(name string) (CapSet, bool) {
 		return CapsIntegrator, true
 	case "root":
 		return CapsRoot, true
+	case "blackbox":
+		return CapsBlackbox, true
 	}
 	return nil, false
 }
