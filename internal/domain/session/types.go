@@ -31,8 +31,15 @@ type Session struct {
 	Children  []string  `json:"children"`
 	Status    Status    `json:"status"`
 	Task      string    `json:"task"`
-	Input     Input     `json:"input"`
-	Output    Output    `json:"output"`
+	// ExpandsObject (KonceptOS_implementation_plan.md §1.3) names the
+	// top-graph object this session is the expansion of. Set at
+	// session-start; on session-finish the parent object's
+	// Expansion=<this session id> + status=confirmed; on rollback it is
+	// cleared. Empty for a plain (non-expansion) session — backward
+	// compatible with every pre-layered session.
+	ExpandsObject string    `json:"expandsObject,omitempty"`
+	Input         Input     `json:"input"`
+	Output        Output    `json:"output"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

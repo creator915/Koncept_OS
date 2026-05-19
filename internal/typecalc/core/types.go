@@ -121,6 +121,7 @@ const (
 	LangJava       Lang = "Java"
 	LangHaskell    Lang = "Haskell"
 	LangHTML       Lang = "HTML"
+	LangC          Lang = "C"
 )
 
 // LangFromExt maps a file extension (with or without leading dot) to a
@@ -143,6 +144,8 @@ func LangFromExt(ext string) Lang {
 		return LangJava
 	case "hs":
 		return LangHaskell
+	case "c":
+		return LangC
 	case "html", "htm":
 		return LangHTML
 	}

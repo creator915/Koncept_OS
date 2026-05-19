@@ -1,7 +1,7 @@
 // Package transcript persists the chat conversation between user and agent.
 // This is the REPL/one-shot conversation log — distinct from KonceptOS work
 // sessions in internal/session. Stored under .kcpos/transcripts/ relative to
-// the user's cwd.
+// the user's cwd, or under $KCPOS_TRANSCRIPT_DIR when that env is set.
 package memory
 
 import (
@@ -23,7 +23,14 @@ type Transcript struct {
 	Messages []transport.Message
 }
 
+// dirIn resolves the transcript directory. KCPOS_TRANSCRIPT_DIR (when
+// set non-empty) overrides the default, so callers can land the JSON
+// transcript directly in a chosen output folder without a post-hoc
+// copy. Unset ⇒ unchanged historical behaviour: <cwd>/.kcpos/transcripts.
 func dirIn(cwd string) string {
+	if d := os.Getenv("KCPOS_TRANSCRIPT_DIR"); d != "" {
+		return d
+	}
 	return filepath.Join(cwd, ".kcpos", "transcripts")
 }
 

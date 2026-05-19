@@ -45,6 +45,8 @@ const DefaultMaxRetries = 5
 //	TypeScript → tsc / npx tsc --noEmit
 //	JavaScript → node --check
 //	Python     → python -m py_compile
+//	Rust       → rustc --emit=metadata
+//	C          → gcc -fsyntax-only
 //
 // For unrecognized languages it returns the input unchanged with state
 // upgraded to Compiled. Tools must be on PATH; if a tool is missing we
@@ -77,6 +79,10 @@ func CompileLanguageInvoker(ctx context.Context, env *core.RuleEnv, src *core.Ty
 		return runHTMLCompile(ctx, env, src)
 	case core.LangPython:
 		return runPythonCompile(ctx, env, src)
+	case core.LangRust:
+		return runRustCompile(ctx, env, src)
+	case core.LangC:
+		return runCCompile(ctx, env, src)
 	}
 	// CRITICAL: no in-tree compile invoker for this language. Returns
 	// Insufficient. v9.2 — the waiver escape is gone; the gate WILL
@@ -203,6 +209,44 @@ func runPythonCompile(ctx context.Context, env *core.RuleEnv, src *core.TypedVal
 	out, err := runCmd(ctx, env.WorkDir, pyExe, "-m", "py_compile", tmp)
 	if err != nil {
 		return core.NewCompileError(taskOf(src), "py_compile", string(out)+"\n"+err.Error()), nil
+	}
+	return src.WithState(core.StateCompiled), nil
+}
+
+func runRustCompile(ctx context.Context, env *core.RuleEnv, src *core.TypedValue) (*core.TypedValue, error) {
+	if !commandExists("rustc") {
+		// Toolchain absent — fail open like TS/JS/Python (the test loop
+		// still catches behavioural bugs).
+		return src.WithState(core.StateCompiled), nil
+	}
+	tmp, cleanup, err := writeTempFile(env, "kcpos-rs-*.rs", src.Payload)
+	if err != nil {
+		return core.NewCompileError(taskOf(src), "internal", err.Error()), nil
+	}
+	defer cleanup()
+	// --emit=metadata is the doc's syntax/type check (no codegen);
+	// --crate-type=lib avoids requiring a main; artifacts to tmp dir.
+	out, err := runCmd(ctx, env.WorkDir, "rustc", "--emit=metadata",
+		"--crate-type=lib", tmp, "--out-dir", filepath.Dir(tmp))
+	if err != nil {
+		return core.NewCompileError(taskOf(src), "rustc --emit=metadata", string(out)+"\n"+err.Error()), nil
+	}
+	return src.WithState(core.StateCompiled), nil
+}
+
+func runCCompile(ctx context.Context, env *core.RuleEnv, src *core.TypedValue) (*core.TypedValue, error) {
+	if !commandExists("gcc") {
+		return src.WithState(core.StateCompiled), nil
+	}
+	tmp, cleanup, err := writeTempFile(env, "kcpos-c-*.c", src.Payload)
+	if err != nil {
+		return core.NewCompileError(taskOf(src), "internal", err.Error()), nil
+	}
+	defer cleanup()
+	// -fsyntax-only: parse + typecheck, emit nothing (the doc's mapping).
+	out, err := runCmd(ctx, env.WorkDir, "gcc", "-fsyntax-only", tmp)
+	if err != nil {
+		return core.NewCompileError(taskOf(src), "gcc -fsyntax-only", string(out)+"\n"+err.Error()), nil
 	}
 	return src.WithState(core.StateCompiled), nil
 }

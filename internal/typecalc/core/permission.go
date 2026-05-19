@@ -232,14 +232,21 @@ var (
 		"spawn_agent:*",
 	}
 
-	// CapsBlackbox is the deny-by-default profile for greenfield
-	// black-box reconstruction tasks (ProgramBench-class). It exists
-	// because of the 2026-05-17 PB-kcpos forensic finding
-	// (docs/experiments/pb-kcpos-FORENSIC-2026-05-18.md): `kcpos chat`
-	// ran with Caps==nil, so the §6 gate was OFF, and every observed
-	// cheat (curl/git clone/go get/docker exec strings|readelf,
-	// overwriting the reference binary) went through the single general
-	// shell tool `run_tool:bash`.
+	// CapsBlackbox is a GENERAL deny-by-default capability profile for
+	// untrusted / black-box reconstruction runs — not tied to any
+	// particular benchmark. Any external evaluation harness (the kind of
+	// thing that hands the agent a reference it must match without the
+	// source) selects this profile via `--contract blackbox`; kcpos
+	// itself stays benchmark-agnostic.
+	//
+	// Historical provenance (kept as a factual note, not a coupling):
+	// the profile was hardened after a 2026-05 forensic finding that an
+	// unrestricted run let cheats (curl/git clone/go get, binary RE,
+	// reference tampering) all flow through a single general shell tool.
+	// That entire class is now structurally impossible: the universal
+	// `bash` tool was removed unconditionally from the catalog (see
+	// internal/tools/fs), so there is no general-exec/network entry
+	// point for this profile to even need to deny.
 	//
 	// The mechanical guarantee here is NOT a command blacklist — it is
 	// capability non-exposure: this set has NO `run_tool:*` wildcard and

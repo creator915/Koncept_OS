@@ -26,8 +26,20 @@ import (
 // a session is currently focused and active) appends the diff to that
 // session's graphDiff. Tool wrappers use this so every mutating operation
 // gets diff capture for free.
+// activeWritePath resolves which graph file mutating tools target
+// (KonceptOS_implementation_plan.md §1.1: writes go to the CURRENT
+// session's layer). A focused sub-session writes its expansion
+// (K/expansions/<sid>/graph.json); no focus / root session falls back
+// to the top-level K/graph.json — byte-identical to pre-layered
+// behaviour (P0.2 取舍#2, the "加层不砸旧" guard).
+func activeWritePath() string {
+	// One resolver, shared with services.mutateGraph (P1.2.3).
+	return persistence.ActiveGraphPathFromFocus()
+}
+
 func mutateGraph(mutate func(*graph.Graph) error) error {
-	g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+	path := activeWritePath()
+	g, err := persistence.LoadGraphOrInit(path)
 	if err != nil {
 		return err
 	}
@@ -35,7 +47,7 @@ func mutateGraph(mutate func(*graph.Graph) error) error {
 	if err := mutate(g); err != nil {
 		return err
 	}
-	if err := persistence.SaveGraph(persistence.GraphDefaultPath, g); err != nil {
+	if err := persistence.SaveGraph(path, g); err != nil {
 		return err
 	}
 	// Capture errors are intentionally swallowed: the graph is already saved
@@ -86,9 +98,10 @@ func graphCreateAttributeTool() toolcall.Tool {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":     map[string]interface{}{"type": "string", "description": "snake_case identifier, e.g. 'weather_data'."},
-						"intent": map[string]interface{}{"type": "string", "description": "Design intent — what this attribute represents. Be descriptive; redundancy beats omission."},
-						"def":    map[string]interface{}{"type": "string", "description": "Path to the type-definition file. Defaults to 'defs/<id>.ts' (TS-first spec). Override for non-TS projects."},
+						"id":         map[string]interface{}{"type": "string", "description": "snake_case identifier, e.g. 'weather_data'."},
+						"intent":     map[string]interface{}{"type": "string", "description": "Design intent — what this attribute represents. Be descriptive; redundancy beats omission."},
+						"def":        map[string]interface{}{"type": "string", "description": "Path to the type-definition file. Defaults to 'defs/<id>.ts' (TS-first spec). Override for non-TS projects."},
+						"parentAttr": map[string]interface{}{"type": "string", "description": "Optional. If set, the new attribute is auto-recorded as a refinement of this existing attribute (id <: parentAttr) — the partial order is established WITHOUT a separate graph_link_refine call (KonceptOS §1.1 auto-偏序). parentAttr must already exist in the current layer or creation is refused (nothing written)."},
 					},
 					"required": []string{"id", "intent"},
 				},
@@ -98,6 +111,7 @@ func graphCreateAttributeTool() toolcall.Tool {
 			id, _ := args["id"].(string)
 			intent, _ := args["intent"].(string)
 			def, _ := args["def"].(string)
+			parentAttr, _ := args["parentAttr"].(string)
 			if id == "" {
 				return "", fmt.Errorf("id required")
 			}
@@ -108,9 +122,22 @@ func graphCreateAttributeTool() toolcall.Tool {
 				def = "defs/" + id + ".ts"
 			}
 			if err := mutateGraph(func(g *graph.Graph) error {
-				return g.AddAttribute(id, graph.NewAttribute(def, intent))
+				if err := g.AddAttribute(id, graph.NewAttribute(def, intent)); err != nil {
+					return err
+				}
+				// Auto-偏序: record id <: parentAttr atomically. LinkRefine
+				// validates parentAttr exists; on failure the whole closure
+				// errors and mutateGraph aborts BEFORE save, so a bad
+				// parentAttr leaves nothing on disk (no orphan attribute).
+				if parentAttr != "" {
+					return g.LinkRefine(id, parentAttr)
+				}
+				return nil
 			}); err != nil {
 				return "", err
+			}
+			if parentAttr != "" {
+				return fmt.Sprintf("created attribute %s (def=%s, status=declared, refines %s — auto-偏序)", id, def, parentAttr), nil
 			}
 			return fmt.Sprintf("created attribute %s (def=%s, status=declared)", id, def), nil
 		},
@@ -123,7 +150,7 @@ func graphCreateObjectTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name:        "graph_create_object",
-				Description: "Add a new object (function type / hyperedge) to K/graph.json. Errors if id already exists. Status starts as 'declared'.\n\nDefault `def` is `defs/<id>.ts` (TypeScript-first convention). For non-TS projects, pass `def` explicitly.\n\nv9.5: storyPoints (Fibonacci scale 1/2/3/5/8/13) and storyRationale (≥10 chars) are required at creation time — they anchor decomposition discipline BEFORE writing begins. storyPoints ≥ 8 blocks status=implementing until graph_split_object decomposes the object. Scale: 1=arithmetic, 2=single loop, 3=multi-branch, 5=multi-step workflow, 8=must-split, 13=unrepresentable.\n\nAfter creation: (a) create the def file with the function signature and (b) once implemented, call `graph_merge_object --patch '{\"impl\":\"<actual file>\",\"status\":\"confirmed\"}'` to mark the work done — otherwise the §root-deliver gate will block session finish.",
+				Description: "Add a new object (function type / hyperedge) to K/graph.json. Errors if id already exists. Status starts as 'declared'.\n\nDefault `def` is `defs/<id>.ts` (TypeScript-first convention). For non-TS projects, pass `def` explicitly.\n\nv9.5: storyPoints (Fibonacci scale 1/2/3/5/8/13) and storyRationale (≥10 chars) are required at creation time — they anchor decomposition discipline BEFORE writing begins. storyPoints ≥ 8 blocks status=implementing until graph_split_object decomposes the object. Scale: 1=arithmetic, 2=single loop, 3=multi-branch, 5=multi-step workflow, 8=must-split, 13=unrepresentable.\n\nAfter creation: (a) create the def file with the function signature; (b) once implemented, set impl with `graph_merge_object --patch '{\"impl\":\"<actual file>\"}'`; (c) call `confirm_object(object_id=<id>)` — this is the ONLY way to reach status=confirmed. status=confirmed is NOT hand-settable via graph_merge_object (v11 process-justice): it is conferred only after the verification chain's mechanical behavioral-equivalence oracle passes. Until an object is confirmed via confirm_object, the §root-deliver gate blocks session finish.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -582,25 +609,28 @@ func graphMergeObjectTool() toolcall.Tool {
 			if err != nil {
 				return "", err
 			}
-			// 2026-05-09 v8.5 — typecalc-use becomes BLOCKING for the
-			// status=confirmed transition. Previously the typecalc-use
-			// hook (agent/hooks.go) only emitted an after-the-fact
-			// warning; agents would set status=confirmed, see the warn,
-			// then backfill compile evidence. The 5-instance v8.4 batch
-			// hit this 14× across all 5 instances ("先上车后买票").
-			// Now: refuse the merge before the on-disk graph mutates
-			// when patch.status=confirmed without the evidence file.
-			// The agent must run typecalc_compile (or typecalc_test)
-			// FIRST. The error message points at the exact remediation.
+			// 2026-05-19 v11 — PROCESS-JUSTICE / 流程正义 (correction ①).
+			// status=confirmed is NO LONGER hand-settable via this tool,
+			// unconditionally. Per 屎山代码维护Agent设计文档 §2.4/§6.6:
+			// confidence must be DERIVED from auditable evidence, never
+			// declared by the LLM. The v8.5 "evidence file exists ⇒ allow"
+			// escape was the hole — a compile-only auto-evidence file let
+			// "it compiles" masquerade as "it is correct", so agents
+			// hand-flipped confirmed (observed live in the 2026-05-19 entr
+			// run: status confirmed↔implementing thrash, run ended
+			// unconfirmed yet rc=0). The ONLY path to confirmed is now the
+			// confirm_object verification chain, whose MarkConfirmed
+			// mutates status directly (it bypasses this tool) and ONLY
+			// after the Characterization equivalence oracle (correction ②)
+			// passes. Any hand patch of status=confirmed is hard-refused.
 			if statusVal, hasStatus := patch["status"]; hasStatus {
 				if s, _ := statusVal.(string); s == graph.StatusConfirmed {
-					if !typecalcEvidenceFileExists(id) {
-						return "", fmt.Errorf(
-							"refusing to set status=confirmed for object %q: no typecalc evidence at .kcpos/typecalc-evidence/%s.json. "+
-								"Run typecalc_compile (or typecalc_test) for this object FIRST, then re-issue the merge. "+
-								"This is the v8.5 anti-'confirm-first-evidence-later' enforcement: agents were observed flipping confirm and backfilling compile, undermining the typecalc invariant.",
-							id, id)
-					}
+					return "", fmt.Errorf(
+						"refusing to set status=confirmed for object %q via graph_merge_object: confirmed is NOT hand-settable. "+
+							"It can only be conferred by the confirm_object verification chain, AFTER a mechanical behavioral-equivalence oracle "+
+							"(compile + run_local==probe over a non-model-controlled input battery) passes. "+
+							"Call confirm_object(object_id=%q) instead. Patching status=confirmed directly will ALWAYS be refused — this is the v11 process-justice invariant, not a transient check to backfill around.",
+						id, id)
 				}
 			}
 			// 2026-05-09 v8.5 / 2026-05-11 v9.0.3 — dual-source prevention.

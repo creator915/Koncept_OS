@@ -1,8 +1,13 @@
-// Package fs hosts filesystem-and-shell tools (read_file, write_file,
-// edit, list_dir, glob, grep, bash). Splitting this into its own
-// subpackage isolates write_file's auto-typecalc-on-impl-write logic
-// from the graph-mutation tools (graphtools), and keeps shell concerns
-// contained.
+// Package fs hosts filesystem tools (read_file, write_file, edit,
+// list_dir, glob, grep) plus the COMMAND-LOCKED execution tools
+// (compile, run_local, probe). The universal `bash` tool was removed
+// UNCONDITIONALLY: there is no model-facing arbitrary-shell tool in
+// any mode — no capability contract, no flag, no escape hatch can
+// bring it back. Shell capability is reachable ONLY through the
+// command-locked sub-tools, which take typed argv/stdin and never a
+// command string. The sole residual shell is `compile` running the
+// agent-authored compile.sh (see sandboxed.go) — the documented,
+// deployment-walled residual, not a general bash.
 package fs
 
 import "github.com/creator915/Koncept_OS/internal/llm/toolcall"
@@ -15,7 +20,6 @@ func Tools() map[string]toolcall.Tool {
 		"write_file":        writeFileTool(),
 		"edit":              editTool(),
 		"list_dir":          listDirTool(),
-		"bash":              bashTool(),
 		"compile":           compileTool(),
 		"run_local":         runLocalTool(),
 		"probe":             probeTool(),

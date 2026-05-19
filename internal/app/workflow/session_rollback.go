@@ -45,8 +45,26 @@ func Rollback(sessionDir, graphPath, id string) ([]string, error) {
 	if err := applyReverseDiff(g, &s.Output.GraphDiff); err != nil {
 		return deleted, fmt.Errorf("reverse-apply diff for %s: %w", id, err)
 	}
+	// 2b. Expansion rollback (KonceptOS §1.3): if this session expanded a
+	// top-graph object, undo the session-finish propagation — parent
+	// object back to expansion=null, status=declared. NOTHING else in the
+	// parent graph is touched (verified by a field-diff test), so the
+	// top hypergraph is never polluted by a rolled-back expansion.
+	if s.ExpandsObject != "" {
+		if obj, ok := g.Objects[s.ExpandsObject]; ok {
+			obj.Expansion = nil
+			obj.Status = graph.StatusDeclared
+			g.Objects[s.ExpandsObject] = obj
+		}
+	}
 	if err := persistence.SaveGraph(graphPath, g); err != nil {
 		return deleted, err
+	}
+	// 2c. Delete the entire sub-hypergraph directory K/expansions/<id>/
+	// (the doc's "删除 K/expansions/{id}/（整个子超图消失）"). Best-effort:
+	// the parent graph is already reverted; a leftover dir is cosmetic.
+	if s.ExpandsObject != "" {
+		_ = os.RemoveAll(filepath.Dir(persistence.ExpansionGraphPath(id)))
 	}
 
 	// 3. persistence.Delete impl + def files for entities this

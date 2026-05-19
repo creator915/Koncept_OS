@@ -45,7 +45,14 @@ func TypecalcTools() map[string]toolcall.Tool {
 // Duplicated here (rather than imported) because typecalctools cannot
 // import graphtools without creating a tangle — and the helper is small.
 func mutateGraph(mutate func(*graph.Graph) error) error {
-	g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+	// P1.2.3: Confirmed (and every services-side graph mutation) writes
+	// the CURRENT session's layer. MarkConfirmed flows through here, so
+	// status=confirmed lands in K/expansions/<sid>/graph.json when a
+	// sub-session is focused, and top-level K/graph.json otherwise
+	// (no focus / root ⇒ unchanged, P0.2 取舍#2). One resolver shared
+	// with graphtools.mutateGraph.
+	path := persistence.ActiveGraphPathFromFocus()
+	g, err := persistence.LoadGraphOrInit(path)
 	if err != nil {
 		return err
 	}
@@ -53,7 +60,7 @@ func mutateGraph(mutate func(*graph.Graph) error) error {
 	if err := mutate(g); err != nil {
 		return err
 	}
-	if err := persistence.SaveGraph(persistence.GraphDefaultPath, g); err != nil {
+	if err := persistence.SaveGraph(path, g); err != nil {
 		return err
 	}
 	_ = workflow.CaptureDiff(persistence.SessionDefaultDir, before, g)

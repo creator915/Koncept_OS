@@ -82,10 +82,22 @@ func runSessionBuild(mode string) (string, error) {
 		if obj.Impl == nil || *obj.Impl == "" {
 			continue
 		}
-		if obj.ImplFragment == nil || *obj.ImplFragment == "" {
+		frag := ""
+		if obj.ImplFragment != nil {
+			frag = *obj.ImplFragment
+		}
+		// v10: graph ImplContent is the source of truth; the K/frags/
+		// projection files are no longer agent-writable (write_file gate).
+		// Qualify an object that has a fragment path OR inline content;
+		// for content-only objects default the projection path so the
+		// rest of assembly stays unchanged.
+		if frag == "" && strings.TrimSpace(obj.ImplContent) == "" {
 			continue
 		}
-		entries = append(entries, entry{id: id, implPath: *obj.Impl, fragmentPath: *obj.ImplFragment})
+		if frag == "" {
+			frag = filepath.Join("K", "frags", id+".js")
+		}
+		entries = append(entries, entry{id: id, implPath: *obj.Impl, fragmentPath: frag})
 		deliverables[*obj.Impl] = struct{}{}
 	}
 	if len(entries) == 0 {
@@ -152,6 +164,18 @@ func runSessionBuild(mode string) (string, error) {
 	var missing []string
 	var unmodeled []string
 	for _, e := range ordered {
+		// v10: if the projection file is absent, materialise it from the
+		// graph object's ImplContent (source of truth). session_build is
+		// Go-side and NOT subject to the agent's write_file K/frags block,
+		// so this is what resolves the v10 deadlock (source lives in the
+		// graph, the file is forbidden to the agent).
+		if _, statErr := os.Stat(e.fragmentPath); statErr != nil {
+			if oc := g.Objects[e.id]; oc != nil && strings.TrimSpace(oc.ImplContent) != "" {
+				if derr := os.MkdirAll(filepath.Dir(e.fragmentPath), 0o755); derr == nil {
+					_ = os.WriteFile(e.fragmentPath, []byte(oc.ImplContent), 0o644)
+				}
+			}
+		}
 		body, err := os.ReadFile(e.fragmentPath)
 		if err != nil {
 			missing = append(missing, fmt.Sprintf("%s (%s): %v", e.id, e.fragmentPath, err))

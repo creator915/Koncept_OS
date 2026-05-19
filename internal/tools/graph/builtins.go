@@ -26,5 +26,9 @@ func Tools() map[string]toolcall.Tool {
 		"graph_validate":         graphValidateTool(),
 		"graph_preflight":        graphPreflightTool(),
 		"graph_render":           graphRenderTool(),
+		"graph_show_expanded":    graphShowExpandedTool(),
+		"graph_validate_deep":    graphValidateDeepTool(),
+		"graph_dep_order":        graphDepOrderTool(),
+		"graph_query_downstream": graphQueryDownstreamTool(),
 	}
 }

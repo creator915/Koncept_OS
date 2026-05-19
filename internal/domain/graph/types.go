@@ -106,6 +106,14 @@ type Object struct {
 	StoryRationale string `json:"storyRationale,omitempty"`
 	Status         string `json:"status"`
 	StatusSession  *string `json:"statusSession"`
+	// Expansion (KonceptOS_implementation_plan.md §1.1) is the sub-session
+	// id this object was expanded into — a hyperlink from this top-level
+	// node down to its child sub-hypergraph at
+	// K/expansions/<Expansion>/graph.json. nil = not expanded (the node is
+	// a leaf, or its expansion was rolled back). Only meaningful together
+	// with Status: an object is validly expanded iff Expansion != nil AND
+	// Status == confirmed (conferred by session-finish, not hand-set).
+	Expansion *string `json:"expansion,omitempty"`
 }
 
 type Temporal struct {

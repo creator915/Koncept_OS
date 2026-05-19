@@ -9,9 +9,9 @@ import (
 
 	"github.com/creator915/Koncept_OS/internal/domain/graph"
 	"github.com/creator915/Koncept_OS/internal/infra/persistence"
-	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/provider"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/router"
 	"github.com/creator915/Koncept_OS/internal/router/chains"
 	"github.com/creator915/Koncept_OS/internal/shared/agentctx"
@@ -45,7 +45,7 @@ func confirmObjectTool() toolcall.Tool {
 		Spec: transport.ToolSpec{
 			Type: "function",
 			Function: transport.ToolFunction{
-				Name: "confirm_object",
+				Name:        "confirm_object",
 				Description: "Drive ONE graph object through the full verification chain (compile → describe → synthesize_tests → test → review → mark confirmed) and stop when it reaches Confirmed or Obstacle. Replaces the v8.x sequence of 6 manual typecalc_* + graph_merge_object calls. Failures route through enrich-feedback + LLM-driven retry automatically; if the retry budget is exhausted the chain emits Obstacle. v9.2: Obstacle is a HARD failure — fix the impl, refactor, or extend kcpos's runner support. There is no waiver escape. Prerequisites: graph object exists with impl path set and (if needed) portObservation declared.",
 				Parameters: map[string]interface{}{
 					"type": "object",
@@ -74,7 +74,7 @@ func confirmObjectTool() toolcall.Tool {
 			// caller's context bloats per-object. Dispatch to a subagent
 			// instead — the subagent gets its own message history that
 			// dies with it.
-			g, _ := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+			g, _ := persistence.LoadGraphOrInit(persistence.ActiveGraphPathFromFocus())
 			count := 0
 			if g != nil {
 				count = len(g.Objects)
@@ -189,6 +189,15 @@ func (p typecalchainProductionDeps) toDeps() chains.Deps {
 		},
 
 		Synthesize: func(ctx context.Context, id string) (int, error) {
+			// ② Reconstruction mode (spec-less; ./probe is the oracle):
+			// there is NO contract to synthesize unit tests from. The
+			// verification is behavioral equivalence vs ./probe, run in
+			// the Test step. Return the (non-model-controlled) battery
+			// size as the case count so the chain proceeds to Test
+			// instead of dead-ending at CANNOT_SYNTHESIZE→Obstacle.
+			if reconstructionMode() {
+				return len(generateBattery()), nil
+			}
 			out, runErr := p.synth.Run(ctx, map[string]interface{}{"object_id": id})
 			if runErr != nil {
 				return 0, runErr
@@ -207,6 +216,18 @@ func (p typecalchainProductionDeps) toDeps() chains.Deps {
 		},
 
 		Test: func(ctx context.Context, id string) (kind string, ok bool, failingCase, expected, actual, runnerLog string, err error) {
+			// ② Reconstruction mode: the test IS the Characterization
+			// behavioral-equivalence oracle (./executable vs ./probe over
+			// the non-model-controlled battery). It persists the verdict
+			// as the bundle's Characterization section; confirmed is
+			// gated on it at MarkConfirmed (defense-in-depth).
+			if reconstructionMode() {
+				passed, summary, oErr := runEquivalenceOracle(ctx, id)
+				if oErr != nil {
+					return "", false, "", "", "", "", oErr
+				}
+				return "behavioral-equivalence", passed, "", "", "", summary, nil
+			}
 			_, runErr := p.test.Run(ctx, map[string]interface{}{"object_id": id})
 			if runErr != nil {
 				return "", false, "", "", "", "", runErr
@@ -261,7 +282,7 @@ func (p typecalchainProductionDeps) toDeps() chains.Deps {
 		},
 
 		IsHTMLImpl: func(ctx context.Context, id string) (bool, error) {
-			g, gerr := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+			g, gerr := persistence.LoadGraphOrInit(persistence.ActiveGraphPathFromFocus())
 			if gerr != nil {
 				return false, gerr
 			}
@@ -325,6 +346,22 @@ func (p typecalchainProductionDeps) toDeps() chains.Deps {
 		},
 
 		MarkConfirmed: func(ctx context.Context, id string) error {
+			// ② HARD CHOKEPOINT. In reconstruction mode, confirmed is
+			// conferred ONLY if a PASSING behavioral-equivalence
+			// characterization (./executable == ./probe over the
+			// non-model-controlled battery) was recorded. No such
+			// evidence ⇒ refuse → the chain emits Obstacle, never
+			// Confirmed. This is what makes "confirmed" mean "verified
+			// against the reference", not "it compiled" — the v11
+			// process-justice invariant, enforced even if some future
+			// path reached MarkConfirmed without going through Test.
+			if reconstructionMode() && !hasEquivEvidence(id) {
+				return fmt.Errorf(
+					"refusing to confer status=confirmed on %q: no PASSING behavioral-equivalence evidence. "+
+						"In reconstruction mode confirmed requires ./executable to match ./probe across the gate-generated battery. "+
+						"Run the verification chain (confirm_object) so the equivalence oracle records a passing Characterization; "+
+						"a non-matching or absent oracle is an Obstacle, not a confirm.", id)
+			}
 			// Get current session for audit trail.
 			currentSession, _ := persistence.GetFocus(persistence.SessionDefaultDir)
 			sessionPtr := (*string)(nil)
@@ -347,6 +384,27 @@ func (p typecalchainProductionDeps) toDeps() chains.Deps {
 				obj.Status = graph.StatusConfirmed
 				obj.StatusSession = sessionPtr
 				g.Objects[id] = obj
+				// Confer confirmed (via the legal §5.2 two-step) on the
+				// attributes this object produces/mutates whose value
+				// structure is already populated. Without this they stay
+				// `declared`, and the agent is forced into an illegal
+				// declared→confirmed merge (the pong dead-loop observed
+				// 2026-05-19: "illegal status transition declared →
+				// confirmed; the only legal next step is implementing").
+				// Attributes without a valueSpace are NOT touched — they
+				// are genuinely unconfirmable (confirmed-needs-valueSpace).
+				for _, an := range append(append([]string{}, obj.Produces...), obj.Mutates...) {
+					a, aok := g.Attributes[an]
+					if !aok || a.Status == graph.StatusConfirmed || len(a.ValueSpace) == 0 {
+						continue
+					}
+					if a.Status == graph.StatusDeclared {
+						a.Status = graph.StatusImplementing
+						a.StatusSession = sessionPtr
+					}
+					a.Status = graph.StatusConfirmed
+					a.StatusSession = sessionPtr
+				}
 				return nil
 			})
 		},
@@ -395,7 +453,7 @@ func fixImplViaLLM(ctx context.Context, objectID, prompt string) (branch, reason
 // the path + current file content. Used by fixImplViaLLM to set up the
 // repair LLM call with the actual source.
 func loadImplFor(objectID string) (path, content string, err error) {
-	g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+	g, err := persistence.LoadGraphOrInit(persistence.ActiveGraphPathFromFocus())
 	if err != nil {
 		return "", "", fmt.Errorf("load graph: %w", err)
 	}

@@ -45,6 +45,23 @@ func isObjectDefPath(path string) bool {
 	return true
 }
 
+// implHasOwningObject reports whether some graph object already claims
+// `path` as its impl (obj.Impl == path). Matching semantics are
+// deliberately identical to resolveAutoCompileTarget step 1 so the
+// upstream process-justice gate and auto-compile attribution agree.
+func implHasOwningObject(path string) bool {
+	g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+	if err != nil || g == nil {
+		return false
+	}
+	for _, obj := range g.Objects {
+		if obj.Impl != nil && *obj.Impl == path {
+			return true
+		}
+	}
+	return false
+}
+
 // isLikelyImplPath returns true for paths that look like real code
 // (impl files outside K/defs/). Heuristic: extension matches a known
 // source-code language. Excludes K/defs/ entirely so attribute defs
@@ -124,6 +141,28 @@ func writeFileTool() toolcall.Tool {
 				if err := agentctx.CheckMainImplWork(ctx, count, action); err != nil {
 					return "", err
 				}
+			}
+			// UPSTREAM PROCESS-JUSTICE GATE (流程正义) — the upstream half,
+			// integrated with ①②③. An implementation file may be written
+			// ONLY if a graph object already owns it (obj.Impl == path).
+			// kcpos is graph-first ("图是工作流的源头"): writing impl with
+			// no owning object lets the agent walk the entire un-just
+			// bare path and only be ambushed at the ③ termination gate.
+			// This catches it at the FIRST impl write instead. UNIVERSAL
+			// (not contract-scoped) by design — graph-first IS the design,
+			// and a universal structural rule has no opt-in fragility
+			// (unlike a flag-gated check). graph_create_object is in the
+			// catalog in every mode, so the agent can always comply: this
+			// CONSTRAINS the un-just path, it does not deadlock.
+			if isLikelyImplPath(path) && !implHasOwningObject(path) {
+				return "", fmt.Errorf(
+					"write_file BLOCKED (process-justice / 流程正义): %q is an implementation file but NO graph object owns it. "+
+						"kcpos is graph-first — writing impl with no owning object walks the un-just path (no verification chain). "+
+						"Required, in order, before retrying: (1) graph_create_object with an id + intent for this deliverable; "+
+						"(2) graph_merge_object with a patch binding impl=%q to that object; (3) then write_file this path. "+
+						"status=confirmed is then conferred ONLY by confirm_object's mechanical behavioral-equivalence oracle "+
+						"(./executable == ./probe over a non-model battery) — never hand-set. This is mandatory and cannot be skipped.",
+					path, path)
 			}
 			if dir := filepath.Dir(path); dir != "" && dir != "." {
 				if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -21,7 +21,7 @@ import (
 func RunChat(args []string) int {
 	fs := flag.NewFlagSet("kcpos chat", flag.ExitOnError)
 	resume := fs.String("resume", "", "resume a chat transcript: <id> or 'latest'")
-	contract := fs.String("contract", "", "capability contract preset (e.g. 'blackbox'); fail-closed — an unknown name aborts rather than running unrestricted. Use for harnessed/untrusted runs (ProgramBench etc.).")
+	contract := fs.String("contract", "", "capability contract preset (e.g. 'blackbox'); fail-closed — an unknown name aborts rather than running unrestricted. Use for any harnessed/untrusted run.")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, `kcpos chat — interactive AI agent
 
@@ -101,7 +101,10 @@ func runChatWithPrompt(resumeID, prompt, focusID, contract string) int {
 	}
 
 	if prompt != "" {
-		// one-shot
+		// one-shot. Persist the transcript after every completed turn so
+		// a timeout/SIGTERM kill mid-run still leaves a JSON log on disk
+		// (pre-fix: save happened only AFTER the whole loop returned).
+		runOpts.OnProgress = func() { _ = tr.Save() }
 		if err := agent.RunTurnOpts(ctx, client, &tr.Messages, prompt, runOpts); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			_ = tr.Save()

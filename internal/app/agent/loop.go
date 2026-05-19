@@ -71,6 +71,17 @@ type RunOptions struct {
 	// that blocks the main conversation from writing impl files once
 	// the graph has ≥5 objects (forces it to spawn subagents instead).
 	Depth int
+
+	// OnProgress, if set, is invoked at the end of every completed loop
+	// iteration (after that turn's assistant message + tool results +
+	// any hook-violation messages have been appended to *messages).
+	// Callers use it to durably persist the transcript per turn, so a
+	// SIGTERM/timeout kill mid-run still leaves the last completed turn
+	// on disk (pre-fix: the one-shot path only saved AFTER the whole
+	// loop returned, so timed-out runs produced no transcript at all).
+	// Runs synchronously in the loop goroutine — no data race on
+	// *messages.
+	OnProgress func()
 }
 
 // Depth plumbing has moved to internal/shared/agentctx so tool packages
@@ -126,6 +137,12 @@ func RunTurnOpts(ctx context.Context, client *transport.Client, messages *[]tran
 		hooks = DefaultHooks()
 	}
 
+	// ③ process-justice termination gate state (流程正义). Counts how
+	// many times we refused to let a harnessed run finish without an
+	// evidence-derived Confirmed deliverable; bounded by
+	// maxConfirmGateNudges → explicit GateFailed.
+	confirmNudges := 0
+
 	for i := 0; i < maxIters; i++ {
 		var (
 			reasoningStarted bool
@@ -172,6 +189,36 @@ func RunTurnOpts(ctx context.Context, client *transport.Client, messages *[]tran
 		*messages = append(*messages, *assistant)
 
 		if len(assistant.ToolCalls) == 0 {
+			// ③ PROCESS-JUSTICE TERMINATION GATE (流程正义). A harnessed
+			// run (Caps != nil ⇒ scored/task run, not casual interactive
+			// chat) may not end "successfully" without an evidence-derived
+			// Confirmed deliverable. Given ①②, a confirmed object can only
+			// exist because the confirm_object chain's behavioral-
+			// equivalence oracle passed — never because the model declared
+			// done. Bounded: nudge then explicit GateFailed (never silent
+			// success, never infinite spin).
+			if opts.Caps != nil && !hasConfirmedDeliverable() {
+				if confirmNudges >= maxConfirmGateNudges {
+					return fmt.Errorf(
+						"process-justice (流程正义): harnessed run ended with NO confirmed deliverable after %d nudges — GateFailed. "+
+							"status=confirmed is conferred ONLY by the confirm_object chain after the mechanical behavioral-equivalence oracle "+
+							"(./executable == ./probe over a gate-generated battery) passes. The run did not produce one.",
+						confirmNudges)
+				}
+				confirmNudges++
+				*messages = append(*messages, transport.Message{
+					Role: "user",
+					Content: "STOP — you attempted to finish, but NO graph object has reached status=confirmed. " +
+						"Per process-justice (流程正义) a harnessed run cannot end without an evidence-derived Confirmed deliverable. " +
+						"status=confirmed is NOT hand-settable (graph_merge_object will refuse it); it is conferred ONLY by the " +
+						"confirm_object verification chain AFTER its mechanical behavioral-equivalence oracle (your ./executable vs ./probe " +
+						"over a gate-generated, non-model-controlled battery) passes. Action: ensure a graph object owns your deliverable's " +
+						"impl (graph_create_object + graph_merge_object impl=<path>), then call confirm_object(object_id=<id>) and resolve " +
+						"any Obstacle it reports (a mismatch means your reconstruction differs from the reference — fix the code). " +
+						"Finishing without a Confirmed object will be refused again.",
+				})
+				continue
+			}
 			return nil
 		}
 
@@ -258,6 +305,11 @@ func RunTurnOpts(ctx context.Context, client *transport.Client, messages *[]tran
 					Content: FormatViolations(violations),
 				})
 			}
+		}
+		// Durable per-turn persistence: a timeout/SIGTERM kill mid-run
+		// still leaves the last completed turn on disk.
+		if opts.OnProgress != nil {
+			opts.OnProgress()
 		}
 	}
 	return fmt.Errorf("agent exceeded max iterations (%d)", maxIters)

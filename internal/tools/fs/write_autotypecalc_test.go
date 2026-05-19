@@ -31,8 +31,49 @@ func evidencePath(dir, id string) string {
 	return filepath.Join(dir, ".kcpos", "typecalc", id+".json")
 }
 
+// writeOwningGraph writes K/graph.json with one object `id` whose impl
+// is `implPath` — the upstream process-justice precondition for writing
+// that impl (graph-first is now mandatory).
+func writeOwningGraph(t *testing.T, dir, id, implPath string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "K"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := `{"attributes":{},"objects":{"` + id + `":{"def":"defs/` + id +
+		`.ts","impl":"` + implPath + `","consumes":[],"produces":[],"mutates":[],` +
+		`"intent":"","temporal":null,"preconditions":"","postconditions":"",` +
+		`"status":"declared","statusSession":null}}}`
+	if err := os.WriteFile(filepath.Join(dir, "K", "graph.json"), []byte(g), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWriteFile_ProcessJustice_BlocksImplWithoutGraphObject is the
+// regression guard for the UPSTREAM process-justice gate: an impl file
+// with NO owning graph object must be refused, file not created. Do not
+// "fix" a failure here by weakening the gate — that re-opens the
+// un-just bare path (write impl with zero verification-chain binding).
+func TestWriteFile_ProcessJustice_BlocksImplWithoutGraphObject(t *testing.T) {
+	dir := chdirToFreshProject(t)
+	tool := writeFileTool()
+	_, err := tool.Run(context.Background(), map[string]interface{}{
+		"path":    "src/Orphan.go",
+		"content": "package main\nfunc main(){}\n",
+	})
+	if err == nil {
+		t.Fatal("expected upstream process-justice block writing impl with no owning graph object")
+	}
+	if !strings.Contains(err.Error(), "process-justice") {
+		t.Errorf("error should explain the process-justice gate, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "src", "Orphan.go")); statErr == nil {
+		t.Errorf("blocked impl file must NOT be created on disk")
+	}
+}
+
 func TestWriteFile_AutoTypecalc_ImplPattern_GoOK(t *testing.T) {
 	dir := chdirToFreshProject(t)
+	writeOwningGraph(t, dir, "Foo", "src/Foo.impl.go")
 	tool := writeFileTool()
 	args := map[string]interface{}{
 		"path":    "src/Foo.impl.go",
@@ -68,6 +109,7 @@ func TestWriteFile_AutoTypecalc_ImplPattern_GoOK(t *testing.T) {
 
 func TestWriteFile_AutoTypecalc_ImplPattern_GoFails(t *testing.T) {
 	dir := chdirToFreshProject(t)
+	writeOwningGraph(t, dir, "Bad", "src/Bad.impl.go")
 	tool := writeFileTool()
 	args := map[string]interface{}{
 		"path":    "src/Bad.impl.go",

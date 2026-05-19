@@ -10,6 +10,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 	"github.com/creator915/Koncept_OS/internal/app/workflow"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
 	"github.com/creator915/Koncept_OS/internal/domain/session"
 	"github.com/creator915/Koncept_OS/internal/infra/persistence"
 )
@@ -98,6 +99,7 @@ func sessionStartTool() toolcall.Tool {
 						"id":     map[string]interface{}{"type": "string", "description": "Session id (s_ auto-prepended if missing)."},
 						"parent": map[string]interface{}{"type": "string", "description": "Parent session id, or empty for a root session."},
 						"task":   map[string]interface{}{"type": "string", "description": "Brief task description."},
+						"expands_object": map[string]interface{}{"type": "string", "description": "Optional (KonceptOS §1.3). The top-graph object id this session expands into a sub-hypergraph. Must already exist as an object in K/graph.json or session_start is refused. When set, an empty K/expansions/<id>/graph.json is created and subsequent graph-write goes there (active-layer binding); on session_finish the parent object's expansion+confirmed status are set."},
 						"signatures": map[string]interface{}{
 							"type":        "array",
 							"items":       map[string]interface{}{"type": "string"},
@@ -125,6 +127,20 @@ func sessionStartTool() toolcall.Tool {
 			if task == "" {
 				return "", fmt.Errorf("task required")
 			}
+			expandsObjectRaw, _ := args["expands_object"].(string)
+			expandsObject := strings.TrimSpace(expandsObjectRaw)
+			// Validate the expanded object exists in the TOP graph BEFORE
+			// creating the session — a session must never be created for a
+			// non-existent object (KonceptOS §1.3 precondition).
+			if expandsObject != "" {
+				tg, gerr := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+				if gerr != nil {
+					return "", fmt.Errorf("session_start: load top graph: %w", gerr)
+				}
+				if _, ok := tg.Objects[expandsObject]; !ok {
+					return "", fmt.Errorf("session_start: expands_object %q is not an object in the top hypergraph (K/graph.json) — create it via graph_create_object first", expandsObject)
+				}
+			}
 			input := session.Input{
 				Signatures: stringList(args["signatures"]),
 				Context:    stringList(args["context"]),
@@ -133,11 +149,29 @@ func sessionStartTool() toolcall.Tool {
 			if err != nil {
 				return "", err
 			}
+			if expandsObject != "" {
+				// Record the expansion link on the session and create the
+				// empty sub-hypergraph file (KonceptOS §1.3: session-start
+				// "创建 K/expansions/{id}/graph.json（空的子超图）").
+				// Subsequent graph-write auto-targets it via the focused
+				// session's ActiveGraphPath (P1.1.2/P1.2.3).
+				s.ExpandsObject = expandsObject
+				if serr := persistence.SaveSession(persistence.SessionDefaultDir, s); serr != nil {
+					return "", fmt.Errorf("session_start: record expands_object: %w", serr)
+				}
+				if serr := persistence.SaveExpansionGraph(s.ID, graph.NewGraph()); serr != nil {
+					return "", fmt.Errorf("session_start: create empty sub-hypergraph: %w", serr)
+				}
+			}
 			parentInfo := ""
 			if s.Parent != "" {
 				parentInfo = " · parent=" + s.Parent
 			}
-			return fmt.Sprintf("started %s · status=active · focused%s", s.ID, parentInfo), nil
+			expInfo := ""
+			if expandsObject != "" {
+				expInfo = " · expands=" + expandsObject + " → " + persistence.ExpansionGraphPath(s.ID)
+			}
+			return fmt.Sprintf("started %s · status=active · focused%s%s", s.ID, parentInfo, expInfo), nil
 		},
 	}
 }
@@ -168,7 +202,11 @@ func sessionShowTool() toolcall.Tool {
 			if err != nil {
 				return "", err
 			}
-			return formatSession(s), nil
+			out := formatSession(s)
+			if s.ExpandsObject != "" {
+				out += expansionSummary(s.ID, s.ExpandsObject)
+			}
+			return out, nil
 		},
 	}
 }
@@ -268,10 +306,30 @@ func sessionStatusTool() toolcall.Tool {
 						)
 					}
 				}
+				// Expansion-finish gate (KonceptOS §1.3): an expansion
+				// session can only finish when its sub-hypergraph is fully
+				// confirmed + validates + children finished + produce/consume
+				// correspondence holds. Failure is a LIST of reasons.
+				reasons, rerr := workflow.ExpansionFinishReasons(persistence.SessionDefaultDir, persistence.GraphDefaultPath, id)
+				if rerr != nil {
+					return "", rerr
+				}
+				if len(reasons) > 0 {
+					return "", fmt.Errorf(
+						"refusing to finish expansion session %s: gate FAIL with %d reason(s):\n  - %s",
+						id, len(reasons), strings.Join(reasons, "\n  - "))
+				}
 			}
 			s, err := workflow.SetStatus(persistence.SessionDefaultDir, id, session.Status(to))
 			if err != nil {
 				return "", err
+			}
+			// Success side: confer Expansion + confirmed on the parent
+			// object (no-op for non-expansion sessions).
+			if session.Status(to) == session.StatusFinished {
+				if perr := workflow.PropagateExpansion(persistence.SessionDefaultDir, persistence.GraphDefaultPath, id); perr != nil {
+					return "", perr
+				}
 			}
 			return fmt.Sprintf("%s status → %s", s.ID, s.Status), nil
 		},
@@ -590,6 +648,26 @@ func gateObjectTool() toolcall.Tool {
 			return b.String(), nil
 		},
 	}
+}
+
+// expansionSummary (P1.3.4) renders the sub-hypergraph digest for an
+// expansion session: object count, confirmed count, validate status.
+// Read-only.
+func expansionSummary(sid, expandsObject string) string {
+	sub, _ := persistence.LoadExpansionGraphOrInit(sid)
+	confirmed := 0
+	for _, o := range sub.Objects {
+		if o.Status == graph.StatusConfirmed {
+			confirmed++
+		}
+	}
+	cwd, _ := os.Getwd()
+	vstatus := "PASS"
+	if sub.Validate(cwd).HasErrors() {
+		vstatus = "FAIL"
+	}
+	return fmt.Sprintf("  expansion: %s → %s\n  sub-objects: %d (confirmed %d)\n  sub-validate: %s\n",
+		expandsObject, persistence.ExpansionGraphPath(sid), len(sub.Objects), confirmed, vstatus)
 }
 
 func formatSession(s *session.Session) string {

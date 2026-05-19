@@ -66,12 +66,6 @@ func main() {
 		os.Exit(commands.RunDoctor(rest))
 	case "characterize":
 		os.Exit(commands.RunCharacterize(rest))
-	case "pb-run":
-		os.Exit(commands.RunPB(rest))
-	case "pb-solve":
-		os.Exit(commands.RunPBSolve(rest))
-	case "pb-audit":
-		os.Exit(commands.RunPBAudit(rest))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		os.Exit(0)

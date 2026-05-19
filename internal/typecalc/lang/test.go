@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -160,6 +161,10 @@ func TestRunInvoker(ctx context.Context, env *core.RuleEnv, compiled, suite *cor
 		return runJSTest(ctx, env, compiled, suite)
 	case core.LangPython:
 		return runPythonTest(ctx, env, compiled, suite)
+	case core.LangRust:
+		return runRustTest(ctx, env, compiled, suite)
+	case core.LangC:
+		return runCTest(ctx, env, compiled, suite)
 	}
 	// CRITICAL: no in-tree test runner for this language. We return
 	// Insufficient with a reason. v9.2 — the waiver escape was removed,
@@ -169,6 +174,62 @@ func TestRunInvoker(ctx context.Context, env *core.RuleEnv, compiled, suite *cor
 	return core.NewInsufficient(fmt.Sprintf(
 		"no in-tree test runner for language %q — kcpos cannot mechanically verify this code. v9.2 has no waiver escape; resolve by restructuring the impl into a runner-supported language (Go / TypeScript / JavaScript / Python / HTML), OR extend internal/typecalc/lang/ with a TestRunInvoker for %q.",
 		compiled.Lang, compiled.Lang)), nil
+}
+
+// runCTest implements the doc's C mapping: "编译并运行测试二进制".
+// kcpos's impl model is single-file, so impl + test are one translation
+// unit (the test source carries main() and exits non-zero on failure).
+func runCTest(ctx context.Context, env *core.RuleEnv, compiled, suite *core.TypedValue) (*core.TypedValue, error) {
+	if !commandExists("gcc") {
+		return compiled.WithState(core.StateTestedPass), nil // fail-open, like JS/Py
+	}
+	dir, err := os.MkdirTemp("", "kcpos-ctest-*")
+	if err != nil {
+		return core.NewTestError("setup", "no error", err.Error()), nil
+	}
+	defer os.RemoveAll(dir)
+	src := filepath.Join(dir, "combined.c")
+	if err := os.WriteFile(src, []byte(compiled.Payload+"\n"+suite.Payload), 0o644); err != nil {
+		return core.NewTestError("setup", "no error", err.Error()), nil
+	}
+	bin := filepath.Join(dir, "testbin")
+	if out, err := runCmd(ctx, dir, "gcc", src, "-o", bin); err != nil {
+		return core.NewTestError("compile-test-binary", "tests pass", string(out)+"\n"+err.Error()), nil
+	}
+	if out, err := runCmd(ctx, dir, bin); err != nil {
+		// Append the exit error so a binary that fails by exit-code only
+		// (no stdout) still carries a non-empty Actual — the brownfield
+		// characterization datum must never be empty.
+		return core.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)+"\n"+err.Error()), nil
+	}
+	return compiled.WithState(core.StateTestedPass), nil
+}
+
+// runRustTest implements the doc's Rust mapping ("cargo test"). cargo
+// needs a Cargo.toml project scaffold; for kcpos's single-file impl
+// model the faithful equivalent is `rustc --test` (builds the #[test]
+// harness binary) then run it. Deviation disclosed in the rollout doc.
+func runRustTest(ctx context.Context, env *core.RuleEnv, compiled, suite *core.TypedValue) (*core.TypedValue, error) {
+	if !commandExists("rustc") && !commandExists("cargo") {
+		return compiled.WithState(core.StateTestedPass), nil // fail-open
+	}
+	dir, err := os.MkdirTemp("", "kcpos-rstest-*")
+	if err != nil {
+		return core.NewTestError("setup", "no error", err.Error()), nil
+	}
+	defer os.RemoveAll(dir)
+	src := filepath.Join(dir, "combined.rs")
+	if err := os.WriteFile(src, []byte(compiled.Payload+"\n"+suite.Payload), 0o644); err != nil {
+		return core.NewTestError("setup", "no error", err.Error()), nil
+	}
+	bin := filepath.Join(dir, "rstest")
+	if out, err := runCmd(ctx, dir, "rustc", "--test", src, "-o", bin); err != nil {
+		return core.NewTestError("compile-test-binary", "tests pass", string(out)+"\n"+err.Error()), nil
+	}
+	if out, err := runCmd(ctx, dir, bin); err != nil {
+		return core.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)+"\n"+err.Error()), nil
+	}
+	return compiled.WithState(core.StateTestedPass), nil
 }
 
 func runGoTest(ctx context.Context, env *core.RuleEnv, compiled, suite *core.TypedValue) (*core.TypedValue, error) {
