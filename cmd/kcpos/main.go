@@ -26,6 +26,7 @@ Usage:
   kcpos                            interactive AI agent (REPL)
   kcpos "task"                     one-shot AI agent (legacy form)
   kcpos chat [flags] [task]        explicit chat subcommand
+  kcpos run-routed [flags] "task"  Phase-2.C outer-Router run (Handler×3 type-driven dispatch)
   kcpos graph <verb> ...           direct CLI on K/graph.json
   kcpos session <verb> ...         work-session lifecycle (K/sessions/)
   kcpos checkpoint <verb> ...      verification ledger (K/checkpoint.json)
@@ -54,6 +55,8 @@ func main() {
 	switch sub {
 	case "chat":
 		os.Exit(commands.RunChat(rest))
+	case "run-routed":
+		os.Exit(commands.RunRouted(rest))
 	case "graph":
 		os.Exit(commands.RunGraph(rest))
 	case "session":

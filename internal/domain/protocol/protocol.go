@@ -23,25 +23,39 @@ import (
 	"strings"
 )
 
-// Layer represents the L0..L4 product hierarchy. Only L4 is a
-// deliverable; L0..L3 are work-in-progress states. This matches
-// CLAUDE.md §0 (pre-v9.0) — encoded here so the gate / hooks / docs
-// generator all reference the same definitions.
-type Layer struct {
-	ID          int    // 0..4
-	Name        string // L0..L4
-	Content     string // what populates this layer
-	IsDeliverable bool // L4 only
+// Stage represents one product-readiness stage produced by the three
+// core Handlers. Only the final stage is a deliverable; preceding
+// stages are work-in-progress states. Naming aligned to KonceptOS
+// 2026-05-19: Handler 1.1 / 1.2 / 1.3 is the canonical vocabulary;
+// the pre-v9.0 L0..L4 labels were the same mechanism under an older
+// name and have been retired (see project_handler_x3_canonical memo).
+type Stage struct {
+	ID            string // "H1.1" / "H1.2" / "H1.3.unit" / "H1.3.integ" / "H1.3.final"
+	Handler       string // owning Handler ("1.1" | "1.2" | "1.3")
+	Content       string // what populates this stage
+	IsDeliverable bool   // only H1.3.final
 }
 
-// Layers is the canonical layer table. Order matches CLAUDE.md §0.
-var Layers = []Layer{
-	{ID: 0, Name: "L0", Content: "K/defs/*.ts signatures + graph.json node declarations"},
-	{ID: 1, Name: "L1", Content: "src/*.impl.ts implementations + graph status=confirmed"},
-	{ID: 2, Name: "L2", Content: "src/*.test.ts unit/contract tests passing"},
-	{ID: 3, Name: "L3", Content: "integration.test.ts + dist/bundle.js (if bundled-form project)"},
-	{ID: 4, Name: "L4", Content: "checkpoint.json all must items have codeProof AND finalVerdict=PASS, root session output aggregates all child outputs, executable deliverable file exists at the conventional path", IsDeliverable: true},
+// Layer is a deprecated alias kept until external callers (if any)
+// migrate. Identical to Stage.
+//
+// Deprecated: use Stage. Will be removed in a future revision.
+type Layer = Stage
+
+// Stages is the canonical stage table. Five rows in chronological
+// order; H1.1 → H1.2 → H1.3 (split into unit / integ / final).
+var Stages = []Stage{
+	{ID: "H1.1", Handler: "1.1", Content: "K/defs/*.ts signatures + K/graph.json node declarations (Hypergraph Handler product)"},
+	{ID: "H1.2", Handler: "1.2", Content: "src/*.impl.ts implementations + graph status=confirmed (Code-Compile-Test Handler product)"},
+	{ID: "H1.3.unit", Handler: "1.3", Content: "src/*.test.ts unit/contract tests passing (Session Handler — per-object verification phase)"},
+	{ID: "H1.3.integ", Handler: "1.3", Content: "integration.test.ts + dist/bundle.js (if bundled-form project) (Session Handler — integration phase)"},
+	{ID: "H1.3.final", Handler: "1.3", Content: "checkpoint.json all must items have codeProof AND finalVerdict=PASS, root session output aggregates all child outputs, executable deliverable file exists at the conventional path (Session Handler — finish/deliverable)", IsDeliverable: true},
 }
+
+// Layers is a deprecated alias for Stages.
+//
+// Deprecated: use Stages.
+var Layers = Stages
 
 // PathBTriggers are the OR-conditions that force a session into path B
 // (delegated work via spawn_subagent + child sessions) instead of path
@@ -146,23 +160,26 @@ const StoryPointSplitThreshold = 8
 // are coordinated.
 const CycleCap = 5
 
-// RootFinishStep is one ordered step of the root-session finish flow.
-// Pre-v9.0 these lived in CLAUDE.md §5.5 as R1..R5; v9.0 encodes them
-// so the agent system prompt + gate can reference the same list.
+// RootFinishStep is one ordered step of Handler 1.3's root-session
+// finish flow. Pre-v9.0 these had R1..R4 short codes; the canonical
+// names now are H1.3.aggregate / H1.3.build / H1.3.checkpoint /
+// H1.3.gate — same steps, retired vocabulary.
 type RootFinishStep struct {
-	ID    string // "R1".."R4"
+	ID    string // "H1.3.aggregate" / "H1.3.build" / "H1.3.checkpoint" / "H1.3.gate"
 	Name  string
 	Doing string // imperative one-liner
 }
 
-// RootFinishFlow is the canonical root-finish step sequence. v9.0
-// dropped the gameplayProof step (was R3 in v8.7); current sequence
-// is R1 aggregate → R2 build/test → R3 checkpoint fill → R4 final gate.
+// RootFinishFlow is the canonical Handler 1.3 root-finish step
+// sequence. Renamed in 2026-05-19 (project_handler_x3_canonical):
+// aggregate → build/test → checkpoint fill → final gate. v9.0 had
+// dropped the gameplayProof step that lived between aggregate and
+// build in v8.7.
 var RootFinishFlow = []RootFinishStep{
-	{ID: "R1", Name: "aggregate", Doing: "session_aggregate root — collect implementations/tests/newSignatures from every child session"},
-	{ID: "R2", Name: "build+test", Doing: "for HTML/single-file projects with implFragment: call session_build to concatenate fragments into the deliverable (e.g. index.html). For multi-file projects: run npm run build / cargo build / etc. Then run the full test suite. If single-file with NO fragments, just verify the file exists and is non-empty"},
-	{ID: "R3", Name: "checkpoint-fill", Doing: "checkpoint_fill every must item with codeProof (file:line + key export)"},
-	{ID: "R4", Name: "gate", Doing: "session_gate_check root — fixed-point: any FAIL means iterate, only PASS allows session_status root finished"},
+	{ID: "H1.3.aggregate", Name: "aggregate", Doing: "session_aggregate root — collect implementations/tests/newSignatures from every child session"},
+	{ID: "H1.3.build", Name: "build+test", Doing: "for HTML/single-file projects: call session_build which reads every object's implContent and emits the assembled deliverable (e.g. index.html). For multi-file projects: run npm run build / cargo build / etc. Then run the full test suite. If single-file with no extra build step needed, just verify the deliverable file exists and is non-empty"},
+	{ID: "H1.3.checkpoint", Name: "checkpoint-fill", Doing: "checkpoint_fill every must item with codeProof (file:line + key export)"},
+	{ID: "H1.3.gate", Name: "gate", Doing: "session_gate_check root — fixed-point: any FAIL means iterate, only PASS allows session_status root finished"},
 }
 
 // FinishCondition is one of the "unfinished checklist" predicates from
@@ -203,19 +220,19 @@ var AntiPatterns = []AntiPattern{
 	{ID: "AP2", Description: "Marked root session finished without opening any child session"},
 	{ID: "AP3", Description: "Test files exist but contain it.skip / expect(true).toBe(true) placeholders"},
 	{ID: "AP4", Description: "Treated 'checkpoint frozen' or 'signatures designed' as milestone delivery — they are work steps, not products"},
-	{ID: "AP5", Description: "Wrote code + tests green + bundle built then claimed done — that is only L3; L4 requires codeProof full fill + finalVerdict=PASS + deliverable file present"},
+	{ID: "AP5", Description: "Wrote code + tests green + bundle built then claimed done — that is only Handler 1.3 mid-stage (H1.3.integ); Handler 1.3 finish (H1.3.final) requires codeProof full fill + finalVerdict=PASS + deliverable file present"},
 	{ID: "AP6", Description: "All children finished → reported done — root still owes the §5.5 flow"},
 	{ID: "AP7", Description: "Silently scoped down deliverables when token/attention dropped — narrow the SPEC explicitly with the user instead. v9.2: 'declare obstacle' is no longer a valid exit; the gate refuses confirm regardless."},
 	{ID: "AP8", Description: "long-markdown-bulk-read — Used read_file with force=true (or any bulk read) on a SPEC/DESIGN/etc. markdown file ≥5K tokens, dumping the entire document into one context. Always use markdown_outline first, then markdown_section for the specific chapters needed. This applies to any long markdown — not just SPEC.md."},
-	{ID: "AP9", Description: "js-defs-as-impl — Wrote a JS def file (K/defs/<id>.js) with non-throw function bodies (e.g. `function Foo(x){ return 0; }`) and used that as 'implementation' evidence. JS defs MUST be throw-stubs; the real impl lives in K/frags/<id>.js (see Single-file deliverable model). Static check `defs-must-throw` fires on any non-throw body."},
-	{ID: "AP10", Description: "frag-trivial-stub — Wrote a fragment file (K/frags/<id>.js) whose function body is a one-line literal return (`return 0;` / `return [];` / `return {};`) just to make typecalc_compile pass. Fragments must contain real logic — at least one control-flow statement (if/for/while) or non-literal computation. Static check `frags-non-trivial` fires on these stubs."},
-	{ID: "AP11", Description: "unmodeled-function-in-fragment — Wrote a top-level `function Foo(...)` in K/frags/<id>.js where Foo is NOT a graph object (and not the parent object's ImplSymbol). Such functions ship to the deliverable via session_build but bypass the verification chain entirely — they never reach confirm_object. session_build refuses to assemble when ANY fragment contains an unmodeled function name. Fix: either (a) model the helper as its own graph object, or (b) inline it as `const foo = (...) => ...` / closure inside the modeled function so it's not a top-level declaration."},
+	{ID: "AP9", Description: "js-defs-as-impl — Wrote a JS def file (K/defs/<id>.js) with non-throw function bodies (e.g. `function Foo(x){ return 0; }`) and used that as 'implementation' evidence. JS defs MUST be throw-stubs; the real impl is in `implContent` on the graph object (v10), materialised to K/frags/<id>.js by session_build (see Single-file deliverable model). Static check `defs-must-throw` fires on any non-throw body."},
+	{ID: "AP10", Description: "frag-trivial-stub — Set implContent (or wrote impl) with a one-line literal return body (`return 0;` / `return [];` / `return {};`) just to make typecalc_compile pass. Object code must contain real logic — at least one control-flow statement (if/for/while) or non-literal computation. Static check `frags-non-trivial` fires on the emitted fragment after session_build."},
+	{ID: "AP11", Description: "unmodeled-function-in-fragment — Set implContent containing a top-level `function Foo(...)` where Foo is NOT a graph object (and not the parent object's ImplSymbol). Such functions ship to the deliverable via session_build but bypass the verification chain entirely — they never reach confirm_object. session_build refuses to assemble when ANY object's implContent contains an unmodeled top-level function. Fix: either (a) model the helper as its own graph object, or (b) inline it as `const foo = (...) => ...` / closure inside the modeled function so it's not a top-level declaration."},
 	{ID: "AP12", Description: "def-multi-entity-file — Wrote a JS def file (K/defs/<id>.js) containing functions for multiple objects, or mixing attribute @typedef with object function declarations. Each def file must declare exactly the entity that matches its filename — the function name must equal the object id OR its declared ImplSymbol. Static check `defs-entity-1to1` fires on extras."},
-	{ID: "AP13", Description: "def-frag-name-mismatch — The set of top-level functions declared in K/defs/<id>.js doesn't match the set in K/frags/<id>.js (missing from frag, or extra in frag). Static check `frags-content-matches-def` enforces the 1:1 mapping so the def's @param / @returns / @example ground truth covers every function the fragment ships."},
+	{ID: "AP13", Description: "def-frag-name-mismatch — The set of top-level functions declared in K/defs/<id>.js doesn't match the set inside the object's implContent (missing from impl, or extra in impl). Static check `frags-content-matches-def` enforces the 1:1 mapping (against session_build's emitted fragment) so the def's @param / @returns / @example ground truth covers every function the object ships."},
 	{ID: "AP14", Description: "rollback-instead-of-dismiss — Used session_rollback (pre-v9.3: session_delete) to 'clean up' a finished subagent's session entry. session_rollback is DESTRUCTIVE: it reverse-applies graphDiff and deletes def/impl files the session produced. v9.0.6 terraria-03, v92-01, and v92-02 all hit this: v92-02 rolled back the root and lost 20 source files including index.html itself. For additive cleanup (just retire the session record) use session_dismiss — it touches nothing else. Only use session_rollback when you genuinely want to undo the work."},
 	{ID: "AP15", Description: "chain-spawned-siblings — In pre-v9.3 spawn_subagent, the auto-created session's parent was the *currently focused* session, not the root. When a subagent spawned children of its own without resetting focus, those siblings became descendants 4–7 levels deep (v9.0.6 terraria-05, v92-03, v92-04). v9.3 default is parent=FindRoot(focus); if you intentionally want nesting (wave-2 coordinator), pass `parent=<id>` explicitly. Don't fall back to the old chain pattern by accident."},
-	{ID: "AP16", Description: "monolithic-html-no-fragments — Set obj.impl=index.html for every graph object but skipped implFragment, writing the entire single-file game inline into one index.html. v93-04 retro: agent wrote 1176 lines inline, review's fragment-aware optimisation (v9.3 Phase 2.2) became inert (read whole deliverable, hit token budget), AP11 unmodeled-function check never ran (it lives in session_build, which the agent bypassed). v9.3.1 hard-rejects this: `graph_merge_object` with impl ending in .html/.htm requires implFragment=K/frags/<id>.js in the same patch (or already on the object). The canonical single-file form is fragments + session_build (reference mode default → `<script src>` refs the browser loads in topo order)."},
-	{ID: "AP17", Description: "html-without-incremental-build — Confirmed an HTML object whose deliverable was a stub (session_build hadn't run yet). v9.3 chain pre-v9.3.1: confirm_object's runtime_smoke booted the deliverable at file://, but the deliverable was empty stub HTML — smoke trivially passed (loadFired, no pageErrors, but zero functionality tested). v93-02 retro called this out: 'individual fragments can't be independently verified through the normal toolchain because the impl target (index.html) doesn't exist yet'. v9.3.1 fix: chain auto-runs session_build (reference mode) right before each smoke, so the deliverable always reflects the current fragment set. Agents driving the chain step-by-step manually must still call session_build themselves before runtime_smoke."},
+	{ID: "AP16", Description: "monolithic-html-no-impl — Set obj.impl=index.html for every graph object but never set implContent, then wrote the entire single-file deliverable as one giant inline `<script>` in the parent's writing of index.html. The v10/v12 canonical single-file form is: impl=index.html on every object + implContent on each object carrying that function's body. kcpos handles internal frag-emission and assembly; you only set those two fields. (Older v9.x docs mentioned `implFragment=K/frags/<id>.js` — that field is now auto-derived; you do not set or write to it.)"},
+	{ID: "AP17", Description: "html-without-incremental-build — Confirmed an HTML object whose deliverable was a stub (session_build hadn't run yet). v9.3.1 fix: confirm_object's HTML branch auto-runs session_build (reads every object's implContent, emits the assembled deliverable) right before each runtime_smoke, so the deliverable always reflects current implContent. Agents driving the chain step-by-step manually must still call session_build themselves before runtime_smoke."},
 }
 
 // Describe renders the protocol as a markdown document suitable for
@@ -225,18 +242,20 @@ var AntiPatterns = []AntiPattern{
 // constants/tables, not the rendered output.
 func Describe() string {
 	var b strings.Builder
-	b.WriteString("# kcpos runtime protocol (v9.0)\n\n")
-	b.WriteString("This protocol is generated from internal/protocol/protocol.go. ")
+	b.WriteString("# kcpos runtime protocol (v11 — Handler×3, v10 implContent SoT, 2026-05-20)\n\n")
+	b.WriteString("This protocol is generated from internal/domain/protocol/protocol.go. ")
 	b.WriteString("The agent must follow these rules; the gate (session_gate_check) ")
 	b.WriteString("enforces a structural subset programmatically.\n\n")
+	b.WriteString("**Canonical vocabulary**: three Handlers own the pipeline — Handler 1.1 Hypergraph (graph nodes + defs), Handler 1.2 Code-Compile-Test (impl + verification chain → confirmed), Handler 1.3 Session (gate / checkpoint / root finish / deliverable). The pre-v9.0 L0..L4 stage names and R1..R4 root-finish IDs describe the SAME mechanism and have been retired; this document uses Handler 1.1 / 1.2 / 1.3 throughout.\n\n")
 
-	b.WriteString("## Product layers (only L4 is a deliverable)\n\n")
-	for _, l := range Layers {
+	b.WriteString("## Handler stages (only the final stage is a deliverable)\n\n")
+	b.WriteString("The work pipeline is owned end-to-end by three Handlers (1.1 Hypergraph / 1.2 Code-Compile-Test / 1.3 Session). Pre-v9.0 vocabulary used L0..L4 stage names — those refer to the SAME mechanism and are retired.\n\n")
+	for _, s := range Stages {
 		marker := "  "
-		if l.IsDeliverable {
+		if s.IsDeliverable {
 			marker = "★ "
 		}
-		fmt.Fprintf(&b, "%s**%s** — %s\n", marker, l.Name, l.Content)
+		fmt.Fprintf(&b, "%s**%s** (Handler %s) — %s\n", marker, s.ID, s.Handler, s.Content)
 	}
 	b.WriteString("\n")
 
@@ -268,9 +287,10 @@ func Describe() string {
 	fmt.Fprintf(&b, "- Single .ts file ≤ %d lines; split large data tables aggressively (32K output-token cap on each write)\n\n", FileSizeLimitLines)
 	b.WriteString("**Why path B matters (2026-05-11 Terraria batch lesson)**: in path A the parent agent's context accumulates every tool result, every transcript turn, and (worst) the full impl bytes it's trying to write. For a 1500-line SPEC project this overflows the LLM stream's response deadline and the run dies before reaching any confirm_object call. In path B, each child agent has a *fresh context* containing only its assigned object — the parent never sees impl bytes, only one-line summary strings from each child. This keeps the parent context bounded regardless of project size.\n\n")
 
-	b.WriteString("## Root finish flow (§5.5)\n\n")
+	b.WriteString("## Handler 1.3 root-finish flow\n\n")
+	b.WriteString("These four ordered steps complete Handler 1.3 at the root session. The 1.3-internal sub-IDs (H1.3.aggregate / H1.3.build / H1.3.checkpoint / H1.3.gate) replace the retired R1..R4 short codes.\n\n")
 	for _, r := range RootFinishFlow {
-		fmt.Fprintf(&b, "- **%s %s**: %s\n", r.ID, r.Name, r.Doing)
+		fmt.Fprintf(&b, "- **%s (%s)**: %s\n", r.ID, r.Name, r.Doing)
 	}
 	b.WriteString("\n")
 
@@ -297,10 +317,10 @@ func Describe() string {
 	b.WriteString("kcpos's value proposition rests on one invariant: **every byte of code that ships to the deliverable has passed through confirm_object on a graph object**. The verification chain (compile → describe → synthesize → test → review) only runs on entities that exist in the graph. Code that exists outside the graph — helper functions tucked into a def file, utility methods in a fragment that aren't declared in the def, internal functions invented during impl — is **unverified by construction**. Pre-v9.0.6 an agent could trivially ship unverified code: write `function helper(...){...}` somewhere in a fragment, session_build would happily concat it, the user would run it in the browser, kcpos would report \"all green\".\n\n")
 	b.WriteString("v9.0.6 closes this with four enforcement layers, in increasing strictness:\n\n")
 	b.WriteString("1. **`defs-entity-1to1`** (static check, per-object) — every function in `K/defs/<id>.js` must have a name equal to `<id>` or its `ImplSymbol`. Extra functions in the def file are flagged.\n")
-	b.WriteString("2. **`frags-content-matches-def`** (static check, per-object) — the set of top-level functions in `K/frags/<id>.js` must equal the set declared in `K/defs/<id>.js`. Missing or extra functions are flagged.\n")
+	b.WriteString("2. **`frags-content-matches-def`** (static check, per-object) — the set of top-level functions in the object's implContent (as emitted by session_build) must equal the set declared in `K/defs/<id>.js`. Missing or extra functions are flagged.\n")
 	b.WriteString("3. **`defs-must-throw`** + **`frags-non-trivial`** (static checks) — together stop stub bodies from posing as evidence.\n")
-	b.WriteString("4. **session_build refusal** (HARD GATE) — before assembling the deliverable, session_build scans every fragment for top-level `function <Name>` declarations and intersects with the graph object/implSymbol set. ANY function declared in a fragment but missing from the graph causes session_build to refuse: no deliverable produced, agent must either model the function as a graph object (and put it through confirm_object) or remove it. Top-level declarations are the only shape rejected — arrow functions, closures, methods on object literals, and IIFEs are all fine since they're scoped.\n\n")
-	b.WriteString("**Why this matters**: \"shipped without confirm_object\" = \"the user gets code that kcpos never claimed was correct\". The whole point of the verification chain is the guarantee that the deliverable is bounded by what was verified. v9.0.5 had this guarantee in principle (defs-must-throw + frags-non-trivial) but allowed a bypass (write helpers in def, ship them via fragment). v9.0.6 makes the guarantee hold by construction.\n\n")
+	b.WriteString("4. **session_build refusal** (HARD GATE) — before assembling the deliverable, session_build scans every object's implContent for top-level `function <Name>` declarations and intersects with the graph object/implSymbol set. ANY top-level function in implContent missing from the graph causes session_build to refuse: no deliverable produced, agent must either model the function as a graph object (and put it through confirm_object) or rewrite it as a scoped helper. Top-level declarations are the only shape rejected — arrow functions, closures, methods on object literals, and IIFEs are all fine since they're scoped.\n\n")
+	b.WriteString("**Why this matters**: \"shipped without confirm_object\" = \"the user gets code that kcpos never claimed was correct\". The whole point of the verification chain is the guarantee that the deliverable is bounded by what was verified. v9.0.5 had this guarantee in principle but allowed a bypass (helpers smuggled in via fragment writes). v9.0.6 closed it by construction; v10 finalised it by making implContent on the graph the only writable surface (write_file to K/frags/* is hard-refused).\n\n")
 
 	b.WriteString("## JS def files — throw-stub contract (v9.0.5)\n\n")
 	b.WriteString("TypeScript uses declaration-only syntax for defs (`export function Foo(x: T): U;`) so the file syntactically cannot carry an implementation. JavaScript has no equivalent: every `function Foo(...)` MUST have a `{...}` body or the file is a parse error. To keep the contract/impl boundary clean in JS projects, kcpos requires this exact pattern for every function in `K/defs/<id>.js`:\n\n")
@@ -316,11 +336,11 @@ func Describe() string {
 	b.WriteString(" * @example boundary\n")
 	b.WriteString(" * Foo({x: 0, y: 0})  // → {score: 0}\n")
 	b.WriteString(" */\n")
-	b.WriteString("function Foo(input) { throw new Error(\"Foo: contract-only; implement in K/frags/Foo.js\"); }\n")
+	b.WriteString("function Foo(input) { throw new Error(\"Foo: contract-only; set implContent on the graph object\"); }\n")
 	b.WriteString("```\n\n")
 	b.WriteString("Two static rules enforce this:\n\n")
 	b.WriteString("- **`defs-must-throw`**: every function in `K/defs/<id>.js` must have a body whose first statement is `throw new Error(...)`. Anything else (`return 0`, real logic, an empty body) is flagged. This is what stops agents from writing a stub like `function Foo(){return 0;}` and using the def as fake impl evidence — calling that stub would always 'succeed' which lets bogus tests pass.\n")
-	b.WriteString("- **`frags-non-trivial`**: every function in `K/frags/<id>.js` must have a body with at least one control-flow statement or a non-literal return expression. Single-line `return 0;` / `return [];` / `return {};` / empty body / pass-through `return x;` are rejected. Combined with `defs-must-throw`, an agent can no longer bypass the verification chain with stub bodies — neither file accepts them.\n\n")
+	b.WriteString("- **`frags-non-trivial`**: every function emitted from implContent (one per object, in the assembled deliverable) must have a body with at least one control-flow statement or a non-literal return expression. Single-line `return 0;` / `return [];` / `return {};` / empty body / pass-through `return x;` are rejected. Combined with `defs-must-throw`, an agent can no longer bypass the verification chain with stub bodies — neither the def nor the implContent accepts them.\n\n")
 	b.WriteString("**`@example` blocks** are not decoration: `typecalc_synthesize_tests` extracts them as input/output ground truth and feeds them to the LLM verbatim. The synthesized test suite is required to cover every `@example` in addition to its own boundary cases. Treat `@example` as the contract you're signing — write at least one happy path and one edge case per function.\n\n")
 
 	b.WriteString("## Chapter-granular markdown access (v9.0.4)\n\n")
@@ -331,16 +351,14 @@ func Describe() string {
 	b.WriteString("4. `read_file` auto-falls-back to the outline when the target is markdown above the threshold. Setting `force=true` bypasses this and dumps the whole file — see AP8.\n\n")
 	b.WriteString("**Why this matters**: a 1500-line SPEC is ~28K tokens; tripled, ~84K tokens. Bulk-reading at session start consumes most of the LLM context window before any reasoning begins, and every child agent that does the same multiplies the cost. Chapter-granular access keeps both parent (~outline only) and each child (~one chapter) bounded at a small fraction of total spec size.\n\n")
 
-	b.WriteString("## Single-file deliverable model (v9.0.3 — HTML/Canvas projects)\n\n")
-	b.WriteString("Projects whose deliverable is `index.html` (or any single artifact that aggregates code from many objects) MUST use the **fragment-write + parent-concat** pattern, not the \"one agent writes the whole file\" pattern that the v9.0.2 Terraria batch tried and 5/5 instances died on:\n\n")
-	b.WriteString("1. Each graph object declares **two** path fields:\n")
-	b.WriteString("   - `impl: \"index.html\"` — the eventual deliverable path (shared across all objects of the same single-file project)\n")
-	b.WriteString("   - `implFragment: \"K/frags/<ObjectId>.js\"` — this object's own write-target (one file per object, isolated)\n")
-	b.WriteString("2. Each child session (path B) writes ONLY to its `implFragment` path. The fragment contains the function body for this one object plus any module-local helpers it needs.\n")
-	b.WriteString("3. Child returns a one-line summary; parent never reads the fragment bytes.\n")
-	b.WriteString("4. **R2 build step** in the root finish flow runs `kcpos build` (or equivalent) which concatenates every `implFragment` in topological order into a single `<script>` block injected into the index.html template, producing the final deliverable.\n")
-	b.WriteString("5. The R4 gate verifies the assembled `index.html` exists and is non-empty.\n\n")
-	b.WriteString("**Why this matters**: pre-v9.0.3 the dual-source-prevention hook (graph_merge_object refusing impl=*.js when index.html exists) forced every object to share `impl=index.html`. That made the parent agent the only entity with write access to the deliverable, defeating path B and overflowing the LLM stream deadline. v9.0.3 keeps the no-shadow-.js guarantee (the deliverable is still single-source-of-truth) but reintroduces per-object writing surfaces via the `K/frags/` staging area.\n\n")
+	b.WriteString("## Single-file deliverable model (v12 — HTML/Canvas projects)\n\n")
+	b.WriteString("For projects whose deliverable is `index.html` (or any single artifact aggregating code from many objects), **you set exactly two fields per graph object**:\n\n")
+	b.WriteString("1. `impl: \"index.html\"` — the deliverable path, shared across all objects of the single-file project.\n")
+	b.WriteString("2. `implContent: \"function Foo(...){ ...actual code... }\"` — the source code itself, stored on the graph object. Set via `graph_merge_object id=<id> patch='{\"implContent\":\"...\"}'`.\n\n")
+	b.WriteString("That's it. kcpos handles everything else internally:\n\n")
+	b.WriteString("- **Handler 1.3's build step (H1.3.build)** runs `session_build` which reads every object's `implContent` and emits the assembled deliverable (default reference mode: per-object script files referenced from index.html; inline mode: concatenated into one block).\n")
+	b.WriteString("- **Handler 1.3's gate step (H1.3.gate)** verifies the assembled `index.html` exists, is non-empty, and passes runtime_smoke.\n\n")
+	b.WriteString("**Why this matters (v10/v12)**: pre-v10 the agent wrote per-object code files to disk under K/frags/, which the chain ALSO read via `obj.implContent` if set — two stores, drift inevitable. v10 closed the drift by making `implContent` the only source. v12 hides the internal staging path from the prompt entirely: you set `impl` + `implContent`, and kcpos handles the rest. (Direct write_file to internal staging paths is hard-refused — there's nothing for the agent to do there.)\n\n")
 
 	return b.String()
 }

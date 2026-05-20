@@ -16,7 +16,7 @@ func editTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name:        "edit",
-				Description: "Replace exact text in a file. The old_string must appear exactly once unless replace_all is true. Use this for targeted edits instead of rewriting whole files.",
+				Description: "Replace exact text in a file. The old_string must appear exactly once unless replace_all is true. Use this for targeted edits instead of rewriting whole files.\n\n**HARD-REFUSED paths**: `K/graph.json` / `K/graph.*` (modify the graph via graph_* tools) and `K/frags/*` (use graph_merge_object's implContent). Same policy as write_file — edit cannot be used to side-step graph mutators.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -40,6 +40,11 @@ func editTool() toolcall.Tool {
 
 			if path == "" {
 				return "", fmt.Errorf("path required")
+			}
+			// Hard-refuse agent-managed SoT paths (K/graph.* + K/frags/*).
+			// Shared with write_file — see fs/guard.go.
+			if err := guardAgentManagedPaths("edit", path); err != nil {
+				return "", err
 			}
 			if oldStr == "" {
 				return "", fmt.Errorf("old_string required")

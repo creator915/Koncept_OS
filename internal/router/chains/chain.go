@@ -55,7 +55,7 @@ type Deps struct {
 	// before Smoke. v9.3.1: pre-fix, smoke loaded a stub index.html that
 	// didn't include any fragment code (chicken-and-egg from v93-02 retro:
 	// agent couldn't smoke-test the fragment because session_build only
-	// ran at R2 root-finish). With reference-mode session_build being
+	// ran at Handler 1.3's build step at root-finish). With reference-mode session_build being
 	// cheap (just writes a `<script src>` list), the chain can call it
 	// before every smoke without breaking the bank. Returns the
 	// build report or err.

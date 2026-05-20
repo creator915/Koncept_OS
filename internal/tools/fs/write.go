@@ -16,15 +16,25 @@ import (
 	"github.com/creator915/Koncept_OS/internal/typecalc/lang"
 )
 
-// isObjectDefPath returns true for K/defs/<PascalCaseId>.<ext> paths —
-// these are object def stubs that should be written by the subagent
-// owning that object, not by the main conversation. Attribute defs
-// (K/defs/<snake_case_id>.<ext>) are NOT flagged: they're simple type
+// isObjectDefPath returns true for object-def file paths — these are
+// signature stubs that should be written by the subagent owning the
+// object, not by the main conversation. Attribute defs
+// (`<snake_case_id>.<ext>`) are NOT flagged: they're simple type
 // aliases the main conversation can produce in bulk without context
 // bloat.
+//
+// Recognises BOTH canonical prefixes — `K/defs/<PascalCaseId>.<ext>`
+// (the explicit form) AND `defs/<PascalCaseId>.<ext>` (the default
+// the graph_create_object tool's `def` parameter falls back to when
+// not overridden). Pre-2026-05-20 only the `K/defs/` form was
+// recognised, so an agent writing the *default* def path got the
+// file misclassified as an impl by isLikelyImplPath downstream and
+// rejected by the process-justice gate — a self-inflicted deadlock
+// that the 2026-05-20 outer-Router pong batch surfaced.
 func isObjectDefPath(path string) bool {
 	norm := strings.ReplaceAll(path, "\\", "/")
-	if !strings.HasPrefix(norm, "K/defs/") {
+	hasPrefix := strings.HasPrefix(norm, "K/defs/") || strings.HasPrefix(norm, "defs/")
+	if !hasPrefix {
 		return false
 	}
 	base := filepath.Base(norm)
@@ -63,12 +73,13 @@ func implHasOwningObject(path string) bool {
 }
 
 // isLikelyImplPath returns true for paths that look like real code
-// (impl files outside K/defs/). Heuristic: extension matches a known
-// source-code language. Excludes K/defs/ entirely so attribute defs
-// don't get caught.
+// (impl files). Heuristic: extension matches a known source-code
+// language. Excludes BOTH `K/defs/` and `defs/` so attribute and
+// object def files don't get misclassified as impls — see
+// isObjectDefPath for the two-prefix rationale.
 func isLikelyImplPath(path string) bool {
 	norm := strings.ReplaceAll(path, "\\", "/")
-	if strings.HasPrefix(norm, "K/defs/") {
+	if strings.HasPrefix(norm, "K/defs/") || strings.HasPrefix(norm, "defs/") {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(norm))
@@ -85,7 +96,7 @@ func writeFileTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name: "write_file",
-				Description: "Write content to a file. Creates the file if it does not exist, overwrites if it does. Creates parent directories as needed.\n\nIf the path matches an implementation file (an `impl` field of any object on the graph, OR matches the `*.impl.*` naming convention), this tool ALSO runs `typecalc_compile` on the content immediately after writing. A compile failure surfaces in the tool result; a passing compile auto-records typecalc evidence on disk so the agent does not need a separate typecalc_compile call before merging the corresponding object to confirmed.",
+				Description: "Write content to a file. Creates the file if it does not exist, overwrites if it does. Creates parent directories as needed.\n\nIf the path matches an implementation file (an `impl` field of any object on the graph, OR matches the `*.impl.*` naming convention), this tool ALSO runs `typecalc_compile` on the content immediately after writing. A compile failure surfaces in the tool result; a passing compile auto-records typecalc evidence on disk so the agent does not need a separate typecalc_compile call.\n\n**HARD-REFUSED paths (v10)**:\n- `K/graph.json` and `K/graph.*` — modify the graph via graph_* tools, never directly.\n- `K/frags/*` — code under K/frags is session_build's output. Put your code in the graph object's `implContent` via `graph_merge_object id=<id> patch='{\"implContent\":\"function Foo(...){ ... }\"}'`. session_build will then emit K/frags/<id>.js from implContent.\n\n**Process-justice block**: writing a `*.<code-ext>` path (.ts/.js/.go/.py/...) outside K/defs/ is rejected unless some graph object already claims that path as its `impl`. The fix order is always: graph_create_object → graph_merge_object set impl → THEN write_file.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -102,19 +113,10 @@ func writeFileTool() toolcall.Tool {
 			if path == "" {
 				return "", fmt.Errorf("path required")
 			}
-			// v10: graph 结构不通过 write_file 直接编辑。K/graph.json 和
-			// K/graph.* 是 chain 的 source of truth，直接写会导致图状态
-			// 与 evidence 脱钩。K/frags/* 也已废弃——implContent 必须通过
-			// graph_merge_object 写入（这样 chain 才能读到）。
-			dir := filepath.Dir(path)
-			base := filepath.Base(path)
-			if dir == "K" || strings.HasPrefix(dir, "K/") {
-				if base == "graph.json" || strings.HasPrefix(base, "graph.") {
-					return "", fmt.Errorf("write_file: K/graph.json 是图的 source of truth，不能直接写。修改图结构请用 graph_merge_object 或 graph_link_* 工具。")
-				}
-			}
-			if strings.HasPrefix(path, "K/frags/") {
-				return "", fmt.Errorf("write_file: K/frags/* 已废弃（v10）。代码内容请通过 graph_merge_object patch='{impl_content:\"...\"}' 写入，图会持有源码内容。")
+			// Hard-refuse agent-managed SoT paths (K/graph.* + K/frags/*).
+			// Shared with edit — see fs/guard.go.
+			if err := guardAgentManagedPaths("write_file", path); err != nil {
+				return "", err
 			}
 			// v9.6 — dispatch-mode hardening. Once the graph has reached
 			// DispatchModeThreshold objects, the main conversation must

@@ -97,7 +97,7 @@ func typecalcCompileTool() toolcall.Tool {
 				// v9.0.5: when implFragment is set, the per-object code lives
 				// there (e.g. K/frags/Foo.js), and obj.Impl is the assembled
 				// deliverable (e.g. index.html) which won't have THIS object's
-				// code until session_build runs in R2. Compile against the
+				// code until session_build runs in H1.3.build. Compile against the
 				// fragment so child sessions get meaningful evidence during
 				// their confirm_object loop, not against an empty / not-yet-
 				// built deliverable.

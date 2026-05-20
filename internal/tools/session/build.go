@@ -15,7 +15,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 )
 
-// sessionBuildTool exposes R2 build for single-file deliverables. It
+// sessionBuildTool exposes Handler 1.3's build step (H1.3.build) for single-file deliverables. It
 // concatenates every confirmed (or implementing) object's
 // `implFragment` into a single `<script>` block injected into the
 // shared `impl` deliverable (typically index.html).
@@ -23,7 +23,7 @@ import (
 // The v9.0.3 single-file-deliverable model:
 //   - graph object declares impl="index.html" (shared) + implFragment="K/frags/<id>.js" (per-object)
 //   - child sessions write to implFragment only
-//   - parent's R2 step calls session_build which assembles the fragments
+//   - parent's H1.3.build step calls session_build which assembles the fragments
 //     into the deliverable in topological order
 //   - the assembled deliverable is what the user opens in a browser
 //

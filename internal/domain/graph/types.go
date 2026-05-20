@@ -32,7 +32,7 @@ type Object struct {
 	// same Impl (e.g. all set impl="index.html" because the deliverable
 	// is one HTML file), each object's actual code lives in its own
 	// fragment file (e.g. implFragment="K/frags/WorldGen.js"). Child
-	// sessions write to ImplFragment; the R2 build step concatenates
+	// sessions write to ImplFragment; the Handler 1.3 build step (H1.3.build) concatenates
 	// every fragment into Impl in topological order.
 	//
 	// Empty for multi-file projects (TypeScript / Go) where Impl is

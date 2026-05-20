@@ -580,7 +580,7 @@ func graphMergeObjectTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name:        "graph_merge_object",
-				Description: "Apply a partial JSON patch to an existing object. Allowed fields: intent, impl, implFragment, implSymbol, implContent, implLang, status, statusSession, temporal, preconditions, postconditions, portObservation, storyPoints, storyRationale. Structural fields (def, consumes, produces) are not patchable — use unlink/relink. Patch must be a JSON object string.\n\nportObservation values (MUST be exact — common mistake is using \"return value\"): \"global\" / \"return\" / \"return.<dotted.path>\" / \"args.<n>.<dotted.path>\" / \"side_effect\". Example: '{\"portObservation\":{\"flags_config\":\"return\",\"ball_x\":\"return.ball.x\"}}'.\n\nOptional `session_id` temporarily swaps the focused session for the duration of the merge so the diff is recorded against that session — saves the focus / merge / re-focus cycle when ticking many child sessions through implementing→confirmed in a batch.",
+				Description: "Apply a partial JSON patch to an existing object. Allowed fields: intent, impl, implSymbol, implContent, implLang, status, statusSession, temporal, preconditions, postconditions, portObservation, storyPoints, storyRationale. Structural fields (def, consumes, produces) are not patchable — use unlink/relink. Patch must be a JSON object string.\n\n**implContent (v10 SoT, single-file deliverables)**: pass the function body as a string for HTML / single-file projects (where all objects share impl=index.html). The graph holds your code; kcpos materialises it to disk automatically when session_build runs. You do NOT need to set any frag/staging path — kcpos derives it.\n\n**status (v11 process-justice)**: you may set status=implementing here, but **status=confirmed is hard-refused** — only the confirm_object verification chain can confer confirmed (after a mechanical behavioral-equivalence oracle passes). Do not even try the patch '{\"status\":\"confirmed\"}'; call confirm_object(object_id=<id>) instead.\n\nportObservation values (MUST be exact — common mistake is using \"return value\"): \"global\" / \"return\" / \"return.<dotted.path>\" / \"args.<n>.<dotted.path>\". (\"side_effect\" was removed in v9.2 — refactor instead.) Example: '{\"portObservation\":{\"flags_config\":\"return\",\"ball_x\":\"return.ball.x\"}}'.\n\nOptional `session_id` temporarily swaps the focused session for the duration of the merge so the diff is recorded against that session — saves the focus / merge / re-focus cycle when ticking many child sessions through implementing in a batch.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -659,7 +659,7 @@ func graphMergeObjectTool() toolcall.Tool {
 					if indexExists && ext != ".html" && ext != ".htm" {
 						return "", fmt.Errorf(
 							"refusing to set impl=%q for object %q: project root contains index.html — kcpos v8 routes HTML inline scripts directly through the JS harness, so K/impl/*.js shadow files are unnecessary AND dangerous (the inline script and the shadow can drift, leaving the deliverable broken while kcpos says 'all green'). "+
-								"v9.0.3 model for HTML single-file projects: set impl=\"index.html\" (the deliverable) PLUS implFragment=\"K/frags/<ObjectId>.js\" (this object's per-object staging file). Child sessions write to implFragment; the R2 build step concatenates every fragment into index.html. Example: graph_merge_object id=%q patch='{\"impl\":\"index.html\",\"implFragment\":\"K/frags/%s.js\"}'.",
+								"v9.0.3 model for HTML single-file projects: set impl=\"index.html\" (the deliverable) PLUS implFragment=\"K/frags/<ObjectId>.js\" (this object's per-object staging file). Child sessions write to implFragment; the Handler 1.3 build step (H1.3.build) concatenates every fragment into index.html. Example: graph_merge_object id=%q patch='{\"impl\":\"index.html\",\"implFragment\":\"K/frags/%s.js\"}'.",
 							implPath, id, id, id)
 					}
 					// v9.3: refuse fragment-as-impl. v92-04 had every
@@ -674,15 +674,21 @@ func graphMergeObjectTool() toolcall.Tool {
 							"refusing to set impl=%q for object %q: K/frags/ is the per-object STAGING area for fragments, not a deliverable path. The deliverable is what runs when the user opens the project (e.g. index.html for HTML projects, dist/<bundle>.js for bundled, src/<file>.go for Go). For HTML single-file projects use impl=\"index.html\" + implFragment=%q. If this is a multi-file project, set impl to the actual file the user will execute — never K/frags/*",
 							implPath, id, implPath)
 					}
-					// v9.3.1: HTML impl REQUIRES implFragment. v93-04 monolithic
-					// retro showed agent picked impl=index.html and skipped
-					// implFragment entirely → wrote the entire game inline →
-					// review's "read fragment not deliverable" optimisation
-					// (Phase 2.2) became inert → reviewer fed the full 1176-
-					// line index.html to the LLM → token overflow loop. Force
-					// the fragment to be set in the same patch (or be already
-					// set on the object) so HTML projects can only exist in
-					// the canonical fragment form.
+					// v12 (2026-05-20): HTML impl auto-derives implFragment.
+					// Pre-v12 the agent had to set implFragment=K/frags/<id>.js
+					// alongside impl=index.html — but that path is purely
+					// session_build's emission target (agent doesn't write
+					// frag files anymore in v10; write_file K/frags/* is
+					// hard-refused). Forcing the agent to KNOW K/frags exists
+					// just to set this field repeatedly caused the agent to
+					// then ALSO try write_file K/frags/<id>.js — the natural
+					// next thought — and bounce off the v10 guard. v12 fix:
+					// when impl is HTML and implFragment is empty, kcpos
+					// auto-injects implFragment=K/frags/<id>.js. The agent
+					// never sees the K/frags path; session_build still emits
+					// there from implContent. v93-04's monolithic-inline
+					// failure mode remains blocked by AP11/AP16 + session_build's
+					// per-object frag emission.
 					if ext == ".html" || ext == ".htm" {
 						hasFragInPatch := false
 						if v, ok := patch["implFragment"].(string); ok && v != "" {
@@ -695,9 +701,7 @@ func graphMergeObjectTool() toolcall.Tool {
 							}
 						}
 						if !hasFragInPatch && !hasFragOnObj {
-							return "", fmt.Errorf(
-								"refusing to set impl=%q for object %q without implFragment: HTML deliverables MUST be assembled from per-object fragments (kcpos v9.3.1 canonical single-file model). Same patch must also set implFragment=\"K/frags/%s.js\" (each child session writes its own fragment; session_build assembles them in reference mode by default). v93-04 retro: ignoring this requirement produces a monolithic 1000+-line index.html that breaks review's prompt budget and bypasses the AP11 fragment scan",
-								implPath, id, id)
+							patch["implFragment"] = "K/frags/" + id + ".js"
 						}
 					}
 				}

@@ -352,7 +352,7 @@ func checkOrphanAttributes(g *Graph, r *ValidationReport) {
 // --- def-existence: WARN when def points at a path that does not exist on disk ---
 //
 // Writing the def file is the first work-step in the workflow (the
-// "L0 / signature" stage). A node whose def points at a phantom file
+// Handler 1.1 / signature stage). A node whose def points at a phantom file
 // means that work-step was skipped (or the def was misnamed). This check
 // is independent of impl status: a confirmed object can have its impl
 // file present but its def file still missing.

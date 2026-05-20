@@ -98,6 +98,14 @@ const (
 	maxAttempts    = 3
 	baseBackoff    = 400 * time.Millisecond // first retry waits ~400ms-600ms
 	maxBackoffStep = 8 * time.Second        // cap per-step delay
+	// streamInactivityTimeout caps how long we wait for the NEXT chunk
+	// in an open stream. Pre-2026-05-20: stream read had no per-chunk
+	// timeout — only the 10-minute total HTTP deadline. DeepSeek can
+	// stall mid-stream silently (the 2026-05-20 pong batch #3 pong-05
+	// saw 8 minutes of silence on one confirm_object call), and the
+	// client just waited. 90s is a generous bound that catches stalls
+	// while tolerating slow reasoning bursts on big prompts.
+	streamInactivityTimeout = 90 * time.Second
 )
 
 // Chat sends a chat-completions request and streams the response, retrying
@@ -194,9 +202,40 @@ func (c *Client) chatOnce(ctx context.Context, messages []Message, tools []ToolS
 	// Chat loop's backoff fires.
 	emittedAny := false
 	msg := &Message{Role: "assistant"}
+
+	// Inactivity watchdog: cancels the response body if no chunk
+	// arrives within streamInactivityTimeout. We track lastActivity
+	// via an atomic-ish pointer that the scanner updates after every
+	// successful read; the watchdog goroutine wakes periodically and
+	// closes resp.Body (forcing scanner.Scan() to return false with
+	// an error) if the gap exceeds the cap. The error then becomes
+	// "errRetryable: stream inactivity" pre-emit or "read stream"
+	// post-emit per the existing emitted-any policy.
+	lastActivity := time.Now()
+	var inactivityFired bool
+	stopWatchdog := make(chan struct{})
+	go func() {
+		t := time.NewTicker(streamInactivityTimeout / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopWatchdog:
+				return
+			case <-t.C:
+				if time.Since(lastActivity) > streamInactivityTimeout {
+					inactivityFired = true
+					_ = resp.Body.Close()
+					return
+				}
+			}
+		}
+	}()
+	defer close(stopWatchdog)
+
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		lastActivity = time.Now()
 		line := scanner.Text()
 		if line == "" || strings.HasPrefix(line, ":") {
 			continue
@@ -257,11 +296,27 @@ func (c *Client) chatOnce(ctx context.Context, messages []Message, tools []ToolS
 		// v9.0.3: stream error before any delta reached the handler is
 		// safe to retry — the user hasn't seen anything to repeat.
 		// Common causes: server-side TCP close (`unexpected EOF`),
-		// client HTTP body deadline (`context deadline exceeded`).
+		// client HTTP body deadline (`context deadline exceeded`),
+		// or — 2026-05-20 — inactivity watchdog forced-close.
 		if !emittedAny {
+			if inactivityFired {
+				return nil, fmt.Errorf("%w: stream inactivity (no chunk for >%v)", errRetryable, streamInactivityTimeout)
+			}
 			return nil, fmt.Errorf("%w: read stream (no partial emitted): %v", errRetryable, err)
 		}
+		if inactivityFired {
+			return nil, fmt.Errorf("read stream: inactivity timeout >%v (partial content already emitted; not retried — re-invoke or resume manually)", streamInactivityTimeout)
+		}
 		return nil, fmt.Errorf("read stream: %w (partial content already emitted; not retried — re-invoke or resume manually)", err)
+	}
+	// Treat inactivity-triggered close as an error even when scanner
+	// has no Err (some buffered modes swallow EOF). Without partial
+	// emit it's retryable.
+	if inactivityFired {
+		if !emittedAny {
+			return nil, fmt.Errorf("%w: stream inactivity (no chunk for >%v)", errRetryable, streamInactivityTimeout)
+		}
+		return nil, fmt.Errorf("read stream: inactivity timeout >%v (partial content already emitted; not retried — re-invoke or resume manually)", streamInactivityTimeout)
 	}
 	return msg, nil
 }

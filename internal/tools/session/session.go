@@ -565,7 +565,7 @@ func sessionGateCheckTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name:        "session_gate_check",
-				Description: "Verify a SESSION is ready to be finished. Cross-object scope: children finished or deleted; aggregated outputs; attribute backfill; checkpoint PASS; waiver-flood threshold; root architecture set. Per-object rules (impl-on-disk, evidence-pass, accepted-evidence-required) are delegated to gate_object — check individual objects with that tool for finer-grained feedback. Mechanical verification only.",
+				Description: "Verify a SESSION is ready to be finished. Cross-object scope: children finished or deleted; aggregated outputs; attribute backfill; checkpoint PASS; root architecture set. Per-object rules (impl-on-disk, evidence-pass, accepted-evidence-required) are delegated to gate_object — check individual objects with that tool for finer-grained feedback. Mechanical verification only. (v9.2: waiver mechanism removed — the gate is now binary; v11: status=confirmed only via confirm_object, never hand-set.)",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -612,7 +612,7 @@ func gateObjectTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name:        "gate_object",
-				Description: "Run the gate's per-object checks against ONE graph object: confirmed status, impl on disk, produces-or-mutates non-empty, typecalc evidence present and passing (or substituted by obstacle+waiver), reasonableness review accepted (or waived). Use this for early feedback while iterating on a single object — the same rules that the root-finish gate runs at the end. The graph_merge_object hook also auto-calls this on status=confirmed transitions, so most usage is reactive (read the hook output) rather than ad-hoc.",
+				Description: "Run the gate's per-object checks against ONE graph object: confirmed status, impl on disk, produces-or-mutates non-empty, typecalc evidence present and passing, reasonableness review accepted. Use this for early feedback while iterating on a single object — the same rules that the root-finish gate runs at the end. The graph_merge_object hook also auto-calls this on status=confirmed transitions, so most usage is reactive (read the hook output) rather than ad-hoc. (v9.2: obstacle+waiver substitute path removed — gate is binary.)",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{

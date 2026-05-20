@@ -129,6 +129,37 @@ func (r *Router) Run(ctx context.Context, initial TypedValue) (TypedValue, error
 	}
 }
 
+// Step performs exactly one Router transition: looks up the handler
+// registered for current.Type, invokes Handle, and validates the
+// output Type is in the handler's declared Outputs.
+//
+// Used by drivers (e.g. agent/outer_loop.go) that need a per-step
+// trace; Run() is the all-in-one variant for the common case.
+//
+// Returns an error when (a) current.Type has no registered handler
+// and is not terminal, (b) the handler returns an error, or (c) the
+// handler produces an output type not in its declared Outputs.
+//
+// Calling Step on a terminal value returns the same value with no
+// error — callers should check IsTerminal before stepping.
+func (r *Router) Step(ctx context.Context, current TypedValue) (TypedValue, error) {
+	if r.terminal[current.Type] {
+		return current, nil
+	}
+	h, ok := r.handlers[current.Type]
+	if !ok {
+		return current, fmt.Errorf("router: no handler for type %q (not terminal either) — registered: %d handlers, %d terminals", current.Type, len(r.handlers), len(r.terminal))
+	}
+	next, err := h.Handle(ctx, current)
+	if err != nil {
+		return current, fmt.Errorf("router: handler for %q returned error: %w", current.Type, err)
+	}
+	if !inSet(next.Type, h.Outputs()) {
+		return current, fmt.Errorf("router: handler for %q produced unauthorized output type %q — declared outputs: %v", current.Type, next.Type, h.Outputs())
+	}
+	return next, nil
+}
+
 // IsTerminal exposes the terminal check for tests + tracing.
 func (r *Router) IsTerminal(typeTag string) bool {
 	return r.terminal[typeTag]

@@ -11,13 +11,15 @@ import (
 	"github.com/creator915/Koncept_OS/internal/domain/graph"
 )
 
-// TestGraphMergeObject_HTMLRequiresImplFragment verifies v9.3.1
-// enforcement: setting impl to an .html / .htm path requires
-// implFragment in the same patch (or already present on the object).
-// v93-04 monolithic retro: agent set impl=index.html with no
-// implFragment → wrote a 1176-line monolithic file → review's
-// implFragment-aware optimisation became inert → token overflow.
-func TestGraphMergeObject_HTMLRequiresImplFragment(t *testing.T) {
+// TestGraphMergeObject_HTMLAutoDerivesImplFragment verifies v12
+// behaviour: setting impl to an .html / .htm path WITHOUT
+// implFragment is accepted, and kcpos auto-derives
+// implFragment=K/frags/<id>.js. Pre-v12 (v9.3.1) the tool refused
+// such a patch; v12 hides the K/frags/ path from the agent entirely
+// by filling it in server-side. The v93-04 monolithic-inline failure
+// mode is still blocked at session_build / AP11 / AP16, just not at
+// graph_merge_object anymore.
+func TestGraphMergeObject_HTMLAutoDerivesImplFragment(t *testing.T) {
 	dir := chdirTempProject(t)
 	_ = dir
 
@@ -41,32 +43,44 @@ func TestGraphMergeObject_HTMLRequiresImplFragment(t *testing.T) {
 	tool := graphMergeObjectTool()
 	run := tool.Run
 
-	// Case 1: impl=index.html WITHOUT implFragment — must be refused.
+	// Case 1 (v12): impl=index.html WITHOUT implFragment — accepted;
+	// implFragment auto-derived to K/frags/Foo.js.
 	_, err := run(context.Background(), map[string]interface{}{
 		"id":    "Foo",
 		"patch": `{"impl":"index.html"}`,
 	})
-	if err == nil {
-		t.Fatal("expected error refusing impl=index.html without implFragment, got nil")
+	if err != nil {
+		t.Fatalf("v12: setting impl=index.html without implFragment must succeed (auto-derive); got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "implFragment") {
-		t.Errorf("error must mention implFragment requirement; got: %v", err)
+	g2, lerr := persistence.LoadGraph(persistence.GraphDefaultPath)
+	if lerr != nil {
+		t.Fatal(lerr)
 	}
-	if !strings.Contains(err.Error(), "K/frags/Foo.js") {
-		t.Errorf("error must suggest the canonical fragment path; got: %v", err)
+	got := g2.Objects["Foo"]
+	if got == nil || got.ImplFragment == nil || *got.ImplFragment != "K/frags/Foo.js" {
+		var frag string
+		if got != nil && got.ImplFragment != nil {
+			frag = *got.ImplFragment
+		}
+		t.Errorf("expected auto-derived implFragment=K/frags/Foo.js; got %q", frag)
 	}
 
-	// Case 2: impl=index.html WITH implFragment in same patch — accepted.
+	// Case 2: impl=index.html WITH explicit implFragment in same patch —
+	// still accepted; explicit value wins over auto-derive. Use a
+	// second object (Bar) added to the existing graph so Foo's state
+	// from Case 1 is preserved for Case 3.
+	g2.Objects["Bar"] = graph.NewObject("K/defs/Bar.js", "Bar intent")
+	_ = persistence.SaveGraph(persistence.GraphDefaultPath, g2)
 	_, err = run(context.Background(), map[string]interface{}{
-		"id":    "Foo",
-		"patch": `{"impl":"index.html","implFragment":"K/frags/Foo.js"}`,
+		"id":    "Bar",
+		"patch": `{"impl":"index.html","implFragment":"K/frags/Bar.js"}`,
 	})
 	if err != nil {
-		t.Fatalf("setting impl + implFragment together must succeed; got: %v", err)
+		t.Fatalf("setting impl + explicit implFragment together must succeed; got: %v", err)
 	}
 
-	// Case 3: impl=index.html setting again (separately) when implFragment
-	// already exists on the object — accepted.
+	// Case 3: re-setting impl=index.html on an object that already has
+	// implFragment (Foo from Case 1's auto-derive) — accepted.
 	_, err = run(context.Background(), map[string]interface{}{
 		"id":    "Foo",
 		"patch": `{"impl":"index.html"}`,
@@ -74,6 +88,7 @@ func TestGraphMergeObject_HTMLRequiresImplFragment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-setting impl=index.html when implFragment is already on the object must succeed; got: %v", err)
 	}
+	_ = strings.Contains // keep import used
 }
 
 // TestGraphMergeObject_NonHTMLDoesNotRequireFragment confirms the

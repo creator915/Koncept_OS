@@ -11,8 +11,9 @@ import (
 // v10 fix: session_build must assemble from graph ImplContent (the v10
 // source of truth) when the K/frags/ projection file is absent — because
 // write_file is forbidden to create K/frags/ in v10, which previously
-// dead-locked the HTML/pong L0→L4 path (confirm_object's pre-smoke
-// session_build could never assemble → never confirmed → never L4).
+// dead-locked the HTML/pong Handler 1.1→1.3 path (confirm_object's pre-smoke
+// session_build could never assemble → never confirmed → Handler 1.3 finish
+// unreachable).
 // Reuses runInTempDir + writeGraph from build_test.go (same package).
 
 func strptr(s string) *string { return &s }
