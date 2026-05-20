@@ -16,6 +16,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/app/services"
 	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	characterizetools "github.com/creator915/Koncept_OS/internal/tools/characterize"
 	"github.com/creator915/Koncept_OS/internal/tools/fs"
 	"github.com/creator915/Koncept_OS/internal/tools/git"
 	graphtools "github.com/creator915/Koncept_OS/internal/tools/graph"
@@ -52,6 +53,9 @@ func Builtins() map[string]Tool {
 		out[k] = v
 	}
 	for k, v := range runtimetools.Tools() {
+		out[k] = v
+	}
+	for k, v := range characterizetools.Tools() {
 		out[k] = v
 	}
 	return out

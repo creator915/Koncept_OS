@@ -144,10 +144,14 @@ func handleConfirmOne(deps *OuterDeps) func(ctx context.Context, in router.Typed
 			"You are the Handler 1.2 confirm-one sub-agent. Your ONLY job is to drive ONE object %q to status=confirmed AND backfill its produced/mutated attributes. "+
 				"Steps: (1) write the impl. For HTML / single-file projects (where multiple objects share impl=index.html) set the code via graph_merge_object patch='{\"implContent\":\"...\"}' (v10 source-of-truth) — do NOT call write_file K/frags/*. For separate-file projects, write_file the per-object impl path. "+
 				"(2) graph_merge_object to set impl + portObservation + status=implementing. "+
-				"(3) call confirm_object object_id=%q to drive the inner chain. If it returns Obstacle, fix the impl/graph and retry. "+
+				"(3) call confirm_object object_id=%q to drive the inner chain.\n\n"+
+				"**On TestError — Handler 1.2's brownfield branch (KonceptOS_implementation_plan.md §1.2)**: when confirm_object returns Obstacle / TestError, **DO NOT immediately re-edit the impl and retry**. The original design forbids that path (\"TestError 不打回 LLM\"). Instead: "+
+				"  a. Call `characterize(object_id=%q)` first. This runs LLM-synthesized probes against the actual impl, observes what it really does, and locks the observed behavior. "+
+				"  b. Read the returned `guidance` field. If LOCKED behavior matches the description (impl is internally consistent), the SYNTHESIZED TESTS are wrong — call `typecalc_synthesize_tests` to regenerate them, then retry `confirm_object`. If LOCKED behavior diverges (UNLOCKED probes / mismatch with intent), the IMPL is wrong — edit the impl to honour the intent, then re-characterize. "+
+				"  c. Only after characterize-diagnosis says \"impl wrong\" should you edit the impl. Editing without characterize-diagnosis violates the documented Handler 1.2 contract.\n\n"+
 				"(4) **AFTER confirm_object succeeds**, backfill the produced/mutated attributes: for each attribute this object PRODUCES or MUTATES (see graph_show), call graph_merge_attribute id=<attr> patch='{\"status\":\"confirmed\",\"valueSpace\":{...}}' — pick a valueSpace matching the attribute type (e.g. `{\"kind\":\"int\",\"min\":0,\"max\":1000000}` for numbers, `{\"kind\":\"string\",\"pattern\":\".*\"}` for strings, `{\"kind\":\"bool\"}` for booleans). Skipping this would fail the [attrs-backfilled] gate rule later. "+
 				"Do NOT touch other objects; do NOT call session_aggregate / session_gate_check. When this object is confirmed AND its attributes are backfilled, output `DONE`.",
-			target, target)
+			target, target, target)
 
 		// After 3+ failed attempts on the same object, the object is
 		// almost certainly an orchestrator / loop / dispatcher whose
@@ -183,6 +187,9 @@ func handleConfirmOne(deps *OuterDeps) func(ctx context.Context, in router.Typed
 			"typecalc_test", "typecalc_review",
 			"confirm_object", "runtime_smoke", "runtime_link", "runtime_install",
 			"session_build", "gate_object",
+			// brownfield TestError branch per Handler 1.2 original design
+			// (KonceptOS_implementation_plan.md §1.2 L158/167/178):
+			"characterize",
 		})
 
 		det2, _ := router.InferOuterStateDetail(deps.RootSessionID)
