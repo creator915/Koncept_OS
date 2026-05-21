@@ -34,7 +34,8 @@ func H_architect(deps *OuterDeps) router.Handler {
 			sys := fmt.Sprintf(
 				"You are the Handler 1.3 architect sub-agent. Your ONLY job is to set the architecture for root session %q. "+
 					"Steps: (1) call markdown_outline on %q. (2) call markdown_section for the chapters that describe the system structure. "+
-					"(3) call session_set_architecture id=%q description=<markdown listing sub-modules and intermediate variables>. "+
+					"(3) **If a `./probe` exists in the working directory (brownfield / PB-style black-box rebuild)**: call `probe` with a handful of representative argv combinations (e.g. `--help`, `--version`, a typical input, an error path) to observe the reference's actual behavior. Use those observations to inform the architecture. "+
+					"(4) call session_set_architecture id=%q description=<markdown listing sub-modules and intermediate variables>. "+
 					"After session_set_architecture succeeds, output the single line `DONE` with no tool calls. "+
 					"Do NOT touch graph_*, write_file, confirm_object — those belong to later Handlers.",
 				deps.RootSessionID, deps.SpecPath, deps.RootSessionID)
@@ -45,6 +46,11 @@ func H_architect(deps *OuterDeps) router.Handler {
 			_ = deps.runScopedLLM(ctx, sys, task, []string{
 				"markdown_outline", "markdown_section", "markdown_validate",
 				"read_file", "session_set_architecture",
+				// Brownfield probe channel (sandboxed; routes through KCPOS_AMD64_CONTAINER
+				// when set). Lets the architect observe a black-box reference's behavior
+				// before committing to an architecture — required for PB-30 / characterize-class
+				// tasks. No-op for greenfield projects with no ./probe in cwd.
+				"probe",
 			})
 
 			det, _ := router.InferOuterStateDetail(deps.RootSessionID)
@@ -98,6 +104,10 @@ func H_graph_declare(deps *OuterDeps) router.Handler {
 				"graph_link_consume", "graph_link_produce", "graph_link_mutate",
 				"graph_merge_object", "graph_merge_attribute",
 				"graph_preflight", "graph_show", "graph_validate",
+				// Brownfield probe (see H_architect rationale). During decomposition
+				// the agent often needs another probe to disambiguate sub-functions
+				// before committing graph object boundaries.
+				"probe",
 			})
 
 			det, _ := router.InferOuterStateDetail(deps.RootSessionID)
@@ -145,6 +155,11 @@ func handleConfirmOne(deps *OuterDeps) func(ctx context.Context, in router.Typed
 				"Steps: (1) write the impl. For HTML / single-file projects (where multiple objects share impl=index.html) set the code via graph_merge_object patch='{\"implContent\":\"...\"}' (v10 source-of-truth) — do NOT call write_file K/frags/*. For separate-file projects, write_file the per-object impl path. "+
 				"(2) graph_merge_object to set impl + portObservation + status=implementing. "+
 				"(3) call confirm_object object_id=%q to drive the inner chain.\n\n"+
+				"**Brownfield / PB-30 black-box rebuild — if `./probe` exists in cwd**: before declaring you're done, also: "+
+				"  - call `probe` with representative inputs to capture reference behavior; "+
+				"  - write `compile.sh` (a one-shot bash script that builds the full deliverable on linux/amd64 — no network) once enough source is in place; "+
+				"  - call `compile` to invoke compile.sh in the sandboxed amd64 container; "+
+				"  - call `run_local` with inputs you've already probed and compare your output against probe's. This is the structural way to ground impl in reality rather than memory.\n\n"+
 				"**On TestError — Handler 1.2's brownfield branch (KonceptOS_implementation_plan.md §1.2)**: when confirm_object returns Obstacle / TestError, **DO NOT immediately re-edit the impl and retry**. The original design forbids that path (\"TestError 不打回 LLM\"). Instead: "+
 				"  a. Call `characterize(object_id=%q)` first. This runs LLM-synthesized probes against the actual impl, observes what it really does, and locks the observed behavior. "+
 				"  b. Read the returned `guidance` field. If LOCKED behavior matches the description (impl is internally consistent), the SYNTHESIZED TESTS are wrong — call `typecalc_synthesize_tests` to regenerate them, then retry `confirm_object`. If LOCKED behavior diverges (UNLOCKED probes / mismatch with intent), the IMPL is wrong — edit the impl to honour the intent, then re-characterize. "+
@@ -190,6 +205,16 @@ func handleConfirmOne(deps *OuterDeps) func(ctx context.Context, in router.Typed
 			// brownfield TestError branch per Handler 1.2 original design
 			// (KonceptOS_implementation_plan.md §1.2 L158/167/178):
 			"characterize",
+			// Sandboxed reference-channel triad (sandboxed.go). Pre-2026-05-21
+			// these were registered in Builtins() but NOT in any Phase-2.C
+			// Handler scoped set — agent couldn't probe black-box references
+			// or build a complete deliverable. PB-30 batch attempt #1 surfaced
+			// this: 5/5 instances wrote source from README+memory only, never
+			// invoked probe (0 calls). Adding here:
+			//   probe       — observe black-box reference (./probe in cwd)
+			//   compile     — run compile.sh on linux/amd64 container
+			//   run_local   — exec the built ./executable on amd64
+			"probe", "compile", "run_local",
 		})
 
 		det2, _ := router.InferOuterStateDetail(deps.RootSessionID)

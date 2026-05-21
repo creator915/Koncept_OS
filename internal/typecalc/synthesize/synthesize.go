@@ -251,7 +251,57 @@ Notes:
 - ` + "`package main`" + ` — kcpos co-locates impl + def + tests in the same package.
 - No need to ` + "`import \"./trace\"`" + ` or declare appendTrace — it's a sibling file at test time.
 - Use ` + "`map[string]interface{}`" + ` literals (not custom structs) for inputs/outputs — keeps the trace JSON-encodable across all object types.
-- Skip cases that are unreasonable to test (e.g. interactive TUI in a non-TTY scratch dir) — emit CANNOT_SYNTHESIZE with reason instead.`
+- Skip cases that are unreasonable to test (e.g. interactive TUI in a non-TTY scratch dir) — emit CANNOT_SYNTHESIZE with reason instead.
+
+**C (LangC) — testCode mode specifics (MANDATORY when language is C):**
+
+C has no runtime eval, so synthesized tests must be a complete C program. The runner concatenates a kcpos_helpers.c (defining ` + "`appendTrace`" + ` + its globals) ahead of the impl + your testCode into combined.c, then runs ` + "`gcc combined.c -o testbin && ./testbin`" + `. Your testCode supplies ` + "`int main(void)`" + `; exit non-zero on first failure.
+
+Helper available (do NOT redeclare):
+
+- ` + "`void appendTrace(const char *inputs_json, const char *outputs_json);`" + ` — write one (inputs, outputs) pair as a JSONL line to the runtime trace bundle. Both arguments are JSON strings the runner writes verbatim into the trace; you craft them inline (C has no reflection). Pass valid JSON object literals.
+
+**Hard requirement**: every test case in your synthesized testCode MUST call ` + "`appendTrace(inputs_json, outputs_json)`" + ` BEFORE its assertions. The runner statically checks for ` + "`appendTrace(`" + ` substring and rejects testCode that omits it (rerun synthesize). One call per case minimum.
+
+Example C testCode (appendTrace + assertions + exit-on-fail):
+
+` + "```" + `c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* impl provides ParseFlags() — defined above by impl concatenation */
+
+int main(void) {
+    /* Case 1: --icons sets flags_config.icons = true */
+    {
+        const char *argv[] = {"prog", "--icons", NULL};
+        FlagsConfig got;
+        int err = ParseFlags(2, argv, &got);
+        appendTrace("{\"args\":[\"--icons\"]}",
+                    "{\"flags_config\":{\"icons\":true,\"dir_only\":false},\"error\":0}");
+        if (err != 0) { fprintf(stderr, "case 1: unexpected error %d\n", err); return 1; }
+        if (!got.icons) { fprintf(stderr, "case 1: expected icons=true\n"); return 1; }
+    }
+    /* Case 2: empty args → all flags false */
+    {
+        const char *argv[] = {"prog", NULL};
+        FlagsConfig got;
+        int err = ParseFlags(1, argv, &got);
+        appendTrace("{\"args\":[]}",
+                    "{\"flags_config\":{\"icons\":false,\"dir_only\":false},\"error\":0}");
+        if (err != 0) { fprintf(stderr, "case 2: unexpected error %d\n", err); return 1; }
+        if (got.icons || got.dir_only) { fprintf(stderr, "case 2: flags should be all-false\n"); return 1; }
+    }
+    return 0;
+}
+` + "```" + `
+
+Notes:
+- Do NOT include kcpos_helpers.c or declare appendTrace — both are provided by the runner via concatenation. Just call appendTrace.
+- The JSON string arguments are written verbatim into the trace; produce literal JSON (escape inner quotes as needed). The bundle's RuntimeTrace.Calls inherits this JSON directly.
+- Standard libc only — the gcc runner has no extra include path; ` + "`#include <stdio.h>/<stdlib.h>/<string.h>`" + ` and the like are fine, third-party headers are not.
+- Skip cases that are unreasonable to test (e.g. requires a TTY) — emit CANNOT_SYNTHESIZE with reason instead.`
 
 func buildSynthesizePrompt(in SynthesizeInputs) string {
 	var b strings.Builder

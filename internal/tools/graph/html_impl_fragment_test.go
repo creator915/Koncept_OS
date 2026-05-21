@@ -108,9 +108,12 @@ func TestGraphMergeObject_NonHTMLDoesNotRequireFragment(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Create the impl file so the static check on impl-on-disk doesn't
-	// trip later if something looks.
+	// trip later if something looks. NOTE: 2026-05-21 — Go testable-contract
+	// guard refuses `package main` impls, so this fixture uses a sub-package
+	// to keep the test focused on the implFragment-not-required invariant
+	// (the package-main guard has its own dedicated test).
 	_ = os.MkdirAll("src", 0o755)
-	_ = os.WriteFile("src/Bar.go", []byte("package main\n"), 0o644)
+	_ = os.WriteFile("src/Bar.go", []byte("package bar\n"), 0o644)
 
 	tool := graphMergeObjectTool()
 	_, err := tool.Run(context.Background(), map[string]interface{}{

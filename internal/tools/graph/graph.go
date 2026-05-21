@@ -674,6 +674,38 @@ func graphMergeObjectTool() toolcall.Tool {
 							"refusing to set impl=%q for object %q: K/frags/ is the per-object STAGING area for fragments, not a deliverable path. The deliverable is what runs when the user opens the project (e.g. index.html for HTML projects, dist/<bundle>.js for bundled, src/<file>.go for Go). For HTML single-file projects use impl=\"index.html\" + implFragment=%q. If this is a multi-file project, set impl to the actual file the user will execute — never K/frags/*",
 							implPath, id, implPath)
 					}
+					// 2026-05-21 — Go testable-contract guard. typecalc tests
+					// Go objects by importing the impl file's package; a
+					// `package main` file cannot be imported, so the chain's
+					// compile / synthesize / test cycle will spin to no avail.
+					// PB-30 batch #3 burned ~40min on `entr` retrofitting code
+					// from `package main` in root into a sub-package mid-confirm.
+					//
+					// Structural fix (replaces the prompt creosote in
+					// outer_handlers.go H_graph_declare): when impl is a .go
+					// file that already exists on disk, read its first
+					// non-empty `package` clause; if it's `main`, refuse
+					// with guidance to move the symbol into a sub-package.
+					//
+					// Deferred case: impl file not yet written. We can't
+					// know the package; pass through. The agent will hit
+					// the same wall at confirm_object time if they then
+					// write package main — caught at the next merge attempt.
+					if ext == ".go" {
+						abs := implPath
+						if !filepath.IsAbs(abs) {
+							cwd, _ := os.Getwd()
+							abs = filepath.Join(cwd, implPath)
+						}
+						if body, rerr := os.ReadFile(abs); rerr == nil {
+							if pkg := scanGoPackage(body); pkg == "main" {
+								return "", fmt.Errorf(
+									"refusing to set impl=%q for object %q: the file declares `package main`, which cannot be imported by the test runner that typecalc generates for confirm_object — every confirm_object call will fail at the compile/link stage. "+
+										"Move the symbol into a sub-package (e.g. pkg/<name>/<file>.go declaring `package <name>`), set impl=\"pkg/<name>/<file>.go\", and keep the executable's `main()` in a small `cmd/<bin>/main.go` that imports the sub-package. The cmd/main file stays plain code — do NOT declare it as a graph object.",
+									implPath, id)
+							}
+						}
+					}
 					// v12 (2026-05-20): HTML impl auto-derives implFragment.
 					// Pre-v12 the agent had to set implFragment=K/frags/<id>.js
 					// alongside impl=index.html — but that path is purely
@@ -865,6 +897,53 @@ func indent(s, prefix string) string {
 		lines[i] = prefix + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// scanGoPackage returns the package name from a Go source file's first
+// non-comment `package <name>` clause, or "" if not found. Tolerates
+// leading // and /* */ comments and blank lines but does not run a full
+// parser — we only need the package identifier, and reading the whole
+// file through go/parser would balloon dependencies for what is a 3-line
+// scan. Used by graph_merge_object's Go testable-contract guard.
+func scanGoPackage(body []byte) string {
+	s := string(body)
+	inBlock := false
+	for _, line := range strings.Split(s, "\n") {
+		t := strings.TrimSpace(line)
+		if inBlock {
+			if i := strings.Index(t, "*/"); i >= 0 {
+				inBlock = false
+				t = strings.TrimSpace(t[i+2:])
+				if t == "" {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		if t == "" || strings.HasPrefix(t, "//") {
+			continue
+		}
+		if strings.HasPrefix(t, "/*") {
+			if strings.Contains(t, "*/") {
+				continue
+			}
+			inBlock = true
+			continue
+		}
+		if strings.HasPrefix(t, "package ") {
+			name := strings.TrimSpace(strings.TrimPrefix(t, "package "))
+			if i := strings.IndexAny(name, " \t/"); i >= 0 {
+				name = name[:i]
+			}
+			return name
+		}
+		// First non-comment line that isn't `package …` — give up; this
+		// isn't a valid Go file or has unexpected layout. Don't reject;
+		// pass through and let the compile stage surface the real issue.
+		return ""
+	}
+	return ""
 }
 
 // withTempFocus saves current focus, sets focus to id, and returns a

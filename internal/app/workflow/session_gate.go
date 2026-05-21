@@ -322,6 +322,29 @@ func CheckObjectGate(g *graph.Graph, objID string, cwd string) ([]string, Object
 	// rules don't apply.
 	isHTMLDeliverable := requiresRuntimeSmoke(lang, *obj.Impl)
 
+	// 2026-05-21 — Reconstruction-mode evidence equivalence.
+	//
+	// When the chain ran the behavioral-equivalence oracle (impl
+	// ./executable vs reference ./probe over a non-model-controlled
+	// battery — see equiv_oracle.go), the bundle's Characterization
+	// section with LockedCount > 0 IS the test evidence. Demanding a
+	// kind=test bundle for these objects is asking the agent to
+	// produce a less rigorous oracle (synthesized unit tests on a CLI
+	// binary) than the one already on disk (battery-of-100% match
+	// against the reference binary).
+	//
+	// PB-30 batch #6 figlet hit this: 3/3 objects reached
+	// status=confirmed via the equivalence oracle, but gate then fired
+	// [compile-not-enough] on all three because C isn't in the
+	// requiresTestEvidence whitelist. The test-shape rules are
+	// architecturally inapplicable here — same shape of fix as the
+	// HTML deliverable carve-out, but keyed on Characterization
+	// presence instead of file extension.
+	isReconstructionVerified := false
+	if cs, ok := core.ReadCharacterization(objID); ok && cs != nil && cs.LockedCount > 0 {
+		isReconstructionVerified = true
+	}
+
 	switch {
 	case kind == "insufficient":
 		issues = append(issues, fmt.Sprintf(
@@ -332,6 +355,16 @@ func CheckObjectGate(g *graph.Graph, objID string, cwd string) ([]string, Object
 			"[typecalc-evidence-passing] object %s evidence records ok=false — fix the impl until typecalc_compile/typecalc_test reports ok=true. There is no waiver escape; the test must actually pass.",
 			objID))
 		return issues, info
+	case isReconstructionVerified && overallOK:
+		// Reconstruction branch: Characterization equivalence oracle is
+		// the test of record. The test-shape rules below assume a
+		// function-call oracle (synthesized inputs/outputs), which
+		// doesn't exist for CLI-rebuild objects whose deliverable is
+		// `./executable`. Skip both [typecalc-test-required] and
+		// [compile-not-enough] — the [method-use-rule] check later in
+		// this function still gates whether the locked behavior is
+		// current (impl hash vs CodeHash) so equivalence can't go
+		// stale silently.
 	case requiresTestEvidence(lang) && kind != "test" && !isHTMLDeliverable:
 		issues = append(issues, fmt.Sprintf(
 			"[typecalc-test-required] object %s has only compile evidence (kind=%q) — language %q has an in-tree test runner; run typecalc_test object_id=%q. If the synthesized tests can't drive this object, declare portObservation so the harness knows how to observe outputs, OR restructure the impl so its effects ARE observable through declared ports.",

@@ -27,7 +27,12 @@ func TestCCT_EndToEnd_ValidCompilesAndTests(t *testing.T) {
 		t.Fatalf("valid C must reach Compiled, got %s/%s err=%v", compiled.Kind, compiled.State, err)
 	}
 	suite := core.New(core.KindTestSuite,
-		"int add(int,int);\nint main(){ return add(2,3)==5 ? 0 : 1; }\n")
+		`int add(int,int);
+int main(){
+    appendTrace("{\"a\":2,\"b\":3}", "{\"result\":5}");
+    return add(2,3)==5 ? 0 : 1;
+}
+`)
 	tested, err := TestRunInvoker(context.Background(), &core.RuleEnv{}, compiled, suite)
 	if err != nil || tested.State != core.StateTestedPass {
 		t.Fatalf("valid suite must reach Tested<Pass>, got %s/%s", tested.Kind, tested.State)
@@ -59,7 +64,12 @@ func TestCCT_EndToEnd_LogicWrongIsTestErrorNotRewrite(t *testing.T) {
 	impl := "int add(int a,int b){return a+b;}\n"
 	compiled := core.New(core.KindCode, impl).WithLang(core.LangC).WithState(core.StateCompiled)
 	suite := core.New(core.KindTestSuite,
-		"int add(int,int);\nint main(){ return add(2,3)==999 ? 0 : 1; }\n")
+		`int add(int,int);
+int main(){
+    appendTrace("{\"a\":2,\"b\":3}", "{\"result\":5}");
+    return add(2,3)==999 ? 0 : 1;
+}
+`)
 	out, err := TestRunInvoker(context.Background(), &core.RuleEnv{}, compiled, suite)
 	if err != nil {
 		t.Fatal(err)

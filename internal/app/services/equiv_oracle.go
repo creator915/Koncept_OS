@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/creator915/Koncept_OS/internal/infra/persistence"
 	"github.com/creator915/Koncept_OS/internal/tools/fs"
 	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
@@ -159,6 +160,26 @@ func runEquivalenceOracle(ctx context.Context, objectID string) (passed bool, su
 	if b, hasB := core.ReadBundle(objectID); hasB && b.Compile != nil {
 		lang = b.Compile.Lang
 	}
+	// 2026-05-21 — fill CodeHash so the gate's [method-use-rule] can
+	// detect post-characterize impl edits. Pre-fix this field was zero,
+	// causing gate to report "locked hash (none), current X" and fail
+	// every PB-30 object even when the impl had not changed since the
+	// oracle ran. CodeHash is the hash of the impl source (matches what
+	// the gate computes via HashSource(implFileBody) when comparing).
+	codeHash := ""
+	if g, gerr := persistence.LoadGraph(persistence.GraphDefaultPath); gerr == nil && g != nil {
+		if obj, ok := g.Objects[objectID]; ok && obj.Impl != nil && *obj.Impl != "" {
+			implPath := *obj.Impl
+			if !filepath.IsAbs(implPath) {
+				if cwd, cerr := os.Getwd(); cerr == nil {
+					implPath = filepath.Join(cwd, implPath)
+				}
+			}
+			if body, rerr := os.ReadFile(implPath); rerr == nil {
+				codeHash = core.HashSource(string(body))
+			}
+		}
+	}
 	detail, _ := json.Marshal(map[string]interface{}{
 		"oracle":    "behavioral-equivalence vs ./probe",
 		"battery":   len(battery),
@@ -169,6 +190,7 @@ func runEquivalenceOracle(ctx context.Context, objectID string) (passed bool, su
 	sec := &core.CharacterizationSection{
 		SuiteID:    "equiv-" + objectID,
 		Lang:       lang,
+		CodeHash:   codeHash,
 		OracleProperty: fmt.Sprintf(
 			"deliverable is behaviorally equivalent to the reference ./probe over a %d-item gate-generated (non-model-controlled) battery", len(battery)),
 		Cases:         nil, // CLI-argv battery ≠ TestCase (function-call) shape; verdict + lossless replay live in Detail (design Part 10.3)

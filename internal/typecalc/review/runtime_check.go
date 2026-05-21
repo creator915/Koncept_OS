@@ -75,6 +75,32 @@ func RuntimeCheck(g *graph.Graph, objID string) core.CheckReport {
 		return rb.Build()
 	}
 
+	// 2026-05-21: Reconstruction-mode (brownfield ./probe rebuild)
+	// branch. When the chain ran the behavioral-equivalence oracle
+	// (impl ./executable vs reference ./probe over a non-model-controlled
+	// battery — see internal/app/services/equiv_oracle.go), the bundle
+	// carries a Characterization section with LockedCount > 0 instead
+	// of a synthesized-test runtime trace. The trace-based runtime
+	// checks below presume a function-call oracle (inputs/outputs per
+	// call) which doesn't exist for CLI-rebuild tasks — the impl is
+	// `./executable`, not a callable function with structured ports.
+	//
+	// PB-30 batch #4/#5 cmatrix/figlet/tty-clock all reached review's
+	// runtime-trace-missing → Obstacle path even though their
+	// Characterization had locked the impl as behaviorally equivalent.
+	// Add the same skip pattern HTML uses: keep the rules visible to
+	// the aggregator so they aren't a silent-pass, but reason them out
+	// as not-applicable to reconstruction-mode objects.
+	if char, ok := core.ReadCharacterization(objID); ok && char != nil && char.LockedCount > 0 {
+		for _, code := range RuntimeRuleCodes {
+			if code == "runtime-object-not-found" {
+				continue
+			}
+			rb.Skip(code, "reconstruction-mode-characterization")
+		}
+		return rb.Build()
+	}
+
 	trace, hasTrace := core.ReadRuntimeTrace(objID)
 	if !hasTrace {
 		rb.Fail("runtime-trace-missing", mkIssue("runtime-trace-missing",

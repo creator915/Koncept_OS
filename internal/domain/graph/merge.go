@@ -250,18 +250,24 @@ func (g *Graph) MergeObject(id string, patch map[string]any) error {
 		o.ImplContent = s
 	}
 	// implLang (v10): detected programming language of implContent.
-	// Valid values: TypeScript, JavaScript, Go, Python, Rust, Java, Haskell, HTML, or "" (unknown).
+	// 2026-05-21: the graph layer no longer hardcodes a whitelist —
+	// internal/typecalc/lang/ is the single source of truth for which
+	// languages have real compile + test invokers (currently: Go,
+	// TypeScript, JavaScript, Python, Rust, C, HTML). When the agent
+	// declares an unsupported lang, the chain's compile/test step
+	// returns Insufficient with a stage-named reason, the SAME way
+	// it does for typos or genuinely unsupported langs.
+	//
+	// Why this changed: the previous hardcoded whitelist had drifted
+	// (it allowed Java/Haskell — never implemented — and refused C —
+	// fully implemented). PB-30 batch #4's `entr` agent burned an hour
+	// pivoting C→Go→TS→JS because the graph layer rejected `implLang="c"`
+	// even though internal/typecalc/lang/compile.go has runCCompile.
+	// Single source of truth is the only way to keep these in sync.
 	if v, has := patch["implLang"]; has {
 		s, ok := v.(string)
 		if !ok {
 			return fmt.Errorf("implLang must be string")
-		}
-		validLangs := map[string]bool{
-			"TypeScript": true, "JavaScript": true, "Go": true, "Python": true,
-			"Rust": true, "Java": true, "Haskell": true, "HTML": true, "": true,
-		}
-		if !validLangs[s] {
-			return fmt.Errorf("implLang must be one of TypeScript, JavaScript, Go, Python, Rust, Java, Haskell, HTML, or empty; got %q", s)
 		}
 		o.ImplLang = s
 	}

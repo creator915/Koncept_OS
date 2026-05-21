@@ -172,37 +172,179 @@ func TestRunInvoker(ctx context.Context, env *core.RuleEnv, compiled, suite *cor
 	// the impl is restructured into a verifiable language, or (b) kcpos
 	// gains a runner for this language (see internal/typecalc/lang/).
 	return core.NewInsufficient(fmt.Sprintf(
-		"no in-tree test runner for language %q — kcpos cannot mechanically verify this code. v9.2 has no waiver escape; resolve by restructuring the impl into a runner-supported language (Go / TypeScript / JavaScript / Python / HTML), OR extend internal/typecalc/lang/ with a TestRunInvoker for %q.",
+		"no in-tree test runner for language %q — kcpos cannot mechanically verify this code. v9.2 has no waiver escape; resolve by restructuring the impl into a runner-supported language (Go / TypeScript / JavaScript / Python / Rust / C / HTML), OR extend internal/typecalc/lang/ with a TestRunInvoker for %q. Note: language identifiers are case-sensitive — use \"C\" not \"c\", \"Go\" not \"go\".",
 		compiled.Lang, compiled.Lang)), nil
 }
 
 // runCTest implements the doc's C mapping: "编译并运行测试二进制".
 // kcpos's impl model is single-file, so impl + test are one translation
 // unit (the test source carries main() and exits non-zero on failure).
+//
+// 2026-05-21 — C trace emission. Pre-fix runCTest just glued impl + suite
+// and ran the binary; no trace bundle was written, so the review stage's
+// runtime-trace check fired Obstacle on every C confirm_object run (PB-30
+// batch #4 cmatrix/figlet/tty-clock all died here). We now stage a
+// kcpos_helpers.c that defines appendTrace(inputs_json, outputs_json),
+// concatenate helpers + impl + suite, run the test binary, then load
+// the JSONL trace it produced and write a bundle in the same shape the
+// Go runner produces — the review stage sees identical evidence for C
+// and Go runs.
 func runCTest(ctx context.Context, env *core.RuleEnv, compiled, suite *core.TypedValue) (*core.TypedValue, error) {
 	if !commandExists("gcc") {
 		return compiled.WithState(core.StateTestedPass), nil // fail-open, like JS/Py
+	}
+	// Static-check the synthesized testCode contains an appendTrace call.
+	// Matches the runGoTest pattern (line 251) — block runs whose tests
+	// would produce no trace, so the agent gets a stage-named error rather
+	// than chasing the downstream "no runtime trace" Obstacle from review.
+	if !strings.Contains(suite.Payload, "appendTrace(") {
+		return core.NewTestError(
+			"trace-missing",
+			"appendTrace(inputs_json, outputs_json) call present in synthesized testCode",
+			"synthesized C testCode does not call appendTrace(...). The trace helper is provided by the harness in kcpos_helpers.c — every test case must call appendTrace(inputsJsonStr, outputsJsonStr) BEFORE its assertions so the runtime trace records what happened even when assertions fail. Re-synthesize tests with this requirement; for C the inputs/outputs are passed as JSON string literals (the LLM writes the JSON inline).",
+		), nil
 	}
 	dir, err := os.MkdirTemp("", "kcpos-ctest-*")
 	if err != nil {
 		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	defer os.RemoveAll(dir)
+	// Bake the JSONL trace path into helpers. Use a scratch path inside
+	// the staging dir; we read it back after the binary exits and convert
+	// into the bundle shape the review stage reads.
+	jsonlPath := filepath.Join(dir, "trace.jsonl")
+	helpers := renderCTraceHelper(jsonlPath)
+	combined := helpers + "\n" + compiled.Payload + "\n" + suite.Payload
 	src := filepath.Join(dir, "combined.c")
-	if err := os.WriteFile(src, []byte(compiled.Payload+"\n"+suite.Payload), 0o644); err != nil {
+	if err := os.WriteFile(src, []byte(combined), 0o644); err != nil {
 		return core.NewTestError("setup", "no error", err.Error()), nil
 	}
 	bin := filepath.Join(dir, "testbin")
 	if out, err := runCmd(ctx, dir, "gcc", src, "-o", bin); err != nil {
 		return core.NewTestError("compile-test-binary", "tests pass", string(out)+"\n"+err.Error()), nil
 	}
-	if out, err := runCmd(ctx, dir, bin); err != nil {
-		// Append the exit error so a binary that fails by exit-code only
-		// (no stdout) still carries a non-empty Actual — the brownfield
-		// characterization datum must never be empty.
-		return core.NewTestError(extractFailingCase(string(out)), "tests pass", string(out)+"\n"+err.Error()), nil
+	runOut, runErr := runCmd(ctx, dir, bin)
+	// Always try to persist whatever trace lines the binary managed to
+	// emit, EVEN IF tests failed — review/characterize benefit from
+	// partial trace evidence the same way the Go runner does (helper
+	// flushes after each call so a crashing test still leaves a tail).
+	_ = persistCTrace(env, jsonlPath, compiled.Payload)
+	if runErr != nil {
+		return core.NewTestError(extractFailingCase(string(runOut)), "tests pass", string(runOut)+"\n"+runErr.Error()), nil
 	}
 	return compiled.WithState(core.StateTestedPass), nil
+}
+
+// renderCTraceHelper produces a self-contained C source string that the
+// generated test code can lean on. Mirrors renderGoTraceHelper for the
+// C harness — provides appendTrace() that writes one JSONL line per call
+// (no native map-to-JSON in C, so the LLM passes pre-formatted JSON
+// string literals; the Go-side persistCTrace assembles the final bundle
+// after the test binary exits).
+//
+// The trace path is baked in as a string literal at stage time. The
+// helper opens the file in write mode at first call (truncating any
+// prior content), so a re-run produces a fresh trace bundle aligned
+// with the current impl, identical to the Go helper's TestMain reset.
+func renderCTraceHelper(jsonlPath string) string {
+	return strings.ReplaceAll(cTraceHelperTemplate, "__TRACE_JSONL_PATH__", cString(jsonlPath))
+}
+
+// cString returns a C double-quoted string literal of s. Backslashes and
+// quotes are escaped; no other characters appear in stage paths we
+// generate (tmp dirs use a safe alphabet) so this minimal escape is
+// sufficient. If we ever pass arbitrary user paths through here, harden
+// to also escape control chars.
+func cString(s string) string {
+	r := strings.ReplaceAll(s, `\`, `\\`)
+	r = strings.ReplaceAll(r, `"`, `\"`)
+	return `"` + r + `"`
+}
+
+// cTraceHelperTemplate is concatenated into combined.c at stage time.
+// Provides appendTrace + a file-once-truncate-then-append pattern so a
+// crashing binary still leaves a partial JSONL trace on disk.
+const cTraceHelperTemplate = `/* Auto-generated by kcpos C lang runner — do not edit.
+ * Provides appendTrace() for synthesized C test programs.
+ * Mirror of internal/typecalc/lang/test.go renderGoTraceHelper.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static const char *kcpos_trace_path = __TRACE_JSONL_PATH__;
+static FILE *kcpos_trace_fp = NULL;
+
+/* appendTrace records one (inputs, outputs) pair from a test case.
+ * Call BEFORE assertions so a failing assertion still leaves the trace
+ * on disk — review's runtime-trace rule sees the actual values
+ * regardless of test pass/fail (matches Go/JS/Python harness ordering).
+ *
+ * inputs_json and outputs_json must be valid JSON strings (object or
+ * any JSON value). The helper does NOT validate — malformed JSON
+ * propagates into the bundle and review will surface the issue with
+ * a clearer error than "trace-missing".
+ */
+void appendTrace(const char *inputs_json, const char *outputs_json) {
+    if (kcpos_trace_fp == NULL) {
+        /* First call truncates — fresh run = fresh trace, matches Go
+         * TestMain reset semantics.
+         */
+        kcpos_trace_fp = fopen(kcpos_trace_path, "w");
+        if (kcpos_trace_fp == NULL) {
+            /* Don't crash the test if trace open fails — proceed quietly,
+             * mirror Go's behavior. Review will report "no runtime trace"
+             * which is the correct downstream signal.
+             */
+            return;
+        }
+    }
+    fprintf(kcpos_trace_fp, "{\"inputs\":%s,\"outputs\":%s}\n",
+            inputs_json ? inputs_json : "null",
+            outputs_json ? outputs_json : "null");
+    fflush(kcpos_trace_fp);
+}
+`
+
+// persistCTrace reads the JSONL trace produced by the C test binary
+// (one JSON object per line: {"inputs": ..., "outputs": ...}) and writes
+// a bundle RuntimeTrace section identical in shape to what renderGoTrace
+// Helper writes. Called AFTER the test binary exits, regardless of
+// test pass/fail, so partial traces from crashing tests are preserved.
+//
+// Idempotent and safe to call when no trace file was written (e.g. binary
+// crashed before any appendTrace call) — returns nil with no bundle
+// mutation; review will then surface "no runtime trace" downstream.
+func persistCTrace(env *core.RuleEnv, jsonlPath, implBody string) error {
+	if env == nil || env.ObjectID == "" {
+		return nil
+	}
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil || len(data) == 0 {
+		return nil // no trace produced — review handles "missing trace"
+	}
+	var calls []core.RuntimeCall
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var c struct {
+			Inputs  map[string]json.RawMessage `json:"inputs"`
+			Outputs map[string]json.RawMessage `json:"outputs"`
+		}
+		if err := json.Unmarshal([]byte(line), &c); err != nil {
+			// Tolerate malformed lines — review will see what made it.
+			continue
+		}
+		calls = append(calls, core.RuntimeCall{Inputs: c.Inputs, Outputs: c.Outputs})
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+	bundle := core.LoadOrInitBundle(env.ObjectID)
+	bundle.RuntimeTrace = &core.RuntimeTraceSection{Calls: calls}
+	return core.SaveBundle(bundle)
 }
 
 // runRustTest implements the doc's Rust mapping ("cargo test"). cargo

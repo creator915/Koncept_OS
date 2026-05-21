@@ -89,7 +89,7 @@ func CompileLanguageInvoker(ctx context.Context, env *core.RuleEnv, src *core.Ty
 	// refuse to confirm. Resolve by restructuring into a supported
 	// language or extending internal/typecalc/lang/ to add an invoker.
 	return core.NewInsufficient(fmt.Sprintf(
-		"no in-tree compile invoker for language %q — kcpos cannot mechanically syntax-check this code. v9.2 has no waiver escape; restructure into a supported language (Go/TypeScript/JavaScript/HTML/Python) or extend internal/typecalc/lang/ with a CompileLanguageInvoker for %q.",
+		"no in-tree compile invoker for language %q — kcpos cannot mechanically syntax-check this code. v9.2 has no waiver escape; restructure into a supported language (Go / TypeScript / JavaScript / Python / Rust / C / HTML) or extend internal/typecalc/lang/ with a CompileLanguageInvoker for %q. Note: language identifiers are case-sensitive — use \"C\" not \"c\", \"Go\" not \"go\".",
 		src.Lang, src.Lang)), nil
 }
 

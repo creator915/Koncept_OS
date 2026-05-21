@@ -2,12 +2,130 @@ package chains
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/creator915/Koncept_OS/internal/domain/graph"
 	"github.com/creator915/Koncept_OS/internal/router"
 )
+
+// defaultStepTimeout caps a single LLM-backed dep call (Compile / Describe
+// / Synthesize / Test / Smoke / Review / FixImpl / Characterize / Build).
+// Sized so a healthy step finishes within budget but a hung LLM stream can
+// no longer silently consume the outer 1h cap.
+//
+// PB-30 batch #3 (2026-05-21) closed with 4/5 instances cap-killed mid-step
+// after 17–27 min of silence following the last visible tool call. Without
+// per-step deadlines the chain happily waited for an LLM stream that had
+// long since stopped emitting tokens. The watchdog turns those silences
+// into a stage-named Obstacle the outer Router can act on.
+//
+// Override via env KCPOS_CHAIN_STEP_TIMEOUT_SEC (clamped to [60, 1800]).
+const defaultStepTimeout = 8 * time.Minute
+
+// stepTimeoutDuration reads the env override or returns the default.
+// Production recommends ≥60s — anything lower risks racing a healthy LLM
+// stream. Tests use ≥1s to exercise the timeout path quickly. >30min
+// defeats the purpose of the cap, so we clamp it.
+func stepTimeoutDuration() time.Duration {
+	v := os.Getenv("KCPOS_CHAIN_STEP_TIMEOUT_SEC")
+	if v == "" {
+		return defaultStepTimeout
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return defaultStepTimeout
+	}
+	if n > 1800 {
+		n = 1800
+	}
+	return time.Duration(n) * time.Second
+}
+
+// stageContext wraps the parent ctx with the per-step deadline. The
+// returned cancel MUST run when the dep call completes so the timer
+// goroutine doesn't leak.
+func stageContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, stepTimeoutDuration())
+}
+
+// isStageTimeout returns true when err looks like our per-step deadline
+// firing (as opposed to e.g. a structured LLM transport error). Used to
+// pick a stage-named Obstacle reason instead of a generic "<stage> failed".
+//
+// errors.Is covers the canonical context.DeadlineExceeded; the string
+// check covers LLM transport wrappers that re-format the error before
+// returning (transport/client.go wraps stream EOF + ctx-cancel into a
+// "context deadline exceeded while reading body" message).
+func isStageTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "context deadline exceeded") ||
+		strings.Contains(s, "context canceled")
+}
+
+// stageTimeoutReason composes the Obstacle reason for a per-step deadline.
+// Names the stage + the configured timeout so the agent / outer Router can
+// see exactly which inner step ran the budget out.
+func stageTimeoutReason(stage string) string {
+	d := stepTimeoutDuration()
+	return fmt.Sprintf(
+		"chain stage %q exceeded the per-step inactivity timeout (%v). "+
+			"The LLM-backed dep did not return within the budget — likely a "+
+			"stream stall, an infinite retry, or a step that genuinely needs "+
+			"longer (raise KCPOS_CHAIN_STEP_TIMEOUT_SEC if the latter). "+
+			"The outer Router can now characterize / inspect / restart "+
+			"instead of waiting silently.", stage, d,
+	)
+}
+
+// hasReferenceProbe reports whether a ./probe shell wrapper / binary
+// exists in the chain's current working directory. Presence of a probe
+// is the signal that this run is brownfield (black-box rebuild), so
+// the chain's TestError handler must NOT enrich back to the LLM
+// (KonceptOS_implementation_plan.md §1.2 L158).
+func hasReferenceProbe() bool {
+	if fi, err := os.Stat("probe"); err == nil && !fi.IsDir() {
+		return true
+	}
+	return false
+}
+
+// mkFailingCaseDetail formats the test failure context for the
+// brownfield Obstacle reason so the agent sees what diverged.
+func mkFailingCaseDetail(p TestErrorPayload) string {
+	var b strings.Builder
+	if p.FailingCase != "" {
+		b.WriteString("\n\nFailing case:\n" + truncCap(p.FailingCase, 800))
+	}
+	if p.Expected != "" {
+		b.WriteString("\n\nExpected (from synthesized test):\n" + truncCap(p.Expected, 400))
+	}
+	if p.Actual != "" {
+		b.WriteString("\n\nActual (from impl):\n" + truncCap(p.Actual, 400))
+	}
+	if p.RunnerLog != "" {
+		b.WriteString("\n\nRunner log tail:\n" + truncCap(p.RunnerLog, 600))
+	}
+	return b.String()
+}
+
+func truncCap(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(truncated)"
+}
 
 // DefaultMaxRetries caps per-object enrich-retry cycles. 5 matches
 // core.CycleCap — exhausting the cycle counter is the same event
@@ -178,8 +296,13 @@ func BuildChain(d Deps) (*router.Router, error) {
 			if err := in.Unmarshal(&p); err != nil {
 				return router.TypedValue{}, err
 			}
-			desc, err := d.Describe(ctx, p.ObjectID)
+			sctx, cancel := stageContext(ctx)
+			defer cancel()
+			desc, err := d.Describe(sctx, p.ObjectID)
 			if err != nil {
+				if isStageTimeout(err) {
+					return makeObstacle(p.ObjectID, stageTimeoutReason("describe"), TypeCompiled), nil
+				}
 				return makeObstacle(p.ObjectID, "describe failed: "+err.Error(), TypeCompiled), nil
 			}
 			out, _ := router.NewTypedValue(TypeDescribed, DescribedPayload{ObjectID: p.ObjectID, Description: desc})
@@ -215,11 +338,22 @@ func BuildChain(d Deps) (*router.Router, error) {
 				// set on every chain pass. Without this, smoke loads a
 				// stub deliverable that doesn't contain the fragment under
 				// test — v93-02 retro called out exactly this confusion.
-				if _, berr := d.Build(ctx); berr != nil {
+				bctx, bcancel := stageContext(ctx)
+				_, berr := d.Build(bctx)
+				bcancel()
+				if berr != nil {
+					if isStageTimeout(berr) {
+						return makeObstacle(p.ObjectID, stageTimeoutReason("build"), TypeDescribed), nil
+					}
 					return makeObstacle(p.ObjectID, "session_build (pre-smoke) failed: "+berr.Error(), TypeDescribed), nil
 				}
-				ok, summary, serr := d.Smoke(ctx, p.ObjectID)
+				sctx, scancel := stageContext(ctx)
+				defer scancel()
+				ok, summary, serr := d.Smoke(sctx, p.ObjectID)
 				if serr != nil {
+					if isStageTimeout(serr) {
+						return makeObstacle(p.ObjectID, stageTimeoutReason("smoke"), TypeDescribed), nil
+					}
 					return makeObstacle(p.ObjectID, "runtime_smoke failed to run: "+serr.Error(), TypeDescribed), nil
 				}
 				if ok {
@@ -235,8 +369,13 @@ func BuildChain(d Deps) (*router.Router, error) {
 				})
 				return out, nil
 			}
-			n, err := d.Synthesize(ctx, p.ObjectID)
+			synthCtx, synthCancel := stageContext(ctx)
+			n, err := d.Synthesize(synthCtx, p.ObjectID)
+			synthCancel()
 			if err != nil {
+				if isStageTimeout(err) {
+					return makeObstacle(p.ObjectID, stageTimeoutReason("synthesize"), TypeDescribed), nil
+				}
 				return makeObstacle(p.ObjectID, "synthesize_tests failed: "+err.Error(), TypeDescribed), nil
 			}
 			if n == 0 {
@@ -262,31 +401,70 @@ func BuildChain(d Deps) (*router.Router, error) {
 		},
 	})
 
-	// TestError → Request<Test>.
-	r.Register(&router.EnrichHandler{
+	// TestError → either Obstacle (brownfield: ./probe exists) or
+	// Request<Test> (greenfield: enrich + LLM-rewrite loop, legacy behavior).
+	//
+	// Handler 1.2 brownfield branch (KonceptOS_implementation_plan.md
+	// §1.2 L117 / L158 / L167 / L178): when a black-box reference
+	// (./probe) is available, TestError MUST NOT be looped back to the
+	// LLM as "edit impl and retry". The original design ("TestError
+	// 不打回 LLM——进入 brownfield 流程") forbids that path because the
+	// real diagnosis ("代码错还是测试错") needs reference-behavior
+	// observation, not LLM speculation. Pre-2026-05-21 this branch was
+	// missing — chain enriched + retried on every TestError, which is
+	// why PB-30 batch #2's confirm_object calls silently spun for
+	// 24-42 minutes inside the LLM rewrite cycle without progress.
+	//
+	// This handler now:
+	//   - Greenfield (no ./probe): emit Request<Test> + LLM enrich
+	//     guidance (existing v9 behavior; safe for SPEC-derived
+	//     greenfield projects where synthesized tests ARE the oracle)
+	//   - Brownfield (./probe exists): emit Obstacle with explicit
+	//     "do NOT retry via LLM rewrite" guidance; the agent's outer
+	//     loop sees the Obstacle and per H_confirm_one's prompt
+	//     calls the `characterize` agent tool to diagnose whether
+	//     the impl is wrong or the synthesized tests are wrong.
+	r.Register(&router.HandlerFunc{
 		In:  TypeTestError,
-		Out: TypeRequestTest,
-		Transform: func(in router.TypedValue) (router.Request, error) {
+		Out: []string{TypeRequestTest, TypeObstacle},
+		Run: func(ctx context.Context, in router.TypedValue) (router.TypedValue, error) {
 			var p TestErrorPayload
 			if err := in.Unmarshal(&p); err != nil {
-				return router.Request{}, err
+				return router.TypedValue{}, err
 			}
-			ctx := map[string]string{"objectId": p.ObjectID, "attempts": fmt.Sprintf("%d", p.Attempts)}
+			// Brownfield mode: a reference ./probe in cwd means this
+			// is a black-box rebuild task. Honor L158 — emit Obstacle
+			// without enriching back to the LLM.
+			if hasReferenceProbe() {
+				reason := fmt.Sprintf(
+					"TestError in brownfield mode (./probe reference detected). "+
+						"Per Handler 1.2 design (KonceptOS_implementation_plan.md §1.2 L158: "+
+						"\"TestError 不打回 LLM——进入 brownfield 流程\"), the chain does NOT "+
+						"auto-retry via LLM impl rewrite. Diagnose with the `characterize` "+
+						"agent tool to determine: (a) impl matches intent and synthesized tests "+
+						"were wrong → regenerate via typecalc_synthesize_tests; "+
+						"(b) impl diverges from intent → fix impl with reference behavior as oracle.",
+					) +
+					mkFailingCaseDetail(p)
+				return makeObstacle(p.ObjectID, reason, TypeTestError), nil
+			}
+			// Greenfield fallback: enrich → LLM rewrite (v9 behavior).
+			reqCtx := map[string]string{"objectId": p.ObjectID, "attempts": fmt.Sprintf("%d", p.Attempts)}
 			if p.FailingCase != "" {
-				ctx["failingCase"] = p.FailingCase
+				reqCtx["failingCase"] = p.FailingCase
 			}
 			if p.Expected != "" {
-				ctx["expected"] = p.Expected
+				reqCtx["expected"] = p.Expected
 			}
 			if p.Actual != "" {
-				ctx["actual"] = p.Actual
+				reqCtx["actual"] = p.Actual
 			}
 			if p.RunnerLog != "" {
-				ctx["runnerLogTail"] = p.RunnerLog
+				reqCtx["runnerLogTail"] = p.RunnerLog
 			}
-			return router.Request{
+			req := router.Request{
 				Task: fmt.Sprintf("Test object %q until typecalc_test returns Tested<Pass>.", p.ObjectID),
-				Context: ctx,
+				Context: reqCtx,
 				Guidance: []string{
 					"Inspect the failing case: what did the test expect, and what did the impl produce?",
 					"If the impl is wrong: edit it to match the test's expected behavior.",
@@ -295,7 +473,9 @@ func BuildChain(d Deps) (*router.Router, error) {
 					"After your edits, the router re-runs typecalc_test automatically.",
 				},
 				Attempts: p.Attempts,
-			}, nil
+			}
+			payload, _ := json.Marshal(req)
+			return router.TypedValue{Type: TypeRequestTest, Content: payload}, nil
 		},
 	})
 
@@ -403,8 +583,13 @@ func BuildChain(d Deps) (*router.Router, error) {
 				if err := in.Unmarshal(&p); err != nil {
 					return router.TypedValue{}, err
 				}
-				locked, unlocked, err := d.Characterize(ctx, p.ObjectID)
+				sctx, cancel := stageContext(ctx)
+				locked, unlocked, err := d.Characterize(sctx, p.ObjectID)
+				cancel()
 				if err != nil {
+					if isStageTimeout(err) {
+						return makeObstacle(p.ObjectID, stageTimeoutReason("characterize"), TypeStartCharacterize), nil
+					}
 					return makeObstacle(p.ObjectID, "characterize failed: "+err.Error(), TypeStartCharacterize), nil
 				}
 				out, _ := router.NewTypedValue(TypeCharacterized, CharacterizedPayload{
@@ -441,8 +626,13 @@ func BuildChain(d Deps) (*router.Router, error) {
 // runCompile is shared by the StartConfirm handler and the Request<Compile>
 // retry path. attemptCount=0 means "first run".
 func runCompile(ctx context.Context, d Deps, objectID string, attempts int) (router.TypedValue, error) {
-	lang, _, ok, code, log, err := d.Compile(ctx, objectID)
+	sctx, cancel := stageContext(ctx)
+	defer cancel()
+	lang, _, ok, code, log, err := d.Compile(sctx, objectID)
 	if err != nil {
+		if isStageTimeout(err) {
+			return makeObstacle(objectID, stageTimeoutReason("compile"), TypeStartConfirm), nil
+		}
 		return makeObstacle(objectID, "compile invoker error: "+err.Error(), TypeStartConfirm), nil
 	}
 	if ok {
@@ -456,8 +646,13 @@ func runCompile(ctx context.Context, d Deps, objectID string, attempts int) (rou
 }
 
 func runTest(ctx context.Context, d Deps, objectID string, attempts int) (router.TypedValue, error) {
-	_, ok, failingCase, expected, actual, log, err := d.Test(ctx, objectID)
+	sctx, cancel := stageContext(ctx)
+	defer cancel()
+	_, ok, failingCase, expected, actual, log, err := d.Test(sctx, objectID)
 	if err != nil {
+		if isStageTimeout(err) {
+			return makeObstacle(objectID, stageTimeoutReason("test"), TypeSynthesized), nil
+		}
 		return makeObstacle(objectID, "test invoker error: "+err.Error(), TypeSynthesized), nil
 	}
 	if ok {
@@ -471,8 +666,13 @@ func runTest(ctx context.Context, d Deps, objectID string, attempts int) (router
 }
 
 func runReview(ctx context.Context, d Deps, objectID string, attempts int) (router.TypedValue, error) {
-	ok, static, rt, reasons, conf, err := d.Review(ctx, objectID)
+	sctx, cancel := stageContext(ctx)
+	defer cancel()
+	ok, static, rt, reasons, conf, err := d.Review(sctx, objectID)
 	if err != nil {
+		if isStageTimeout(err) {
+			return makeObstacle(objectID, stageTimeoutReason("review"), TypeTestedPass), nil
+		}
 		return makeObstacle(objectID, "review invoker error: "+err.Error(), TypeTestedPass), nil
 	}
 	if ok {
@@ -502,8 +702,13 @@ func runRetry(ctx context.Context, d Deps, in router.TypedValue, stage string) (
 
 	allowed := []string{"Uncompiled<Lang<Code>>", "Obstacle<Object,Reason>"}
 	prompt := router.FormatRequestForLLM(req, allowed)
-	branch, obstacleReason, err := d.FixImpl(ctx, objectID, prompt)
+	sctx, cancel := stageContext(ctx)
+	branch, obstacleReason, err := d.FixImpl(sctx, objectID, prompt)
+	cancel()
 	if err != nil {
+		if isStageTimeout(err) {
+			return makeObstacle(objectID, stageTimeoutReason("fix_impl"), in.Type), nil
+		}
 		return makeObstacle(objectID, "FixImpl invoker error: "+err.Error(), in.Type), nil
 	}
 	if branch == "obstacle" {

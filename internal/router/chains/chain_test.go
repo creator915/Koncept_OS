@@ -3,7 +3,9 @@ package chains
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/creator915/Koncept_OS/internal/router"
 	"github.com/creator915/Koncept_OS/internal/typecalc/core"
@@ -431,6 +433,88 @@ func TestChain_BuildChainConnectivity(t *testing.T) {
 		t.Errorf("chain has orphan output tags: %v", orphans)
 	}
 }
+
+// TestChain_StepTimeout_EmitsStagedObstacle verifies that when a dep call
+// hangs past the per-step inactivity budget, the chain emits a stage-named
+// Obstacle instead of silently consuming the outer time cap. PB-30 batch
+// #3 closed with 4/5 instances 17–27min cap-killed mid-step exactly
+// because this watchdog was missing.
+func TestChain_StepTimeout_EmitsStagedObstacle(t *testing.T) {
+	t.Setenv("KCPOS_CHAIN_STEP_TIMEOUT_SEC", "1")
+
+	deps := happyDeps()
+	// Describe hangs until its ctx fires. Returns ctx.Err so the chain
+	// sees a context.DeadlineExceeded — exactly the shape an LLM
+	// transport returns when its stream ctx is cancelled mid-read.
+	deps.Describe = func(ctx context.Context, id string) (string, error) {
+		select {
+		case <-time.After(10 * time.Second):
+			return "should never reach", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
+	r, err := BuildChain(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, _ := router.NewTypedValue(TypeStartConfirm, StartConfirmPayload{ObjectID: "Foo"})
+
+	start := time.Now()
+	out, err := r.Run(context.Background(), in)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Type != TypeObstacle {
+		t.Fatalf("expected Obstacle on step timeout, got %s", out.Type)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("step timeout should fire near 1s, took %v", elapsed)
+	}
+	var p ObstaclePayload
+	if err := out.Unmarshal(&p); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.Reason, "describe") || !strings.Contains(p.Reason, "per-step inactivity timeout") {
+		t.Errorf("Obstacle reason should name the describe stage + timeout, got: %q", p.Reason)
+	}
+}
+
+// TestChain_StepTimeout_NonTimeoutErrorPreserved verifies that a normal dep
+// error (not a ctx-deadline) still goes through the legacy "<stage> failed:
+// ..." branch — the watchdog must distinguish stalls from honest failures.
+func TestChain_StepTimeout_NonTimeoutErrorPreserved(t *testing.T) {
+	deps := happyDeps()
+	deps.Describe = func(ctx context.Context, id string) (string, error) {
+		return "", errStub("describe blew up for a legit reason")
+	}
+	r, err := BuildChain(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, _ := router.NewTypedValue(TypeStartConfirm, StartConfirmPayload{ObjectID: "Foo"})
+	out, err := r.Run(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Type != TypeObstacle {
+		t.Fatalf("expected Obstacle, got %s", out.Type)
+	}
+	var p ObstaclePayload
+	_ = out.Unmarshal(&p)
+	if !strings.Contains(p.Reason, "describe failed: describe blew up") {
+		t.Errorf("non-timeout error should preserve legacy reason, got: %q", p.Reason)
+	}
+	if strings.Contains(p.Reason, "per-step inactivity timeout") {
+		t.Errorf("non-timeout error should NOT be reported as timeout, got: %q", p.Reason)
+	}
+}
+
+type errStub string
+
+func (e errStub) Error() string { return string(e) }
 
 // --- small helpers ---
 

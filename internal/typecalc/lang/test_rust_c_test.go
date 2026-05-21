@@ -32,7 +32,13 @@ func TestRun_C_Pass_SkipIfNoGcc(t *testing.T) {
 	}
 	out := runTest(t,
 		"int add(int a,int b){return a+b;}\n",
-		"int add(int,int);\nint main(){ if(add(2,3)!=5) return 1; return 0; }\n",
+		`int add(int,int);
+int main(){
+    appendTrace("{\"a\":2,\"b\":3}", "{\"result\":5}");
+    if(add(2,3)!=5) return 1;
+    return 0;
+}
+`,
 		core.LangC)
 	if out.State != core.StateTestedPass {
 		t.Fatalf("passing C suite must yield Tested<Pass>, got %s/%s: %s", out.Kind, out.State, out.Payload)
@@ -45,7 +51,13 @@ func TestRun_C_Fail_SkipIfNoGcc(t *testing.T) {
 	}
 	out := runTest(t,
 		"int add(int a,int b){return a+b;}\n",
-		"int add(int,int);\nint main(){ if(add(2,3)!=6) return 1; return 0; }\n",
+		`int add(int,int);
+int main(){
+    appendTrace("{\"a\":2,\"b\":3}", "{\"result\":5}");
+    if(add(2,3)!=6) return 1;
+    return 0;
+}
+`,
 		core.LangC)
 	if out.Kind != core.KindTestError {
 		t.Fatalf("failing C suite must yield TestError, got %s", out.Kind)
@@ -88,7 +100,13 @@ func TestRun_TestError_IsBrownfieldArtifact_NotLLMRewrite(t *testing.T) {
 	}
 	out := runTest(t,
 		"int add(int a,int b){return a+b;}\n",
-		"int add(int,int);\nint main(){ if(add(2,3)!=6) return 1; return 0; }\n",
+		`int add(int,int);
+int main(){
+    appendTrace("{\"a\":2,\"b\":3}", "{\"result\":5}");
+    if(add(2,3)!=6) return 1;
+    return 0;
+}
+`,
 		core.LangC)
 	if out.Kind != core.KindTestError {
 		t.Fatalf("expected TestError, got %s", out.Kind)
