@@ -113,6 +113,73 @@ func TestSynthesizeWithInvoker_PassesThroughCannotSynthesize(t *testing.T) {
 	}
 }
 
+// TestSynthesizeWithInvoker_FixModeRendersPriorCodeAndFailure — when
+// PreviousTestCode + PreviousFailure are set, the prompt must include a
+// FIX MODE section carrying both verbatim so the LLM can diff in place.
+// Empty pair means cold synth — no FIX MODE section.
+func TestSynthesizeWithInvoker_FixModeRendersPriorCodeAndFailure(t *testing.T) {
+	captured := ""
+	_, _ = SynthesizeWithInvoker(context.Background(),
+		SynthesizeInputs{
+			ObjectID:         "Reverse",
+			Lang:             "Go",
+			Intent:           "reverse runes",
+			Description:      "in-place",
+			PreviousTestCode: "func TestReverse(t *testing.T){ /* prior body */ }",
+			PreviousFailure:  "FAIL TestReverse: expected \"cba\", got \"abc\"",
+		},
+		func(ctx context.Context, prompt string) (string, error) {
+			captured = prompt
+			return `{"objectId":"Reverse","testCode":"func TestReverse(t *testing.T){ /* fixed */ }"}`, nil
+		})
+	if !strings.Contains(captured, "FIX MODE") {
+		t.Fatalf("FIX MODE header missing from prompt:\n%s", captured)
+	}
+	if !strings.Contains(captured, "prior body") {
+		t.Fatalf("prior testCode body missing from FIX MODE section")
+	}
+	if !strings.Contains(captured, "expected \"cba\"") {
+		t.Fatalf("prior failure missing from FIX MODE section")
+	}
+}
+
+func TestSynthesizeWithInvoker_NoFixModeWhenPriorEmpty(t *testing.T) {
+	captured := ""
+	_, _ = SynthesizeWithInvoker(context.Background(),
+		SynthesizeInputs{ObjectID: "X", Lang: "Go"},
+		func(ctx context.Context, prompt string) (string, error) {
+			captured = prompt
+			return `func TestX(t *testing.T){}`, nil
+		})
+	if strings.Contains(captured, "FIX MODE") {
+		t.Fatalf("cold synth must not include FIX MODE section")
+	}
+}
+
+// TestFixModeOn_RequiresBothFields — partial pair (only code, only
+// failure, or whitespace-only) must NOT trigger fix mode; otherwise the
+// LLM would see "minimize changes" while having nothing to anchor to.
+func TestFixModeOn_RequiresBothFields(t *testing.T) {
+	cases := []struct {
+		name string
+		in   SynthesizeInputs
+		want bool
+	}{
+		{"both empty", SynthesizeInputs{}, false},
+		{"only code", SynthesizeInputs{PreviousTestCode: "x"}, false},
+		{"only failure", SynthesizeInputs{PreviousFailure: "y"}, false},
+		{"both whitespace", SynthesizeInputs{PreviousTestCode: "  ", PreviousFailure: "\t"}, false},
+		{"both set", SynthesizeInputs{PreviousTestCode: "x", PreviousFailure: "y"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fixModeOn(c.in); got != c.want {
+				t.Errorf("fixModeOn(%+v) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestEvidenceRoundTrip_TestsEvidence(t *testing.T) {
 	cleanup := useTempEvidenceDir(t)
 	defer cleanup()

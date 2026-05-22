@@ -3,6 +3,8 @@ package router
 import (
 	"context"
 	"fmt"
+
+	"github.com/creator915/Koncept_OS/internal/snapshot"
 )
 
 // Router is the type-driven dispatch table. Register handlers by their
@@ -116,6 +118,30 @@ func (r *Router) Run(ctx context.Context, initial TypedValue) (TypedValue, error
 		allowed := h.Outputs()
 		if !inSet(next.Type, allowed) {
 			return current, fmt.Errorf("router: handler for %q produced unauthorized output type %q — declared outputs: %v", current.Type, next.Type, allowed)
+		}
+		// Snapshot hook (Phase 2d): emit one outer.transition event
+		// per successful state transition. The Router stays generic —
+		// it doesn't know which transitions correspond to "milestones"
+		// worth a named ref; that decision lives in the agent layer
+		// (Phase 7) where the Outer state semantics are known.
+		//
+		// IMPORTANT (2026-05-22 audit H1): the agent layer's custom
+		// driver `outer_loop.go::RunRoutedTurnWithPersist` uses r.Step
+		// in its own for-loop (NOT this Run method) and emits its OWN
+		// outer.transition capture per step. The two paths are mutually
+		// exclusive — only one of `Run` / `for-Step` executes in any
+		// given call. If a future caller uses `r.Run` AND attaches a
+		// Snapshotter AND then somehow also drives r.Step in the same
+		// snapshotter context, you'd get double events. Don't do that.
+		// The Step method intentionally has NO snapshot hook so the
+		// agent-layer for-Step pattern can control event ordering
+		// (transition AFTER any tool.exec it interleaves).
+		if s := snapshot.FromContext(ctx); s != nil {
+			s.Capture("outer.transition", snapshot.EventTypeOuterTransition, snapshot.OuterTransitionEvent{
+				From:    current.Type,
+				To:      next.Type,
+				Payload: next.Content,
+			})
 		}
 		current = next
 		steps++

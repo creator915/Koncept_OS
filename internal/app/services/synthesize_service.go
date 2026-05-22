@@ -131,19 +131,39 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 					poJSON = string(raw)
 				}
 			}
+			// Incremental synth (2026-05-22): if prior tests exist AND the
+			// last test run failed AND the impl hasn't changed since that
+			// run, switch to fix-mode — pass the prior testCode + failure
+			// log to the LLM and ask for a minimal modification. Cuts the
+			// 5-9 min cold-rewrite cycle PB-30 batch 0522 burned through.
+			//
+			// Conditions guard against false-trigger: ImplHash equality
+			// ensures the failure is still relevant (an edited impl could
+			// have moved the goalpost), and we only fix-mode on Kind=test
+			// + OK=false (compile failures are about source, not tests).
+			prevCode, prevFailure := "", ""
+			if priorTests, ok := core.ReadTests(objectID); ok && len(priorTests.TestCode) > 0 {
+				if priorRun, ok := core.ReadEvidence(objectID); ok &&
+					priorRun.Kind == "test" && !priorRun.OK && priorRun.Log != "" {
+					prevCode = priorTests.TestCode
+					prevFailure = priorRun.Log
+				}
+			}
 			out, err := synthesize.SynthesizeTests(ctx, synthesize.SynthesizeInputs{
-				ObjectID:        objectID,
-				Lang:            lang,
-				Intent:          obj.Intent,
-				Description:     spec.Description,
-				Signature:       string(defBody),
-				ImplSymbol:      obj.ImplSymbol,
-				Consumes:        obj.Consumes,
-				Produces:        obj.Produces,
-				Mutates:         obj.Mutates,
-				ValueSpace:      vs,
-				PortObservation: poJSON,
-				Examples:        examples,
+				ObjectID:         objectID,
+				Lang:             lang,
+				Intent:           obj.Intent,
+				Description:      spec.Description,
+				Signature:        string(defBody),
+				ImplSymbol:       obj.ImplSymbol,
+				Consumes:         obj.Consumes,
+				Produces:         obj.Produces,
+				Mutates:          obj.Mutates,
+				ValueSpace:       vs,
+				PortObservation:  poJSON,
+				Examples:         examples,
+				PreviousTestCode: prevCode,
+				PreviousFailure:  prevFailure,
 			})
 			if err != nil {
 				return "", err

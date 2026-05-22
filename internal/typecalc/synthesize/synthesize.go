@@ -49,6 +49,23 @@ type SynthesizeInputs struct {
 	// alone — the synthesized cases inherit the shape of these instead
 	// of inventing it. Each entry is the raw text of one example.
 	Examples []string
+
+	// PreviousTestCode + PreviousFailure (2026-05-22, PB-30 batch 0522
+	// follow-up): when non-empty, switch to "fix mode" — the LLM is told
+	// to MODIFY the prior testCode minimally to address PreviousFailure
+	// instead of regenerating from scratch. Cuts the 9 min/full-rewrite
+	// cycle that PB-30 batch 0522 cmatrix burned through.
+	//
+	// PreviousTestCode: the raw testCode from the previous synth round
+	// that was rejected by typecalc_test.
+	// PreviousFailure: the stderr / compiler error / assertion failure
+	// captured during the failed run (clipped to a few KB by the caller).
+	//
+	// Empty strings → cold synth (legacy behavior, prompt unchanged).
+	// Both set → fix mode. Set just one is treated as cold synth (the
+	// pair is meaningless on its own).
+	PreviousTestCode string
+	PreviousFailure  string
 }
 
 // SynthesizeTests asks an LLM to generate test cases from the spec
@@ -183,6 +200,7 @@ Rules:
 4. Each "case" should test ONE specific behavior. Use multiple cases for multiple invariants — do not pile assertions for unrelated behaviors into one case.
 5. The harness automatically: snapshots input ports before each call, snapshots output ports after, appends to .kcpos/typecalc-runtime/<id>.json BEFORE running assertions (so traces are captured even on assertion failure), and runs the assertions. You do NOT need to write any of that.
 6. If the spec is too underspecified to derive meaningful cases, return the literal text CANNOT_SYNTHESIZE on a single line followed by a one-sentence reason. Do not return JSON in that case.
+6a. **Output budget — HARD CAP** (2026-05-22, PB-30 batch 0522 root-cause): cases ≤ 15 AND total testCode body ≤ 8 KB. If the object's declared ports + invariants genuinely need more, the object is too coarse — return ` + "`CANNOT_SYNTHESIZE: object too coarse, split into smaller graph objects (current contract needs >15 cases / >8KB to cover)`" + `. The H_graph_declare granularity gate also enforces ≤4 produces+mutates per object; if you're hitting this cap, you've likely got an outer-graph mismatch the agent should fix by splitting rather than by piling cases in here.
 
 **v9.0.2 assertion-style rules (CRITICAL — these prevent brittle tests):**
 
@@ -303,6 +321,12 @@ Notes:
 - Standard libc only — the gcc runner has no extra include path; ` + "`#include <stdio.h>/<stdlib.h>/<string.h>`" + ` and the like are fine, third-party headers are not.
 - Skip cases that are unreasonable to test (e.g. requires a TTY) — emit CANNOT_SYNTHESIZE with reason instead.`
 
+// fixModeOn reports whether both PreviousTestCode and PreviousFailure
+// were supplied — the pair triggers the incremental ("fix") synth path.
+func fixModeOn(in SynthesizeInputs) bool {
+	return strings.TrimSpace(in.PreviousTestCode) != "" && strings.TrimSpace(in.PreviousFailure) != ""
+}
+
 func buildSynthesizePrompt(in SynthesizeInputs) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Object id: %s\nLanguage: %s\n\n", in.ObjectID, nonEmpty(in.Lang, "(unknown)"))
@@ -340,6 +364,16 @@ func buildSynthesizePrompt(in SynthesizeInputs) string {
 			"  - `\"global\"` ports ⇒ call should MUTATE globalThis[port]. Use `IMPL.<fnName>(args)` and rely on the impl to set globals.\n"+
 			"  - `\"args.<n>.<path>\"` ports ⇒ call passes a mutable object at position n; impl mutates it; the harness reads back.\n"+
 			"  - `\"side_effect\"` ports ⇒ no runtime value to check; you SHOULD NOT write expectations on these ports (they exist for human/integration verification).\n\n", clip(in.PortObservation, 1500))
+	}
+	if fixModeOn(in) {
+		// Fix mode: tell the LLM to MODIFY prior testCode minimally to
+		// address the failure, NOT regenerate from scratch. Saves 5-9 min
+		// of streaming on monolithic objects (PB-30 batch 0522 root-cause).
+		b.WriteString("\n## FIX MODE — previous synth was rejected by typecalc_test\n\n")
+		b.WriteString("The output below is the LAST testCode you produced for this object plus the failure it triggered. Your task this round is to MINIMALLY MODIFY the prior testCode to fix the reported failure — NOT to regenerate from scratch. Most cases should pass through verbatim. Touch only the lines the failure points at.\n\n")
+		fmt.Fprintf(&b, "### Previous testCode (rejected)\n```\n%s\n```\n\n", clip(in.PreviousTestCode, 12000))
+		fmt.Fprintf(&b, "### Failure reported by typecalc_test\n```\n%s\n```\n\n", clip(in.PreviousFailure, 3000))
+		b.WriteString("Output the COMPLETE revised testCode (same JSON envelope shape as cold synth — `{\"objectId\":\"...\",\"testCode\":\"...\"}` for testCode mode, or `{\"objectId\":\"...\",\"cases\":[...]}` for cases mode). Even though most content is unchanged, the host needs the full body for atomic overwrite. Aim to change <20% of the prior body — if the failure root-cause genuinely requires rewriting the suite, return `CANNOT_SYNTHESIZE: prior testCode incompatible with failure mode, cold rewrite needed` and the agent will retry without fix-mode.\n\n")
 	}
 	b.WriteString("Write the JSON cases per the system prompt's strict schema. No fences, no prose.")
 	return b.String()

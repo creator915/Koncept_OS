@@ -4,9 +4,39 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/creator915/Koncept_OS/internal/router"
+	"github.com/creator915/Koncept_OS/internal/snapshot"
 )
+
+// milestoneNameFor maps an Outer.* state tag to a short milestone
+// ref-name suffix. Returns "" for states that aren't worth
+// snapshotting as rollback targets (mid-loop SomeConfirmed, terminal
+// Obstacle / Finished).
+//
+// Naming kept deliberately stable — Phase 7 rollback paths rely on
+// "graph-declared-<session>" / "all-confirmed-<session>" /
+// "checkpointed-<session>" being predictable refs.
+func milestoneNameFor(outerType string) string {
+	switch outerType {
+	case router.OuterTypeArchitecture:
+		return "architecture"
+	case router.OuterTypeGraphDeclared:
+		return "graph-declared"
+	case router.OuterTypeAllConfirmed:
+		return "all-confirmed"
+	case router.OuterTypeAggregated:
+		return "aggregated"
+	case router.OuterTypeBuilt:
+		return "built"
+	case router.OuterTypeCheckpointed:
+		return "checkpointed"
+	case router.OuterTypeGatePassed:
+		return "gate-passed"
+	}
+	return ""
+}
 
 // RoutedRunResult is the terminal outcome of an outer-Router run.
 type RoutedRunResult struct {
@@ -161,6 +191,42 @@ func RunRoutedTurnWithPersist(ctx context.Context, deps *OuterDeps, persist Trac
 		})
 		if deps.OnTransition != nil {
 			deps.OnTransition(current.Type, next.Type, next.Content)
+		}
+		// Phase 2d (originally hooked in router.Run, but
+		// RunRoutedTurnWithPersist uses r.Step in this custom loop
+		// so the router-package hook never fires here) — emit
+		// outer.transition for the snapshot event log. Without this,
+		// lesson synthesis (Phase 6) can't find the terminal
+		// Obstacle reason and pickRollbackMilestone has no causal
+		// trace to walk. The Phase 8 e2e test caught this gap.
+		if s := snapshot.FromContext(ctx); s != nil {
+			s.Capture("outer.transition", snapshot.EventTypeOuterTransition, snapshot.OuterTransitionEvent{
+				From:    current.Type,
+				To:      next.Type,
+				Payload: next.Content,
+			})
+		}
+		// Phase 7 — auto-milestone on key forward-progress Outer.*
+		// transitions when snapshotting is active. These milestones
+		// are the rollback targets if a later attempt obstacles —
+		// we want to rewind to the LATEST point that represents
+		// "real agent work invested": architecture, graph declared,
+		// each object confirmed, fully aggregated, checkpointed.
+		//
+		// Naming convention: "<phase>-<rootSessionID>" so multi-
+		// instance test runs don't collide milestone refs.
+		//
+		// Failure mode: SetMilestone writes one event + one ref. If
+		// either fails (disk full, permission), we log to stderr
+		// rather than silently swallow — the next retry would
+		// otherwise miss this milestone as a rollback target with
+		// no diagnostic for why.
+		if s := snapshot.FromContext(ctx); s != nil {
+			if mname := milestoneNameFor(next.Type); mname != "" {
+				if _, err := s.SetMilestone(mname+"-"+deps.RootSessionID, "auto: reached "+next.Type); err != nil {
+					fmt.Fprintf(os.Stderr, "[snapshot/milestone] set milestone %s for %s failed: %v\n", mname, deps.RootSessionID, err)
+				}
+			}
 		}
 		result.Steps++
 		current = next

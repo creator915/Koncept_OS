@@ -20,6 +20,16 @@ import (
 // asserting forward progress; this is the same rule every gate /
 // hook follows.
 
+// maxObjectPorts caps Produces+Mutates per object at graph-declare time.
+// Rationale: typecalc_synthesize_tests' wall time scales with declared
+// output-port count (each port becomes a column the LLM enumerates in
+// every test case). PB-30 batch 0522 saw cmatrix's ArgsParse with 19
+// output ports drive synth past 9 min per call. 4 is the empirical
+// sweet spot from bat (5 objects × 1-3 ports each, finished in 30min
+// previously). Group related scalars into a single structured port
+// rather than declaring each as its own attribute.
+const maxObjectPorts = 4
+
 // --- Forward Handlers ---
 
 // H_architect: Outer.Task → Outer.Architecture | Outer.Obstacle
@@ -40,6 +50,19 @@ func H_architect(deps *OuterDeps) router.Handler {
 					"After session_set_architecture succeeds, output the single line `DONE` with no tool calls. "+
 					"Do NOT touch graph_*, write_file, confirm_object — those belong to later Handlers.",
 				deps.RootSessionID, deps.SpecPath, deps.RootSessionID)
+
+			// Phase 7 — prior-attempt lessons injection. When earlier
+			// attempts of this task (under the same workdir) ended in
+			// Obstacle, Phase 6's lesson synthesis wrote markdown files
+			// under .kcpos/snapshots/lessons/. Read them and prepend
+			// the concatenated body to the architect's system prompt
+			// so the next attempt knows what to avoid. The architect
+			// is the natural injection point because it's the first
+			// sub-agent of any run; later sub-agents inherit the
+			// architectural decisions and don't need a second copy.
+			if preamble := buildLessonPreamble(ctx, deps); preamble != "" {
+				sys = preamble + "\n\n" + sys
+			}
 
 			task := fmt.Sprintf("Set architecture for session %s from SPEC %s. Task: %s",
 				deps.RootSessionID, deps.SpecPath, deps.TaskDescription)
@@ -137,6 +160,33 @@ func H_graph_declare(deps *OuterDeps) router.Handler {
 					return emitObstacle("graph_declare", fmt.Sprintf(
 						"reconstruction mode (./probe in cwd) declared only %d object(s) — black-box rebuild tasks require decomposition into ≥2 testable sub-functions (e.g. ParseArgs + DoWork + FormatOutput) so each can be driven through confirm_object's per-object behavioral-equivalence oracle. A single monolithic object exceeds handler_max_iter. Add more graph_create_object calls covering the sub-contracts implied by README / man / probe observations.",
 						n)), nil
+				}
+			}
+			// 2026-05-22 — per-object granularity gate.
+			//
+			// PB-30 batch 0522: even with ≥2 objects, an agent can stuff
+			// one object with 19+ produced/mutated ports (cmatrix's
+			// "ArgsParse" with every CLI flag as a separate output) which
+			// makes typecalc_synthesize_tests emit a 30KB+ testCode and
+			// stream for 9+ minutes per call. The synth bottleneck is
+			// proportional to declared port count, not impl complexity.
+			//
+			// Cap at >maxObjectPorts produces+mutates per object. consumes
+			// is NOT counted — inputs are observable from the caller, not
+			// a synth burden. The cap is intentionally a hard refusal so
+			// the agent SPLITS at declare-time rather than discovering the
+			// 9-min stall later inside confirm_object.
+			if g, gerr := persistence.LoadGraph(persistence.GraphDefaultPath); gerr == nil && g != nil {
+				for id, obj := range g.Objects {
+					if obj == nil {
+						continue
+					}
+					ports := len(obj.Produces) + len(obj.Mutates)
+					if ports > maxObjectPorts {
+						return emitObstacle("graph_declare", fmt.Sprintf(
+							"object %q has %d produces+mutates ports (cap=%d) — monolithic objects make typecalc_synthesize_tests stream 30KB+ test code per call (9+ min wall time, exhausts handler_max_iter). Split via graph_create_object into smaller pieces with ≤%d output ports each (group related outputs into a sub-object: e.g. one ParseFlags object with one structured `config` output rather than 19 separate scalar outputs).",
+							id, ports, maxObjectPorts, maxObjectPorts)), nil
+					}
 				}
 			}
 			return router.MarshalPayload(router.OuterTypeGraphDeclared, map[string]interface{}{

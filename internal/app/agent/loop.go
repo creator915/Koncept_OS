@@ -10,6 +10,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 	"github.com/creator915/Koncept_OS/internal/shared/agentctx"
+	"github.com/creator915/Koncept_OS/internal/snapshot"
 	"github.com/creator915/Koncept_OS/internal/tools"
 	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
@@ -188,6 +189,24 @@ func RunTurnOpts(ctx context.Context, client *transport.Client, messages *[]tran
 
 		*messages = append(*messages, *assistant)
 
+		// Snapshot hook (Phase 2b): if a Snapshotter is attached to
+		// the ctx, record this assistant turn as an llm.turn event.
+		// SLIM payload — only the NEW info (assistant's reasoning +
+		// content + tool_calls). Full chat history stays in the
+		// transcripts/ file; the event chain captures the per-turn
+		// delta. Capture() logs to stderr on failure rather than
+		// silently swallowing, so snapshotting can't degrade unseen.
+		if s := snapshot.FromContext(ctx); s != nil {
+			toolCallsJSON, _ := json.Marshal(assistant.ToolCalls)
+			s.Capture("llm.turn", snapshot.EventTypeLLMTurn, snapshot.LLMTurnEvent{
+				SubAgent:  fmt.Sprintf("depth-%d", opts.Depth),
+				TurnIndex: i,
+				Reasoning: assistant.ReasoningContent,
+				Content:   assistant.Content,
+				ToolCalls: toolCallsJSON,
+			})
+		}
+
 		if len(assistant.ToolCalls) == 0 {
 			// ③ PROCESS-JUSTICE TERMINATION GATE (流程正义). A harnessed
 			// run (Caps != nil ⇒ scored/task run, not casual interactive
@@ -321,9 +340,67 @@ func runOneToolCall(ctx context.Context, opts RunOptions, builtins map[string]to
 	fmt.Fprintf(os.Stderr, "%s%s» %s(%s)\n", Stamp(), opts.Indent, tc.Function.Name, truncate(tc.Function.Arguments, 200))
 	if denied := authorizeToolCall(opts.Caps, tc.Function.Name, tc.Function.Arguments); denied != nil {
 		fmt.Fprintf(os.Stderr, "%s%s\x1b[31m✗ permission denied\x1b[0m\n", Stamp(), opts.Indent)
-		return renderPermissionDenied(denied, tc.Function.Name)
+		out := renderPermissionDenied(denied, tc.Function.Name)
+		// Snapshot hook (Phase 2c): permission-denied is a real
+		// observable event — agent saw it, may strategise around it,
+		// and replay needs to know it happened. Captured with Err
+		// set so forensic queries can filter for denials. No
+		// side_effects — a denied call by definition didn't run.
+		if s := snapshot.FromContext(ctx); s != nil {
+			s.Capture("tool.exec", snapshot.EventTypeToolExec, snapshot.ToolExecEvent{
+				Tool:   tc.Function.Name,
+				Args:   json.RawMessage(tc.Function.Arguments),
+				Result: out,
+				Err:    "permission denied",
+			})
+		}
+		return out
 	}
-	return tools.Execute(ctx, builtins, tc.Function.Name, tc.Function.Arguments)
+	// Phase 3 — workdir delta side_effects.
+	// Take a pre-call snapshot when snapshotting is on; after the
+	// tool runs, diff it against a post-call snapshot to derive
+	// FileWrite / FileDelete side_effects. This is the agnostic
+	// alternative to per-tool side_effect emission: any state
+	// mutation that touches the watched roots gets captured
+	// regardless of which tool produced it. Read-only tools
+	// (probe / read_file / grep / markdown_*) produce empty diffs
+	// and emit a SideEffects=nil ToolExecEvent — preserving the
+	// observation in the chain without inflating storage.
+	//
+	// CONCURRENCY CAVEAT: runBatchConcurrent fans out
+	// Concurrent=true tools into parallel goroutines, each of which
+	// runs this hook. If two concurrent tools both WRITE to the
+	// same file, each goroutine's post-snapshot reflects the LAST
+	// writer's content — the earlier goroutine's side_effect would
+	// be wrong (records the final state instead of its own delta).
+	// In current code Concurrent=true tools are read-only
+	// (read_file, grep, glob, list_dir, markdown_*, probe), so this
+	// race is theoretical. If future tooling marks any state-
+	// mutating tool as concurrent, this hook MUST be moved out of
+	// the goroutine into a serial post-batch capture, OR per-file
+	// locking added.
+	var preWorkdir *snapshot.WorkdirSnapshot
+	if s := snapshot.FromContext(ctx); s != nil {
+		preWorkdir, _ = s.TakeWorkdir()
+	}
+	result := tools.Execute(ctx, builtins, tc.Function.Name, tc.Function.Arguments)
+	if s := snapshot.FromContext(ctx); s != nil {
+		var sideEffects []snapshot.SideEffect
+		if preWorkdir != nil {
+			postWorkdir, err := s.TakeWorkdir()
+			if err == nil {
+				diff := preWorkdir.Diff(postWorkdir)
+				sideEffects, _ = s.DiffToSideEffects(diff)
+			}
+		}
+		s.Capture("tool.exec", snapshot.EventTypeToolExec, snapshot.ToolExecEvent{
+			Tool:        tc.Function.Name,
+			Args:        json.RawMessage(tc.Function.Arguments),
+			Result:      result,
+			SideEffects: sideEffects,
+		})
+	}
+	return result
 }
 
 // runBatchConcurrent runs the batch in parallel goroutines and writes

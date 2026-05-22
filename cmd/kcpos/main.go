@@ -30,6 +30,7 @@ Usage:
   kcpos graph <verb> ...           direct CLI on K/graph.json
   kcpos session <verb> ...         work-session lifecycle (K/sessions/)
   kcpos checkpoint <verb> ...      verification ledger (K/checkpoint.json)
+  kcpos snap <verb> ...            event-sourced snapshot navigation (.kcpos/snapshots/)
   kcpos doc protocol               print the runtime protocol (markdown)
   kcpos doc system                 print the full LLM system prompt
   kcpos doctor [--install] [-y]    detect / install external toolchain
@@ -63,6 +64,8 @@ func main() {
 		os.Exit(commands.RunSession(rest))
 	case "checkpoint":
 		os.Exit(commands.RunCheckpoint(rest))
+	case "snap":
+		os.Exit(commands.RunSnap(rest))
 	case "doc":
 		os.Exit(commands.RunDoc(rest))
 	case "doctor":

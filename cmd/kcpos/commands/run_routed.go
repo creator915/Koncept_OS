@@ -15,6 +15,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/llm/memory"
 	"github.com/creator915/Koncept_OS/internal/llm/provider"
 	"github.com/creator915/Koncept_OS/internal/llm/transport"
+	"github.com/creator915/Koncept_OS/internal/snapshot"
 	"github.com/creator915/Koncept_OS/internal/tools"
 )
 
@@ -36,6 +37,7 @@ func RunRouted(args []string) int {
 	maxSteps := fs.Int("max-steps", 200, "Router transition cap (forward + feedback combined)")
 	perHandlerIter := fs.Int("handler-max-iter", 60, "LLM iteration cap inside each creative Handler (2026-05-20 raised 30→60 after batch #3 confirmed 30 truncated mid-fix on TestError feedback loops)")
 	tracePath := fs.String("trace", "", "if set, write the routed-run trace JSON to this path")
+	maxAttempts := fs.Int("max-attempts", 1, "Phase 7 auto-retry budget: how many times to rollback+retry on terminal Outer.Obstacle (1 = single attempt, no retry; ≥2 enables snapshot-driven retry with lesson injection)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, `kcpos run-routed — outer-Router (Phase-2.C) driver
 
@@ -113,7 +115,14 @@ Flags:`)
 	}
 
 	ctx := context.Background()
-	result, runErr := agent.RunRoutedTurnWithPersist(ctx, deps, persist)
+	// Phase 7 — attach a workdir-scoped Snapshotter to ctx so every
+	// state-mutating tool call captures its side_effects, every
+	// Outer.* transition emits an event, and (with --max-attempts ≥2)
+	// failed branches get archived + lessons synthesized for the
+	// next attempt's system prompt.
+	snap := snapshot.NewSnapshotter(cwd)
+	ctx = snapshot.WithSnapshotter(ctx, snap)
+	result, runErr := agent.RunRoutedTurnWithRetry(ctx, deps, persist, snap, *maxAttempts)
 	// Final transcript save after Router returns; OnProgress already
 	// saves per-LLM-turn but this catches any tail.
 	_ = tr.Save()
