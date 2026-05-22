@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/creator915/Koncept_OS/internal/domain/checkpoint"
@@ -114,6 +115,29 @@ func H_graph_declare(deps *OuterDeps) router.Handler {
 			if len(det.DeclaredObjectIDs) == 0 {
 				return emitObstacle("graph_declare",
 					"no objects declared in K/graph.json after sub-agent loop"), nil
+			}
+			// 2026-05-21 — reconstruction-mode decomposition guard.
+			// When ./probe exists in cwd, the task is "rebuild a black-box
+			// executable" and naturally needs ≥2 testable sub-functions
+			// (arg parsing + work + formatting at minimum). A single
+			// monolithic graph object wrapping the whole binary cannot be
+			// driven through confirm_object's per-object oracle in any
+			// reasonable handler_max_iter budget — PB-30 batch #8 cmatrix
+			// burned its sub-agent loop on exactly this (1 object 'Cmatrix'
+			// with impl=main.c, 0 confirm progress, terminal Obstacle).
+			//
+			// The fix is here (graph-declare post-condition), not in the
+			// confirm-one fallback, because the cost of a monolithic
+			// attempt is ~handler_max_iter × sub-agent turns (minutes of
+			// real LLM time). Catching it BEFORE the sub-agent runs saves
+			// the budget and gives the agent a stage-named error pointing
+			// at the actual fix (split or add objects).
+			if _, perr := os.Stat("probe"); perr == nil {
+				if n := len(det.DeclaredObjectIDs); n < 2 {
+					return emitObstacle("graph_declare", fmt.Sprintf(
+						"reconstruction mode (./probe in cwd) declared only %d object(s) — black-box rebuild tasks require decomposition into ≥2 testable sub-functions (e.g. ParseArgs + DoWork + FormatOutput) so each can be driven through confirm_object's per-object behavioral-equivalence oracle. A single monolithic object exceeds handler_max_iter. Add more graph_create_object calls covering the sub-contracts implied by README / man / probe observations.",
+						n)), nil
+				}
 			}
 			return router.MarshalPayload(router.OuterTypeGraphDeclared, map[string]interface{}{
 				"rootSessionID":     deps.RootSessionID,

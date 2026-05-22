@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
 	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
 	"github.com/creator915/Koncept_OS/internal/infra/persistence"
@@ -234,6 +235,28 @@ func autoCompileAfterWrite(ctx context.Context, path, content string) string {
 				written = append(written, id)
 			}
 		}
+		// 2026-05-21 — auto-invalidate post-confirm edits.
+		// PB-30 batch #8 bat (5/5) + entr (3/3) both hit terminal gate
+		// fail on [method-use-rule] because the agent edited an already-
+		// confirmed object's impl source after the chain ran but never
+		// re-ran confirm_object. Method Use Rule is meant to catch this,
+		// but at gate time the failure is terminal — there's no repair
+		// path back into H_confirm_one. The fix is upstream: when
+		// write_file overwrites a confirmed object's impl, atomically
+		// demote it (confirmed → declared) and clear its Characterization
+		// + Accepted evidence so H_confirm_one naturally re-picks it.
+		invalidated := invalidateConfirmedImplOnEdit(objectIDs, content)
+		if len(invalidated) > 0 {
+			extra := fmt.Sprintf("\n[method-use-rule] auto-invalidated %d previously-confirmed object(s): %s — "+
+				"impl source changed since the equivalence oracle locked it. Status reset to 'declared', "+
+				"Characterization + Accepted cleared. confirm_object will re-run the oracle against the new artifact.",
+				len(invalidated), strings.Join(invalidated, ", "))
+			if len(written) == 0 {
+				return strings.TrimPrefix(extra, "\n")
+			}
+			return fmt.Sprintf("[auto-typecalc] compile passed; evidence recorded for: %s (lang=%s)%s",
+				strings.Join(written, ", "), effectiveLang, extra)
+		}
 		if len(written) == 0 {
 			return ""
 		}
@@ -293,4 +316,76 @@ func indent(s, prefix string) string {
 		lines[i] = prefix + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// invalidateConfirmedImplOnEdit demotes any of the given objects that are
+// currently status=confirmed AND whose Characterization.CodeHash no
+// longer matches the new content's hash. For each demoted object:
+//
+//   - status reset to "declared" (bypasses MergeObject's
+//     confirmed→implementing block — auto-invalidation is its own
+//     justified transition)
+//   - Characterization section cleared (next equiv_oracle will rewrite)
+//   - Accepted section cleared (next review will rewrite)
+//   - Cycles + Test sections cleared (so the chain re-walks freshly)
+//
+// Returns the IDs that were actually invalidated (empty when no edit
+// crosses an already-confirmed object's impl hash, which is the common
+// path — most writes are pre-confirm).
+//
+// This is the upstream complement to the gate's [method-use-rule]: the
+// rule catches post-edit-but-no-re-characterize cases at finish time,
+// but by then the failure is terminal (no repair handler). Catching the
+// edit AT WRITE TIME lets H_confirm_one's natural re-pick logic drive
+// the demoted object back through the chain.
+func invalidateConfirmedImplOnEdit(objectIDs []string, newContent string) []string {
+	g, err := persistence.LoadGraphOrInit(persistence.GraphDefaultPath)
+	if err != nil || g == nil {
+		return nil
+	}
+	newHash := core.HashSource(newContent)
+	var invalidated []string
+	graphMutated := false
+	for _, id := range objectIDs {
+		obj, ok := g.Objects[id]
+		if !ok || obj == nil {
+			continue
+		}
+		if obj.Status != graph.StatusConfirmed {
+			continue
+		}
+		// Check the existing characterization (if any) for hash drift.
+		// No characterization → conservative: skip (the original confirm
+		// path didn't run equiv_oracle, so we can't tell if the hash
+		// changed meaningfully).
+		cs, hasC := core.ReadCharacterization(id)
+		if !hasC || cs == nil || cs.CodeHash == "" {
+			continue
+		}
+		if cs.CodeHash == newHash {
+			continue // no drift, no invalidation needed
+		}
+		// Drift confirmed → demote + clear evidence.
+		obj.Status = graph.StatusDeclared
+		graphMutated = true
+		// Clear downstream evidence so re-confirmation runs cleanly.
+		if b, hasB := core.ReadBundle(id); hasB && b != nil {
+			b.Characterization = nil
+			b.Accepted = nil
+			b.Test = nil
+			b.Cycles = nil
+			b.RuntimeTrace = nil
+			_ = core.SaveBundle(b)
+		}
+		invalidated = append(invalidated, id)
+	}
+	if graphMutated {
+		// Bypasses MergeObject — the auto-invalidate path is in-engine,
+		// not agent-facing, and the validation it would trip on
+		// (confirmed → !confirmed is rejected for agent writes) doesn't
+		// apply: the invariant the validation protects is "the LLM
+		// can't hand-flip confirmed", not "the engine can never demote".
+		_ = persistence.SaveGraph(persistence.GraphDefaultPath, g)
+	}
+	return invalidated
 }

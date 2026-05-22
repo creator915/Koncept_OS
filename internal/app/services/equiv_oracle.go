@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -50,53 +51,104 @@ type batteryItem struct {
 }
 
 var reShortFlag = regexp.MustCompile(`(^|[\s\[(|])-([A-Za-z])\b`)
+var reLongFlag = regexp.MustCompile(`--([a-z][a-z0-9-]+)\b`)
 
 // generateBattery builds the deterministic, non-model-controlled
 // stimulus battery: fixed Feathers §6.6 8-class structural stimuli plus
-// single-letter flags lifted from the task's OWN provided docs (usage
+// short + long flags lifted from the task's OWN provided docs (usage
 // surface, not model-authored). Sorted/stable ⇒ reproducible.
+//
+// 2026-05-21 expansion: long-flag extraction and structural arg/stdin
+// edge cases. PB-30 batch #8 tty-clock locked 53/53 internally but PB
+// grader scored 13/100 across 281 tests — the gap was the battery
+// missing long-flag forms (--version vs -v, --color N), large stdin
+// payloads, and quoted/special-character arg shapes. Each addition
+// stays determinism-preserving (lifted from on-disk docs, fixed
+// constants — never randomized, never agent-controlled). Future work:
+// fuzz-with-seed dimension when docs are sparse.
 func generateBattery() []batteryItem {
 	items := []batteryItem{
+		// Structural stimuli (Feathers §6.6 8-class + extensions):
 		{"no-args", nil, ""},
 		{"help-h", []string{"-h"}, ""},
 		{"help-long", []string{"--help"}, ""},
 		{"version", []string{"--version"}, ""},
+		{"version-short", []string{"-V"}, ""},
 		{"bad-flag", []string{"-Z"}, ""},
+		{"bad-long-flag", []string{"--this-is-not-a-real-flag"}, ""},
 		{"dashdash", []string{"--"}, ""},
+		// stdin shapes:
 		{"stdin-newline", nil, "\n"},
 		{"stdin-spaces", nil, "   \t  \n"},
 		{"stdin-lines", nil, "a\nb\nc\n"},
 		{"stdin-special", nil, "!@#$%^&*()_+{}|:<>?\n"},
 		{"stdin-numeric", nil, "0\n-1\n2147483648\n"},
 		{"stdin-empty-line-mix", nil, "x\n\n\ny\n"},
+		{"stdin-utf8", nil, "héllo\nwörld\n日本語\n"},
+		{"stdin-large", nil, strings.Repeat("line\n", 200)},
+		{"stdin-binary-safe", nil, "a\x00b\nc\n"},
+		// argv shapes:
 		{"arg-plain", []string{"hello"}, ""},
 		{"arg-empty", []string{""}, ""},
 		{"arg-special", []string{"a b\tc"}, ""},
+		{"arg-quoted-spaces", []string{"hello world"}, ""},
+		{"arg-utf8", []string{"héllo"}, ""},
+		{"arg-numeric", []string{"42"}, ""},
+		{"arg-negative-num", []string{"-1"}, ""},
+		{"arg-multi", []string{"a", "b", "c"}, ""},
 	}
-	flags := map[string]bool{}
-	for _, g := range []string{"README*", "*.md", "*.1", "*.6", "FAQ", "*.txt"} {
+
+	shortFlags := map[string]bool{}
+	longFlags := map[string]bool{}
+	for _, g := range []string{"README*", "*.md", "*.1", "*.6", "*.7", "*.8", "FAQ", "*.txt", "man/*", "doc/*", "docs/*"} {
 		matches, _ := filepath.Glob(g)
 		for _, f := range matches {
 			b, err := os.ReadFile(f)
 			if err != nil {
 				continue
 			}
-			for _, m := range reShortFlag.FindAllStringSubmatch(string(b), -1) {
+			body := string(b)
+			for _, m := range reShortFlag.FindAllStringSubmatch(body, -1) {
 				if len(m) == 3 {
-					flags[m[2]] = true
+					shortFlags[m[2]] = true
+				}
+			}
+			for _, m := range reLongFlag.FindAllStringSubmatch(body, -1) {
+				if len(m) == 2 && len(m[1]) >= 2 {
+					longFlags[m[1]] = true
 				}
 			}
 		}
 	}
-	keys := make([]string, 0, len(flags))
-	for k := range flags {
-		keys = append(keys, k)
+	// Skip docs-extracted forms that are already in the fixed battery
+	// above, so the same flag doesn't appear twice (different name but
+	// equivalent argv).
+	for _, builtin := range []string{"help", "version"} {
+		delete(longFlags, builtin)
 	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		items = append(items, batteryItem{"flag-" + k, []string{"-" + k}, ""})
-		items = append(items, batteryItem{"flag-" + k + "-stdin", []string{"-" + k}, "a\nb\n"})
+	for _, builtin := range []string{"h", "V"} {
+		delete(shortFlags, builtin)
 	}
+
+	shortKeys := make([]string, 0, len(shortFlags))
+	for k := range shortFlags {
+		shortKeys = append(shortKeys, k)
+	}
+	sort.Strings(shortKeys)
+	for _, k := range shortKeys {
+		items = append(items, batteryItem{"sflag-" + k, []string{"-" + k}, ""})
+		items = append(items, batteryItem{"sflag-" + k + "-stdin", []string{"-" + k}, "a\nb\n"})
+	}
+
+	longKeys := make([]string, 0, len(longFlags))
+	for k := range longFlags {
+		longKeys = append(longKeys, k)
+	}
+	sort.Strings(longKeys)
+	for _, k := range longKeys {
+		items = append(items, batteryItem{"lflag-" + k, []string{"--" + k}, ""})
+	}
+
 	return items
 }
 
@@ -119,6 +171,32 @@ func runEquivalenceOracle(ctx context.Context, objectID string) (passed bool, su
 	runT, ok2 := fs.Tools()["run_local"]
 	if !ok1 || !ok2 {
 		return false, "", fmt.Errorf("equiv-oracle: probe/run_local tools unavailable")
+	}
+	// 2026-05-21 — defensive vacuous-pass check. Pre-fix the oracle had
+	// a structural hole: probe and run_local both routed to the same
+	// /workspace/executable inside the KCPOS_AMD64_CONTAINER, and the
+	// compile tool docker-cp'd the agent's build OVER that path. So
+	// "probe vs run_local" was actually "agent's binary vs agent's
+	// binary" (or "reference vs reference" if the agent never compiled).
+	// Either way, every battery item byte-matched → fake 100% lock.
+	//
+	// PB-30 batch #8 figlet exposed this: agent never called compile,
+	// container's /workspace/executable was still the original PB
+	// reference, the oracle reported 65/65 match, gate passed, ★FIN
+	// shipped — but the agent had produced no deliverable.
+	//
+	// Fix: at oracle entry, docker-exec sha256sum on both sides and
+	// require the agent's binary to (a) exist and (b) hash-differ from
+	// the preserved reference at /workspace/executable.ref. The harness
+	// (tests/.../setup_real_pb.sh) is responsible for staging the .ref
+	// copy and pointing probe at it; this check is the kcpos-side guard
+	// that catches harness misconfig + agent-skipped-compile alike.
+	//
+	// Non-container reconstruction tasks (no KCPOS_AMD64_CONTAINER) are
+	// not yet checked — that path needs a different hash channel and is
+	// deferred.
+	if reason := vacuousOracleCheck(ctx); reason != "" {
+		return false, reason, nil
 	}
 	battery := generateBattery()
 	results := make([]equivResult, 0, len(battery))
@@ -225,6 +303,68 @@ func runEquivalenceOracle(ctx context.Context, objectID string) (passed bool, su
 		summary += "\n--- divergences (first 10) ---\n" + strings.Join(capSlice(ds, 10), "\n")
 	}
 	return passed, summary, nil
+}
+
+// vacuousOracleCheck guards against the pre-2026-05-21 hole where probe
+// and run_local both routed to /workspace/executable, so the battery
+// compared the same binary against itself. Returns "" when safe to
+// proceed, or a diagnostic reason string when the oracle would be
+// vacuous (and must NOT run).
+//
+// Two failure modes detected:
+//   - agent never compiled: /workspace/executable still hashes to the
+//     preserved reference (or no .ref exists yet — harness misconfig).
+//   - agent compiled but reference was overwritten in place: probe's
+//     channel resolves to the same path as run_local's.
+//
+// The check is container-mode only (KCPOS_AMD64_CONTAINER set). Non-PB
+// reconstruction tasks bypass this — they use a different oracle channel
+// and need a separate guard, deferred.
+func vacuousOracleCheck(ctx context.Context) string {
+	c := os.Getenv("KCPOS_AMD64_CONTAINER")
+	if c == "" {
+		return ""
+	}
+	refHash, refErr := dockerExecHashSum(ctx, c, "/workspace/executable.ref")
+	if refErr != nil {
+		return fmt.Sprintf(
+			"vacuous-oracle-guard: /workspace/executable.ref is missing in container %q (%v). "+
+				"The harness must preserve the reference at .ref before the agent runs — without that, probe and run_local both target /workspace/executable and any equivalence verdict would be vacuous. "+
+				"Fix the harness (setup script) to: docker exec <c> cp /workspace/executable /workspace/executable.ref AND point ./probe at /workspace/executable.ref.",
+			c, refErr)
+	}
+	agentHash, agentErr := dockerExecHashSum(ctx, c, "/workspace/executable")
+	if agentErr != nil {
+		return fmt.Sprintf(
+			"vacuous-oracle-guard: /workspace/executable not found in container %q (%v) — agent has not produced a deliverable. "+
+				"Run `compile` to build /workspace/executable, then retry confirm_object. "+
+				"(Pre-fix the oracle would have run anyway and compared the reference against itself, reporting a fake 100%% match.)",
+			c, agentErr)
+	}
+	if refHash == agentHash {
+		return fmt.Sprintf(
+			"vacuous-oracle-guard: /workspace/executable hash (%s) IS IDENTICAL to the preserved reference at /workspace/executable.ref. "+
+				"The agent's deliverable IS the reference, not a rebuild — equivalence against itself is vacuous. "+
+				"Confirm the agent actually wrote source + compile.sh and ran `compile` to produce a distinct binary.",
+			refHash[:16])
+	}
+	return ""
+}
+
+// dockerExecHashSum returns the sha256 of `path` inside `container`.
+// Uses container-side sha256sum so we don't have to docker-cp out and
+// stat on host — keeps the operation in the same trust domain probe
+// and run_local use.
+func dockerExecHashSum(ctx context.Context, container, path string) (string, error) {
+	out, err := exec.CommandContext(ctx, "docker", "exec", "-i", container, "sha256sum", path).Output()
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 1 {
+		return "", fmt.Errorf("docker exec sha256sum: empty output")
+	}
+	return fields[0], nil
 }
 
 // hasEquivEvidence reports whether a PASSING behavioral-equivalence

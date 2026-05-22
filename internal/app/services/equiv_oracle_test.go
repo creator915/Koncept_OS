@@ -64,13 +64,54 @@ func TestGenerateBattery_DeterministicAndNonTrivial(t *testing.T) {
 	}
 	found := false
 	for _, it := range withDocs {
-		if it.name == "flag-x" {
+		// 2026-05-21: docs-extracted short flags are prefixed `sflag-`
+		// (vs `lflag-` for long flags) so the two extraction paths
+		// don't collide on a same-letter overlap. The on-disk -x flag
+		// must surface as sflag-x.
+		if it.name == "sflag-x" {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatal("a flag declared in the task's own README must appear in the battery")
 	}
+}
+
+// 2026-05-21: battery expansion regression. Long flags lifted from
+// README (--word form) must appear in the battery alongside short
+// flags — the two extraction paths are independent. PB-30 batch #8
+// tty-clock scored 13/100 because the original battery only
+// extracted short flags, missing the long-flag surface.
+func TestGenerateBattery_ExtractsLongFlags(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	readme := "usage: tool [--utc] [--bold] [--screensaver]\n"
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(readme), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	items := generateBattery()
+	have := map[string]bool{}
+	for _, it := range items {
+		have[it.name] = true
+	}
+	for _, want := range []string{"lflag-utc", "lflag-bold", "lflag-screensaver"} {
+		if !have[want] {
+			t.Errorf("long flag %q from README must appear in battery; have names=%v", want, batteryNames(items))
+		}
+	}
+}
+
+func batteryNames(items []batteryItem) []string {
+	n := make([]string, 0, len(items))
+	for _, it := range items {
+		n = append(n, it.name)
+	}
+	return n
 }
 
 // Absent any recorded characterization, the confirm chokepoint must NOT
