@@ -811,6 +811,64 @@ func graphMergeObjectTool() toolcall.Tool {
 			defer restore()
 			injectStatusSessionFromFocus(patch)
 			if err := mutateGraph(func(g *graph.Graph) error {
+				// 2026-05-25 v12 — PROCESS-JUSTICE / 流程正义 (correction ③).
+				// implLang change after architecture pinning is hard-refused.
+				//
+				// Background: PB-30 batch 0522 v6 entr scored 0 (compile_failed)
+				// because the agent started in C, hit a kcpos-internal synth
+				// limitation (no stdin fixture in C testCode harness), the new
+				// H_repair_graph deleted the IO-bound object correctly, then
+				// the agent silently rewrote the rest in TypeScript/JavaScript
+				// to use kcpos's runtime-eval harness — BUT PB cleanroom only
+				// has the original task's toolchain (gcc for entr), so node
+				// wasn't present and compile.sh died on "command not found".
+				//
+				// Per KonceptOS Greenfield design: architecture (including
+				// language family) is decided ONCE in H_architect and stays
+				// stable. Mid-flow language switching:
+				//   - throws away all impl/test/characterize work in the old
+				//     language (Phase 7 rollback exists for this; mid-flow
+				//     swaps via graph_merge_object don't);
+				//   - breaks PB cleanroom toolchain alignment (cleanroom
+				//     compiles only the task's original language);
+				//   - drifts the agent's mental model away from "one impl
+				//     for the whole task" toward per-object lang shopping.
+				//
+				// The detector: if ANY existing object in the graph already
+				// has a non-empty implLang AND it differs from the patch's
+				// new value (case-insensitive), refuse. First-set is allowed
+				// (empty → value); subsequent change to a DIFFERENT language
+				// is the design violation. Same-language re-set is a no-op
+				// and passes.
+				//
+				// To legitimately re-pick language, the agent must drive an
+				// Outer.Obstacle and let Phase 7 rollback to the
+				// architecture milestone (which restarts H_architect with the
+				// failure as lesson). That's the ONLY designed path; this
+				// tool is not it.
+				if newLangRaw, hasLang := patch["implLang"]; hasLang {
+					if newLang, _ := newLangRaw.(string); strings.TrimSpace(newLang) != "" {
+						newLangNorm := strings.ToLower(strings.TrimSpace(newLang))
+						for otherID, otherObj := range g.Objects {
+							if otherObj == nil {
+								continue
+							}
+							existing := strings.ToLower(strings.TrimSpace(otherObj.ImplLang))
+							if existing == "" || existing == newLangNorm {
+								continue
+							}
+							return fmt.Errorf(
+								"refusing implLang=%q for object %q: object %q in the same graph already has implLang=%q. "+
+									"Architecture-level language choice is pinned at H_architect time and shared across all objects; "+
+									"changing it mid-flow is a v12 process-justice violation. "+
+									"If the language genuinely needs to change (e.g. PB cleanroom doesn't support the current choice), "+
+									"emit Outer.Obstacle so Phase 7 rolls back to the architecture milestone and H_architect re-runs with the failure context as lesson. "+
+									"This is the ONLY designed path to re-architect; graph_merge_object will ALWAYS refuse implLang changes that disagree with the established graph language. "+
+									"See KonceptOS Greenfield design doc on architecture stability.",
+								newLang, id, otherID, otherObj.ImplLang)
+						}
+					}
+				}
 				return g.MergeObject(id, patch)
 			}); err != nil {
 				return "", err
