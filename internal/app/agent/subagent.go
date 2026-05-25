@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/infra/persistence"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/tools"
 	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )

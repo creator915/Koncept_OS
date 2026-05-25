@@ -629,7 +629,7 @@ func H_repair_object(deps *OuterDeps) router.Handler {
 func H_repair_graph(deps *OuterDeps) router.Handler {
 	return &router.HandlerFunc{
 		In:  router.OuterTypeGraphRepair,
-		Out: []string{router.OuterTypeGraphDeclared, router.OuterTypeObstacle},
+		Out: []string{router.OuterTypeGraphDeclared, router.OuterTypeSomeConfirmed, router.OuterTypeObstacle},
 		Run: func(ctx context.Context, in router.TypedValue) (router.TypedValue, error) {
 			var payload struct {
 				FailedObject string `json:"failedObject"`
@@ -712,7 +712,8 @@ func H_repair_graph(deps *OuterDeps) router.Handler {
 				"graph_show", "graph_validate", "graph_render", "graph_preflight",
 				"graph_create_attribute", "graph_create_object",
 				"graph_merge_object", "graph_merge_attribute",
-				"graph_delete_object", "graph_delete_attribute",
+				"graph_delete_object",
+				"graph_unlink_consume", "graph_unlink_produce", "graph_unlink_mutate", "graph_unlink_refine",
 				"graph_link_consume", "graph_link_produce", "graph_link_mutate",
 				"graph_autowire",
 				"read_file", "markdown_outline", "markdown_section", "list_dir", "glob",
@@ -743,13 +744,27 @@ func H_repair_graph(deps *OuterDeps) router.Handler {
 						"declared. Repair proposal (%s) was not applied; agent likely didn't follow the "+
 						"action. Original failure: %s",
 					payload.FailedObject, proposal.Kind, payload.Reason)), nil
-				}
+			}
 			if afterCount == 0 {
 				return emitObstacle("repair_graph",
 					"sub-agent left graph empty after repair — over-deletion"), nil
 			}
+			// Return the actual inferred state — after repair the disk
+			// might be at GraphDeclared (no confirmed objects yet) OR
+			// SomeConfirmed (some pre-repair objects still confirmed and
+			// remaining ones declared). Hardcoding GraphDeclared would
+			// be semantically wrong in the latter case; both Types route
+			// to handleConfirmOne correctly. Falls back to GraphDeclared
+			// only when inference can't determine (defensive).
 			det, _ := router.InferOuterStateDetail(deps.RootSessionID)
-			return router.MarshalPayload(router.OuterTypeGraphDeclared, map[string]interface{}{
+			nextType := det.Type
+			if nextType != router.OuterTypeGraphDeclared && nextType != router.OuterTypeSomeConfirmed {
+				// Inference returned a state that doesn't make sense for
+				// "just edited the graph, re-walk confirm" — force the
+				// safe default so the chain doesn't jump forward.
+				nextType = router.OuterTypeGraphDeclared
+			}
+			return router.MarshalPayload(nextType, map[string]interface{}{
 				"rootSessionID":     deps.RootSessionID,
 				"declaredObjectIDs": det.DeclaredObjectIDs,
 				"repairedFrom":      payload.FailedObject,

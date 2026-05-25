@@ -23,7 +23,7 @@ func TestFilterToolsByCaps_NonExposure(t *testing.T) {
 	if got := filterToolsByCaps(full, nil); len(got) != len(full) {
 		t.Fatalf("nil caps must not filter: got %d want %d", len(got), len(full))
 	}
-	if _, ok := filterToolsByCaps(full, core.CapSet{})[ "bash" ]; !ok {
+	if _, ok := filterToolsByCaps(full, core.CapSet{})["bash"]; !ok {
 		t.Fatal("empty caps must keep bash (no contract = unchanged behavior)")
 	}
 

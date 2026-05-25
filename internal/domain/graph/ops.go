@@ -49,6 +49,31 @@ func (g *Graph) AddObject(id string, obj *Object) error {
 	return nil
 }
 
+// DeleteObject removes an object from the graph by id. Errors if id is
+// not found. Edge cleanup is NOT performed — Object edges
+// (consumes/produces/mutates) live as []string fields ON the object
+// being deleted, so they go with it. Other objects that happen to
+// share the same attributes as this object are not touched (attributes
+// are not owned by objects). Orphan attributes (no remaining object
+// references them) are left for explicit DeleteAttribute calls or for
+// a future graph-prune pass.
+//
+// Added 2026-05-25 to support H_repair_graph's IO-boundary repair
+// heuristic, which proposes removing graph-tracked IO-bound objects
+// after the synth chain proves it can't generate testable cases for
+// them. Without a delete primitive the repair proposal had no way to
+// be applied.
+func (g *Graph) DeleteObject(id string) error {
+	if id == "" {
+		return fmt.Errorf("object id required")
+	}
+	if _, ok := g.Objects[id]; !ok {
+		return fmt.Errorf("object %q not in graph", id)
+	}
+	delete(g.Objects, id)
+	return nil
+}
+
 // SymbolCollides returns the id of any existing object/attribute whose
 // Go-style PascalCase symbol form matches that of the given new id, or
 // "" if none collides. The check is lang-agnostic — even non-Go projects

@@ -15,16 +15,16 @@ import (
 // RunRoutedTurnWithPersist that automates the "obstacle → rollback
 // → synthesize lesson → retry" loop. Each attempt:
 //
-//   1. Runs the outer Router to a terminal state.
-//   2. If Outer.Finished — done, return success.
-//   3. If Outer.Obstacle AND retry budget remains AND a milestone
-//      is available to roll back to — rollback to the latest
-//      milestone, synthesize a lesson from the failed branch's
-//      events, write it to disk, and start a new attempt. The next
-//      attempt's H_architect reads the lesson and prepends it to
-//      its system prompt.
-//   4. Otherwise — return the obstacle to the caller (final
-//      failure).
+//  1. Runs the outer Router to a terminal state.
+//  2. If Outer.Finished — done, return success.
+//  3. If Outer.Obstacle AND retry budget remains AND a milestone
+//     is available to roll back to — rollback to the latest
+//     milestone, synthesize a lesson from the failed branch's
+//     events, write it to disk, and start a new attempt. The next
+//     attempt's H_architect reads the lesson and prepends it to
+//     its system prompt.
+//  4. Otherwise — return the obstacle to the caller (final
+//     failure).
 //
 // snapshotter MUST be non-nil and attached to ctx (snapshot.
 // FromContext(ctx) returns it) for milestone tracking and rollback

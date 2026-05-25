@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
 )
 
 // TestRunBatchConcurrent_ActuallyParallel proves the dispatcher runs

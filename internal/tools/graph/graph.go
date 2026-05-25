@@ -226,6 +226,58 @@ func graphCreateObjectTool() toolcall.Tool {
 	}
 }
 
+// graphDeleteObjectTool removes an object from K/graph.json. Used by
+// H_repair_graph's IO-boundary heuristic to delete objects whose
+// contract is dominated by characterization clauses (probe-only,
+// no testable example/invariant). Added 2026-05-25.
+//
+// Refuses to delete status=confirmed objects — the gate would then
+// fail on missing-confirmed errors at session finish, hard to recover.
+// Agents wanting to remove a confirmed object should first demote it
+// via graph_merge_object patch=`{"status":"declared"}` (which the
+// process-justice guard allows) AND clear its Accepted evidence
+// (auto-handled by status drop).
+func graphDeleteObjectTool() toolcall.Tool {
+	return toolcall.Tool{
+		Spec: transport.ToolSpec{
+			Type: "function",
+			Function: transport.ToolFunction{
+				Name:        "graph_delete_object",
+				Description: "Remove an object (function-type hyperedge) from K/graph.json by id. Edge fields on this object (consumes/produces/mutates) go with it; attributes are NOT cascade-deleted (orphan attributes can be cleaned up later or left for human review).\n\nIntended for graph-repair scenarios where the synth/confirm chain has proven an object's shape is wrong (typically an IO-bound function whose contract has only characterization clauses — the testCode harness can't drive stdin/fs IO without fixture support). The Phase-2.C H_repair_graph handler proposes this when its IO-boundary heuristic fires; for normal flow prefer graph_merge_object or graph_unlink_*.\n\nRefuses status=confirmed objects — drop status to 'declared' via graph_merge_object first if you really need to remove a confirmed object.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id": map[string]interface{}{"type": "string", "description": "Object id to remove."},
+					},
+					"required": []string{"id"},
+				},
+			},
+		},
+		Run: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			id, _ := args["id"].(string)
+			if id == "" {
+				return "", fmt.Errorf("id required")
+			}
+			if err := mutateGraph(func(g *graph.Graph) error {
+				obj, ok := g.Objects[id]
+				if !ok {
+					return fmt.Errorf("object %q not found in K/graph.json", id)
+				}
+				if obj.Status == graph.StatusConfirmed {
+					return fmt.Errorf(
+						"refusing to delete object %q with status=confirmed — would leave a hole in the gate's verification ledger. "+
+							"Use graph_merge_object id=%q patch='{\"status\":\"declared\"}' first (process-justice allows the confirmed→declared transition for repair), then call graph_delete_object again.",
+						id, id)
+				}
+				return g.DeleteObject(id)
+			}); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("deleted object %s (graph-repair path; orphan attributes not cascade-cleaned — inspect graph_show if any sibling needs rewiring)", id), nil
+		},
+	}
+}
+
 func graphLinkRefineTool() toolcall.Tool {
 	return toolcall.Tool{
 		Spec: transport.ToolSpec{

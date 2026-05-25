@@ -22,6 +22,7 @@ func Tools() map[string]toolcall.Tool {
 		"graph_unlink_mutate":    graphUnlinkMutateTool(),
 		"graph_merge_attribute":  graphMergeAttributeTool(),
 		"graph_merge_object":     graphMergeObjectTool(),
+		"graph_delete_object":    graphDeleteObjectTool(),
 		"graph_autowire":         graphAutowireTool(),
 		"graph_validate":         graphValidateTool(),
 		"graph_preflight":        graphPreflightTool(),

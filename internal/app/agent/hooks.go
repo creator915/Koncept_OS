@@ -1,15 +1,15 @@
 package agent
 
 import (
-	"github.com/creator915/Koncept_OS/internal/infra/persistence"
 	"encoding/json"
 	"fmt"
+	"github.com/creator915/Koncept_OS/internal/infra/persistence"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/creator915/Koncept_OS/internal/domain/graph"
 	"github.com/creator915/Koncept_OS/internal/app/workflow"
+	"github.com/creator915/Koncept_OS/internal/domain/graph"
 	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 

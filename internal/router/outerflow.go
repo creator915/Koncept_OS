@@ -112,7 +112,7 @@ var OuterFlowRules = []FlowRule{
 	{OuterTypeArchitecture, []string{OuterTypeGraphDeclared, OuterTypeObstacle}},
 	{OuterTypeGraphDeclared, []string{OuterTypeSomeConfirmed, OuterTypeAllConfirmed, OuterTypeGraphRepair, OuterTypeObstacle}},
 	{OuterTypeSomeConfirmed, []string{OuterTypeSomeConfirmed, OuterTypeAllConfirmed, OuterTypeGraphRepair, OuterTypeObstacle}},
-	{OuterTypeGraphRepair, []string{OuterTypeGraphDeclared, OuterTypeObstacle}},
+	{OuterTypeGraphRepair, []string{OuterTypeGraphDeclared, OuterTypeSomeConfirmed, OuterTypeObstacle}},
 	{OuterTypeAllConfirmed, []string{OuterTypeAggregated, OuterTypeObstacle}},
 	{OuterTypeAggregated, []string{OuterTypeBuilt, OuterTypeCheckpointed, OuterTypeObstacle}},
 	{OuterTypeBuilt, []string{OuterTypeCheckpointed, OuterTypeGateFailBuild, OuterTypeObstacle}},

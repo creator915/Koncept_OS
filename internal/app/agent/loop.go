@@ -7,8 +7,8 @@ import (
 	"os"
 	"sync"
 
-	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/llm/toolcall"
+	"github.com/creator915/Koncept_OS/internal/llm/transport"
 	"github.com/creator915/Koncept_OS/internal/shared/agentctx"
 	"github.com/creator915/Koncept_OS/internal/snapshot"
 	"github.com/creator915/Koncept_OS/internal/tools"
