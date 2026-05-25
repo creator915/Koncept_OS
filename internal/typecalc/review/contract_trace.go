@@ -83,10 +83,13 @@ func ContractTraceCheck(g *graph.Graph, objID string) core.CheckReport {
 	}
 
 	// Branch-skip: reconstruction-mode (./probe black-box rebuild).
-	// Currently the Characterization section is the source of truth
-	// for "locked" behavior. Step 5 will fold this into Contract as
-	// Kind="characterization" clauses; until then, skip the strict
-	// traceability check so confirm_object still passes on these tasks.
+	// Two equivalent triggers (Step 5, 2026-05-22):
+	//   - legacy: CharacterizationSection.LockedCount > 0
+	//   - unified: spec.Contract contains ≥1 Kind="characterization"
+	//     clause (mirror written by WriteCharacterization)
+	// Either suffices — the gate skips for both so the migration off
+	// the standalone CharacterizationSection can roll forward without
+	// breaking confirm.
 	if char, ok := core.ReadCharacterization(objID); ok && char != nil && char.LockedCount > 0 {
 		return skipAll("reconstruction-mode-characterization")
 	}
@@ -94,6 +97,9 @@ func ContractTraceCheck(g *graph.Graph, objID string) core.CheckReport {
 	spec, hasSpec := core.ReadSpec(objID)
 	if !hasSpec {
 		return skipAll("no-spec")
+	}
+	if hasCharacterizationClause(spec.Contract) {
+		return skipAll("reconstruction-mode-characterization")
 	}
 	if len(spec.Contract) == 0 {
 		// Grandfather: pre-Step-2 bundles, OR Step-2 bundles where the
@@ -185,5 +191,17 @@ func ContractTraceCheck(g *graph.Graph, objID string) core.CheckReport {
 	}
 
 	return rb.Build()
+}
+
+// hasCharacterizationClause reports whether any clause in the list is
+// Kind="characterization". Used by the reconstruction-mode branch to
+// detect the Step 5 unified path.
+func hasCharacterizationClause(clauses []core.ContractClause) bool {
+	for _, c := range clauses {
+		if c.Kind == "characterization" {
+			return true
+		}
+	}
+	return false
 }
 

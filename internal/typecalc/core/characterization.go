@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -68,6 +69,14 @@ type CharacterizationSection struct {
 // bundle's Characterization section, leaving every other section
 // untouched (load → set one section → save, the established
 // non-disturbing pattern used by WriteSpec/WriteTests/etc.).
+//
+// 2026-05-22 (Step 5 of contract landing): ALSO mirrors the lock into
+// the Spec section's Contract field as a Kind="characterization"
+// clause. This is the single-source-of-truth migration path —
+// downstream readers (gate, synth) progressively shift from
+// CharacterizationSection to Contract clauses; once every reader has
+// migrated, the standalone section can be retired. The mirror is
+// idempotent (dedup by clause ID).
 func WriteCharacterization(objectID string, sec *CharacterizationSection) error {
 	if objectID == "" || sec == nil {
 		return nil
@@ -77,7 +86,51 @@ func WriteCharacterization(objectID string, sec *CharacterizationSection) error 
 	}
 	b := LoadOrInitBundle(objectID)
 	b.Characterization = sec
+	// Mirror as a Contract characterization clause. Use a stable ID
+	// derived from SuiteID so repeated WriteCharacterization calls (e.g.
+	// after re-running equiv_oracle) overwrite the same clause rather
+	// than accumulating duplicates. Source carries SuiteID for audit.
+	if b.Spec == nil {
+		// No describe yet — create an empty Spec section so the clause
+		// has somewhere to live. Description stays empty; the gate's
+		// stale-spec rule continues to fire if needed, and the next
+		// describe will populate Description without dropping our
+		// mirrored clause (WriteSpec preserves Contract).
+		b.Spec = &SpecSection{Timestamp: time.Now().UTC()}
+	}
+	mirror := ContractClause{
+		ID:   "char-" + nonEmpty(sec.SuiteID, "default"),
+		Kind: "characterization",
+		Body: fmt.Sprintf("%s (locked=%d, unlocked=%d)",
+			nonEmpty(sec.OracleProperty, "impl behaviorally locked"),
+			sec.LockedCount, sec.UnlockedCount),
+		Source: "char:suite=" + nonEmpty(sec.SuiteID, "default"),
+	}
+	b.Spec.Contract = upsertClause(b.Spec.Contract, mirror)
 	return SaveBundle(b)
+}
+
+// upsertClause replaces an existing clause with the same ID, or
+// appends if absent. Used by WriteCharacterization's mirror so
+// re-running characterize doesn't accumulate stale clauses.
+func upsertClause(list []ContractClause, c ContractClause) []ContractClause {
+	for i, existing := range list {
+		if existing.ID == c.ID {
+			list[i] = c
+			return list
+		}
+	}
+	return append(list, c)
+}
+
+// nonEmpty returns s when non-empty, fallback otherwise. Lives in core
+// alongside the Clause helpers so callers don't need to import a
+// utility package.
+func nonEmpty(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }
 
 // ReadCharacterization returns the bundle's Characterization section.

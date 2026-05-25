@@ -171,6 +171,85 @@ func TestContractTraceCheck_UnknownRef_Fail(t *testing.T) {
 	}
 }
 
+// TestContractTraceCheck_UnifiedCharacterizationClause_Skip (Step 5,
+// 2026-05-22) — the unified path: when spec.Contract carries a
+// Kind="characterization" clause (mirror written by
+// WriteCharacterization), the reconstruction-mode skip fires even if
+// the standalone CharacterizationSection isn't read. Forward-compat
+// for when CharacterizationSection is eventually retired.
+func TestContractTraceCheck_UnifiedCharacterizationClause_Skip(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	// Strict contract — would normally fail uncovered/unknown — but
+	// the characterization clause should pre-empt every check.
+	_ = core.WriteSpec(&core.SpecEvidence{
+		ObjectID: "X", SourceHash: "h",
+		Contract: []core.ContractClause{
+			{ID: "c1", Kind: "example", Body: "uncovered_required"},
+			{ID: "char-equiv-X", Kind: "characterization", Body: "impl matches reference on 50/50", Source: "char:suite=equiv-X"},
+		},
+	})
+	// Note: no Characterization section written — only the mirror path.
+	g := minimalGraph("X")
+	rep := ContractTraceCheck(g, "X")
+	ok, _, failed := core.AggregateOK(rep, ContractTraceRuleCodes)
+	if !ok {
+		t.Errorf("unified-path characterization clause should skip-all; got failures: %v", failed)
+	}
+}
+
+// TestWriteCharacterization_MirrorsToContract (Step 5) — writing a
+// CharacterizationSection automatically populates spec.Contract with
+// a Kind="characterization" clause whose ID is derived from SuiteID
+// (so repeated writes overwrite rather than accumulate).
+func TestWriteCharacterization_MirrorsToContract(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	sec := &core.CharacterizationSection{
+		SuiteID:        "equiv-Foo",
+		OracleProperty: "impl matches reference probe",
+		LockedCount:    7,
+		UnlockedCount:  0,
+	}
+	if err := core.WriteCharacterization("Foo", sec); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	spec, ok := core.ReadSpec("Foo")
+	if !ok {
+		t.Fatal("expected Spec section to be auto-created by mirror")
+	}
+	if len(spec.Contract) != 1 {
+		t.Fatalf("expected 1 mirrored clause, got %d: %+v", len(spec.Contract), spec.Contract)
+	}
+	c := spec.Contract[0]
+	if c.Kind != "characterization" {
+		t.Errorf("mirror kind: %q want characterization", c.Kind)
+	}
+	if c.ID != "char-equiv-Foo" {
+		t.Errorf("mirror ID should derive from SuiteID: %q", c.ID)
+	}
+	if !strings.Contains(c.Body, "locked=7") {
+		t.Errorf("body should carry counts: %q", c.Body)
+	}
+	if c.Source != "char:suite=equiv-Foo" {
+		t.Errorf("source should cite suite: %q", c.Source)
+	}
+
+	// Second write with updated counts must OVERWRITE the same clause
+	// ID, not accumulate.
+	sec.LockedCount = 10
+	if err := core.WriteCharacterization("Foo", sec); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	spec2, _ := core.ReadSpec("Foo")
+	if len(spec2.Contract) != 1 {
+		t.Errorf("re-write must dedup by ID, not append: got %d clauses", len(spec2.Contract))
+	}
+	if !strings.Contains(spec2.Contract[0].Body, "locked=10") {
+		t.Errorf("re-write should update body: %q", spec2.Contract[0].Body)
+	}
+}
+
 // TestContractTraceCheck_ReconstructionMode_Skip — Characterization
 // section with LockedCount>0 means the object is verified via
 // behavioral equivalence (./probe vs run_local), not typed contracts.
