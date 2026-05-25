@@ -99,7 +99,7 @@ func TestReviewWithInvoker_PassesObjectIDIntoPrompt(t *testing.T) {
 
 func TestDescribeWithInvoker_PassesContent(t *testing.T) {
 	captured := ""
-	desc, err := synthesize.DescribeWithInvoker(context.Background(),
+	out, err := synthesize.DescribeWithInvoker(context.Background(),
 		synthesize.DescribeInputs{ObjectID: "F", Impl: "func F() {}"},
 		func(ctx context.Context, prompt string) (string, error) {
 			captured = prompt
@@ -108,8 +108,8 @@ func TestDescribeWithInvoker_PassesContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if desc != "F is a no-op function." {
-		t.Fatalf("desc=%q", desc)
+	if out.Description != "F is a no-op function." {
+		t.Fatalf("desc=%q", out.Description)
 	}
 	if !strings.Contains(captured, "F()") {
 		t.Fatalf("prompt missing impl: %s", captured)

@@ -107,7 +107,7 @@ func typecalcDescribeTool() toolcall.Tool {
 			if obj.Def != "" {
 				defBody, _ = os.ReadFile(obj.Def) // tolerate missing def
 			}
-			desc, err := synthesize.Describe(ctx, synthesize.DescribeInputs{
+			out, err := synthesize.Describe(ctx, synthesize.DescribeInputs{
 				ObjectID:  objectID,
 				Intent:    obj.Intent,
 				Signature: string(defBody),
@@ -118,18 +118,33 @@ func typecalcDescribeTool() toolcall.Tool {
 			}
 			rec := &core.SpecEvidence{
 				ObjectID:    objectID,
-				Description: desc,
+				Description: out.Description,
+				Contract:    out.Contract,
 				SourceHash:  implHash,
 				SymbolHash:  symbolHash,
 			}
 			if err := core.WriteSpec(rec); err != nil {
 				return "", fmt.Errorf("persist spec evidence: %w", err)
 			}
+			// Surface clause counts in the tool reply so the agent sees
+			// whether the contract block came through. Step 4's gate
+			// will fail confirm on empty Contract; better the agent
+			// learns now and re-describes than discovers it post-test.
+			byKind := map[string]int{}
+			for _, c := range out.Contract {
+				byKind[c.Kind]++
+			}
+			contractSummary := "no contract clauses"
+			if len(out.Contract) > 0 {
+				contractSummary = fmt.Sprintf("%d clauses (example=%d, invariant=%d, characterization=%d)",
+					len(out.Contract), byKind["example"], byKind["invariant"], byKind["characterization"])
+			}
 			return fmt.Sprintf(
-				"described %s — wrote %s\n\n--- description ---\n%s",
+				"described %s — wrote %s\n--- contract: %s ---\n--- description ---\n%s",
 				objectID,
 				core.SpecEvidencePath(objectID),
-				desc,
+				contractSummary,
+				out.Description,
 			), nil
 		},
 	}

@@ -44,7 +44,7 @@ func TestEndToEnd_DescribeReviewAccept(t *testing.T) {
 
 	// 3. typecalc_describe equivalent — call DescribeWithInvoker with a
 	//    canned LLM reply.
-	desc, err := synthesize.DescribeWithInvoker(context.Background(),
+	out, err := synthesize.DescribeWithInvoker(context.Background(),
 		synthesize.DescribeInputs{
 			ObjectID:  "Process",
 			Intent:    g.Objects["Process"].Intent,
@@ -57,7 +57,8 @@ func TestEndToEnd_DescribeReviewAccept(t *testing.T) {
 	}
 	specRec := &core.SpecEvidence{
 		ObjectID:    "Process",
-		Description: desc,
+		Description: out.Description,
+		Contract:    out.Contract,
 		SourceHash:  core.HashSource(implContent),
 	}
 	if err := core.WriteSpec(specRec); err != nil {
@@ -75,7 +76,7 @@ func TestEndToEnd_DescribeReviewAccept(t *testing.T) {
 		ReviewInputs{
 			ObjectID:    "Process",
 			Intent:      g.Objects["Process"].Intent,
-			Description: desc,
+			Description: out.Description,
 			Signature:   defContent,
 			Impl:        implContent,
 			TestCode:    "func TestOp(t *testing.T) { ... }",
