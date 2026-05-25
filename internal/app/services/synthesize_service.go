@@ -182,8 +182,33 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 			if err != nil {
 				return "", err
 			}
-			// CANNOT_SYNTHESIZE: surface verbatim, no evidence written.
+			// CANNOT_SYNTHESIZE: persist the reason as structural
+			// evidence (2026-05-25, reason-driven repair). H_repair_graph
+			// reads this when confirm-exhausted to classify the failure
+			// (IO-boundary, over-coarse, ambiguous, lang-unsupported)
+			// and propose a targeted graph mutation. The reason is the
+			// LLM's own honest diagnosis — vs. derived heuristics like
+			// clause-kind ratios which lie when LLM dutifully writes
+			// plausible-but-uncoverable examples for an IO-bound object.
+			//
+			// Preserve any prior cases/testCode (the cache might have
+			// a stale-but-non-empty success record); just write the
+			// failure tag alongside, NOT replacing the whole section.
 			if len(out.Cases) == 0 && strings.HasPrefix(strings.TrimSpace(out.TestCode), "CANNOT_SYNTHESIZE") {
+				prior, _ := core.ReadTests(objectID)
+				rec := &core.TestsEvidence{
+					ObjectID:         objectID,
+					Lang:             lang,
+					SpecHash:         spec.SourceHash,
+					ContractHash:     specContractHash,
+					LastSynthFailure: strings.TrimSpace(out.TestCode),
+				}
+				if prior != nil {
+					rec.Cases = prior.Cases
+					rec.TestCode = prior.TestCode
+					rec.ContractRefs = prior.ContractRefs
+				}
+				_ = core.WriteTests(rec)
 				return out.TestCode, nil
 			}
 			rec := &core.TestsEvidence{
@@ -194,6 +219,10 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 				Cases:        out.Cases,
 				TestCode:     out.TestCode,
 				ContractRefs: out.ContractRefs,
+				// Success path: clear any prior failure mark so a later
+				// confirm-exhausted (for a different reason) doesn't
+				// fire repair on stale evidence.
+				LastSynthFailure: "",
 			}
 			if err := core.WriteTests(rec); err != nil {
 				return "", fmt.Errorf("persist tests evidence: %w", err)

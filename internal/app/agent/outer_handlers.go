@@ -654,7 +654,8 @@ func H_repair_graph(deps *OuterDeps) router.Handler {
 					payload.FailedObject, payload.Reason)), nil
 			}
 
-			// Read def signature for the IO hint detector.
+			// Read def signature for the IO-token hint (secondary signal
+			// only; detector primary input is the LLM's stated reason).
 			signature := ""
 			if g, gerr := persistence.LoadGraph(persistence.GraphDefaultPath); gerr == nil && g != nil {
 				if obj, ok := g.Objects[payload.FailedObject]; ok && obj.Def != "" {
@@ -664,17 +665,27 @@ func H_repair_graph(deps *OuterDeps) router.Handler {
 				}
 			}
 
-			proposal := detectRepairProposal(payload.FailedObject, spec.Contract, signature)
+			// Read the LLM's CANNOT_SYNTHESIZE reason (Step 5 v3
+			// reason-driven repair, 2026-05-25). If synth never emitted
+			// a CANNOT_SYNTHESIZE on this object — empty string — the
+			// detector returns nil and we fall through. That's correct:
+			// the confirm-exhausted may be impl issues (compile errors,
+			// test mismatches), not a wrong-graph diagnosis, and
+			// guessing would be worse than letting Phase 7 retry the
+			// original failure.
+			failureReason := ""
+			if tests, ok := core.ReadTests(payload.FailedObject); ok && tests != nil {
+				failureReason = tests.LastSynthFailure
+			}
+
+			proposal := detectRepairProposal(payload.FailedObject, failureReason, signature)
 			if proposal == nil {
-				// No heuristic matched — the bad shape isn't one we
-				// know how to fix automatically. Fall through to
-				// Obstacle; big-step's LLM proposer would handle the
-				// long tail here.
 				return emitObstacle("repair_graph", fmt.Sprintf(
-					"no heuristic match for object %q's failure shape (clauses=%d, reason=%s) — "+
-						"no actionable graph repair proposal available; consider manual graph_split_object or "+
-						"different decomposition. Original confirm failure: %s",
-					payload.FailedObject, len(spec.Contract), payload.Reason, payload.Reason)), nil
+					"no reason-based repair match for object %q — either synth never returned CANNOT_SYNTHESIZE "+
+						"(so we have no LLM-stated structural reason to act on) or the reason text didn't match "+
+						"any detector (io-boundary, over-coarse, lang-unsupported, contract-ambiguous). "+
+						"Last synth failure on disk: %q. Original confirm failure: %s",
+					payload.FailedObject, clipShort(failureReason, 200), payload.Reason)), nil
 			}
 
 			// Snapshot graph object set before repair for post-condition.

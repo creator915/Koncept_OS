@@ -219,16 +219,21 @@ type AcceptedEvidence struct {
 // blob have no structured place to hang refs. The contract-
 // traceability gate unions both sources when checking coverage so
 // the same rule applies across all languages.
+//
+// LastSynthFailure (2026-05-25): see TestsSection.LastSynthFailure
+// — H_repair_graph's reason-driven detector reads this to classify
+// the structural failure (IO-boundary, over-coarse, ambiguous).
 type TestsEvidence struct {
-	ObjectID     string     `json:"objectId"`
-	Kind         string     `json:"kind"`
-	Lang         string     `json:"lang"`
-	SpecHash     string     `json:"specHash"`
-	ContractHash string     `json:"contractHash,omitempty"`
-	Timestamp    time.Time  `json:"timestamp"`
-	Cases        []TestCase `json:"cases,omitempty"`
-	TestCode     string     `json:"testCode,omitempty"`
-	ContractRefs []string   `json:"contractRefs,omitempty"`
+	ObjectID         string     `json:"objectId"`
+	Kind             string     `json:"kind"`
+	Lang             string     `json:"lang"`
+	SpecHash         string     `json:"specHash"`
+	ContractHash     string     `json:"contractHash,omitempty"`
+	Timestamp        time.Time  `json:"timestamp"`
+	Cases            []TestCase `json:"cases,omitempty"`
+	TestCode         string     `json:"testCode,omitempty"`
+	ContractRefs     []string   `json:"contractRefs,omitempty"`
+	LastSynthFailure string     `json:"lastSynthFailure,omitempty"`
 }
 
 // HashContract returns a stable hash of a Contract slice. Sorts by ID
@@ -468,13 +473,14 @@ func WriteTests(rec *TestsEvidence) error {
 	}
 	b := LoadOrInitBundle(rec.ObjectID)
 	b.Tests = &TestsSection{
-		Lang:         rec.Lang,
-		SpecHash:     rec.SpecHash,
-		ContractHash: rec.ContractHash,
-		Cases:        rec.Cases,
-		TestCode:     rec.TestCode,
-		ContractRefs: rec.ContractRefs,
-		Timestamp:    rec.Timestamp,
+		Lang:             rec.Lang,
+		SpecHash:         rec.SpecHash,
+		ContractHash:     rec.ContractHash,
+		Cases:            rec.Cases,
+		TestCode:         rec.TestCode,
+		ContractRefs:     rec.ContractRefs,
+		LastSynthFailure: rec.LastSynthFailure,
+		Timestamp:        rec.Timestamp,
 	}
 	return SaveBundle(b)
 }
@@ -488,15 +494,16 @@ func ReadTests(objectID string) (*TestsEvidence, bool) {
 	}
 	t := b.Tests
 	return &TestsEvidence{
-		ObjectID:     objectID,
-		Kind:         "tests",
-		Lang:         t.Lang,
-		SpecHash:     t.SpecHash,
-		ContractHash: t.ContractHash,
-		Timestamp:    t.Timestamp,
-		Cases:        t.Cases,
-		TestCode:     t.TestCode,
-		ContractRefs: t.ContractRefs,
+		ObjectID:         objectID,
+		Kind:             "tests",
+		Lang:             t.Lang,
+		SpecHash:         t.SpecHash,
+		ContractHash:     t.ContractHash,
+		Timestamp:        t.Timestamp,
+		Cases:            t.Cases,
+		TestCode:         t.TestCode,
+		ContractRefs:     t.ContractRefs,
+		LastSynthFailure: t.LastSynthFailure,
 	}, true
 }
 

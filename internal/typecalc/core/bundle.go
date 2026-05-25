@@ -211,14 +211,25 @@ type ContractClause struct {
 //
 // ContractRefs (2026-05-25): testCode-mode coverage declaration —
 // see TestsEvidence.ContractRefs for the full rationale.
+//
+// LastSynthFailure (2026-05-25, reason-driven repair): when synth
+// returns CANNOT_SYNTHESIZE (LLM honestly admits it can't produce
+// tests for the given contract), the full reason text is persisted
+// here for H_repair_graph's reason parser. Empty when synth succeeded
+// or never ran. The LLM's stated reason is the AUTHORITATIVE
+// structural diagnosis (vs. derived signals like clause-kind ratios)
+// — if the LLM says "needs ./probe to drive stdin", that IS the
+// reason the object is wrong-shape. The repair handler matches reason
+// tokens to specific graph-mutation proposals.
 type TestsSection struct {
-	Lang         string     `json:"lang"`
-	SpecHash     string     `json:"specHash"`     // spec that drove the synthesis
-	ContractHash string     `json:"contractHash,omitempty"`
-	Cases        []TestCase `json:"cases,omitempty"`
-	TestCode     string     `json:"testCode,omitempty"`
-	ContractRefs []string   `json:"contractRefs,omitempty"`
-	Timestamp    time.Time  `json:"timestamp"`
+	Lang             string     `json:"lang"`
+	SpecHash         string     `json:"specHash"` // spec that drove the synthesis
+	ContractHash     string     `json:"contractHash,omitempty"`
+	Cases            []TestCase `json:"cases,omitempty"`
+	TestCode         string     `json:"testCode,omitempty"`
+	ContractRefs     []string   `json:"contractRefs,omitempty"`
+	LastSynthFailure string     `json:"lastSynthFailure,omitempty"`
+	Timestamp        time.Time  `json:"timestamp"`
 }
 
 // CompileSection records the most recent typecalc_compile result.
