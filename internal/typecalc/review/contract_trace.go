@@ -13,7 +13,7 @@ import (
 // ContractTraceCheck emits a signal for. Mirrors StaticRuleCodes /
 // RuntimeRuleCodes; AggregateOK uses this to detect silent-skip bugs.
 //
-// Rule codes (Step 4 of contract landing, 2026-05-22):
+// Rule codes (Step 4 of contract landing, 2026-05-25):
 //
 //   - "contract-empty": reserved for future tightening — fires Fail
 //     when describe HAS RUN but emitted no clauses. Currently always
@@ -83,7 +83,7 @@ func ContractTraceCheck(g *graph.Graph, objID string) core.CheckReport {
 	}
 
 	// Branch-skip: reconstruction-mode (./probe black-box rebuild).
-	// Two equivalent triggers (Step 5, 2026-05-22):
+	// Two equivalent triggers (Step 5, 2026-05-25):
 	//   - legacy: CharacterizationSection.LockedCount > 0
 	//   - unified: spec.Contract contains ≥1 Kind="characterization"
 	//     clause (mirror written by WriteCharacterization)
@@ -119,6 +119,11 @@ func ContractTraceCheck(g *graph.Graph, objID string) core.CheckReport {
 	}
 
 	// Build clause index for backward check + cover-tracking for forward.
+	//
+	// Coverage sources (2026-05-25 testCode extension): unify the
+	// schema-cases per-case ContractRefs with the testCode-mode
+	// top-level tests.ContractRefs. Either source contributes
+	// coverage; the gate doesn't care which mode the synth used.
 	clauseByID := make(map[string]core.ContractClause, len(spec.Contract))
 	covered := make(map[string][]string, len(spec.Contract))
 	for _, c := range spec.Contract {
@@ -128,6 +133,12 @@ func ContractTraceCheck(g *graph.Graph, objID string) core.CheckReport {
 		for _, ref := range tc.ContractRefs {
 			covered[ref] = append(covered[ref], tc.Name)
 		}
+	}
+	// testCode-mode flat coverage. Use a synthetic "case name" so the
+	// uncovered/unknown messages still point at something the agent
+	// can reason about.
+	for _, ref := range tests.ContractRefs {
+		covered[ref] = append(covered[ref], "<testCode-body>")
 	}
 
 	// Forward: every non-optional clause cited by ≥1 case.
@@ -155,7 +166,9 @@ func ContractTraceCheck(g *graph.Graph, objID string) core.CheckReport {
 		rb.Pass("contract-clause-uncovered")
 	}
 
-	// Backward: every contractRef in a case resolves to a known clause.
+	// Backward: every contractRef in any source resolves to a known
+	// clause. Both per-case refs (schema mode) and top-level refs
+	// (testCode mode) are checked.
 	type unknownRef struct {
 		caseName string
 		refs     []string
@@ -171,6 +184,15 @@ func ContractTraceCheck(g *graph.Graph, objID string) core.CheckReport {
 		if len(bad) > 0 {
 			unknowns = append(unknowns, unknownRef{caseName: tc.Name, refs: bad})
 		}
+	}
+	var topBad []string
+	for _, ref := range tests.ContractRefs {
+		if _, ok := clauseByID[ref]; !ok {
+			topBad = append(topBad, ref)
+		}
+	}
+	if len(topBad) > 0 {
+		unknowns = append(unknowns, unknownRef{caseName: "<testCode-body>", refs: topBad})
 	}
 	if len(unknowns) > 0 {
 		var lines []string

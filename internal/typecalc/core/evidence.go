@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -200,19 +201,57 @@ type AcceptedEvidence struct {
 }
 
 // TestsEvidence is the v8.x flat struct.
+//
+// ContractHash (2026-05-25 audit B2): a hash of the spec.Contract
+// content at synth time. The synth cache MUST check both SpecHash
+// (impl-content drift) AND ContractHash (contract drift via
+// re-describe with same impl). Without it, re-describe with new
+// clauses + same impl → cache hits → stale testCode with broken
+// ContractRefs → contract-traceability gate fails → agent has no way
+// to bust the cache.
+//
+// ContractRefs (2026-05-25, testCode-mode coverage): top-level list
+// of clause IDs the testCode body covers as a whole. For schema-cases
+// languages (JavaScript) every TestCase.ContractRefs already carries
+// per-case granularity and this list is unused; for raw-testCode
+// languages (C / Go / Python) the LLM emits a flat coverage
+// declaration here because individual test functions in the testCode
+// blob have no structured place to hang refs. The contract-
+// traceability gate unions both sources when checking coverage so
+// the same rule applies across all languages.
 type TestsEvidence struct {
-	ObjectID  string     `json:"objectId"`
-	Kind      string     `json:"kind"`
-	Lang      string     `json:"lang"`
-	SpecHash  string     `json:"specHash"`
-	Timestamp time.Time  `json:"timestamp"`
-	Cases     []TestCase `json:"cases,omitempty"`
-	TestCode  string     `json:"testCode,omitempty"`
+	ObjectID     string     `json:"objectId"`
+	Kind         string     `json:"kind"`
+	Lang         string     `json:"lang"`
+	SpecHash     string     `json:"specHash"`
+	ContractHash string     `json:"contractHash,omitempty"`
+	Timestamp    time.Time  `json:"timestamp"`
+	Cases        []TestCase `json:"cases,omitempty"`
+	TestCode     string     `json:"testCode,omitempty"`
+	ContractRefs []string   `json:"contractRefs,omitempty"`
+}
+
+// HashContract returns a stable hash of a Contract slice. Sorts by ID
+// before hashing so reordering by the LLM doesn't bust the cache when
+// clause content is unchanged. Empty/nil contract hashes to the same
+// stable value (so legacy bundles' empty ContractHash matches).
+func HashContract(clauses []ContractClause) string {
+	if len(clauses) == 0 {
+		return ""
+	}
+	sorted := make([]ContractClause, len(clauses))
+	copy(sorted, clauses)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	buf, err := json.Marshal(sorted)
+	if err != nil {
+		return ""
+	}
+	return HashSource(string(buf))
 }
 
 // TestCase is one entry in a schema-driven test suite.
 //
-// ContractRefs (2026-05-22, Step 3 of contract landing): the IDs of
+// ContractRefs (2026-05-25, Step 3 of contract landing): the IDs of
 // SpecEvidence.Contract clauses this case verifies. Required for the
 // Step 4 [contract-traceability] gate: empty or unknown-ID refs fail
 // confirm. One case may cite multiple clauses (a happy-path test
@@ -284,6 +323,25 @@ type EvidenceRecord struct {
 // Spec section. The flat SpecEvidence.SourceHash is promoted to the
 // bundle-level SourceHash (if non-empty), maintaining the v8.x staleness
 // semantic that "spec hash drift = whole-object staleness".
+//
+// Step 5 single-source-of-truth (2026-05-25): characterization clauses
+// in the existing Spec.Contract are MERGED with rec.Contract — the
+// caller doesn't have to read-modify-write to preserve them. This
+// makes characterization clauses survive any describe call without
+// special-case logic in every caller (the prior B3 patch shape).
+//
+// Merge semantics:
+//   - non-characterization clauses in existing Contract → REPLACED by
+//     rec.Contract's same-kind clauses (describe is the source of
+//     truth for example/invariant)
+//   - characterization clauses in existing Contract → PRESERVED unless
+//     rec.Contract carries a clause with the same ID (in which case
+//     the caller is deliberately re-writing it)
+//
+// The invalidate path (tools/fs/write.go) is the one place that
+// EXPLICITLY strips characterization clauses by writing a Spec rec
+// with no char clauses + filtering them out before this merge —
+// invalidate must always win.
 func WriteSpec(rec *SpecEvidence) error {
 	if rec == nil || rec.ObjectID == "" {
 		return nil
@@ -293,9 +351,10 @@ func WriteSpec(rec *SpecEvidence) error {
 		rec.Timestamp = time.Now().UTC()
 	}
 	b := LoadOrInitBundle(rec.ObjectID)
+	merged := mergePreservingChar(b.Spec, rec.Contract)
 	b.Spec = &SpecSection{
 		Description: rec.Description,
-		Contract:    rec.Contract,
+		Contract:    merged,
 		SpecHash:    rec.SourceHash,
 		Timestamp:   rec.Timestamp,
 	}
@@ -306,6 +365,31 @@ func WriteSpec(rec *SpecEvidence) error {
 		b.SymbolHash = rec.SymbolHash
 	}
 	return SaveBundle(b)
+}
+
+// mergePreservingChar returns a Contract slice combining new clauses
+// with characterization clauses from prior Spec that weren't
+// explicitly overwritten by new (same ID). Order: new clauses first,
+// preserved char clauses appended. nil prior → just newClauses.
+func mergePreservingChar(prior *SpecSection, newClauses []ContractClause) []ContractClause {
+	if prior == nil || len(prior.Contract) == 0 {
+		return newClauses
+	}
+	newIDs := make(map[string]bool, len(newClauses))
+	for _, c := range newClauses {
+		newIDs[c.ID] = true
+	}
+	out := newClauses
+	for _, c := range prior.Contract {
+		if c.Kind != "characterization" {
+			continue // describe owns non-char; let new replace
+		}
+		if newIDs[c.ID] {
+			continue // caller explicitly rewrote this char clause
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // ReadSpec returns the bundle's Spec section reshaped as the v8.x
@@ -384,11 +468,13 @@ func WriteTests(rec *TestsEvidence) error {
 	}
 	b := LoadOrInitBundle(rec.ObjectID)
 	b.Tests = &TestsSection{
-		Lang:      rec.Lang,
-		SpecHash:  rec.SpecHash,
-		Cases:     rec.Cases,
-		TestCode:  rec.TestCode,
-		Timestamp: rec.Timestamp,
+		Lang:         rec.Lang,
+		SpecHash:     rec.SpecHash,
+		ContractHash: rec.ContractHash,
+		Cases:        rec.Cases,
+		TestCode:     rec.TestCode,
+		ContractRefs: rec.ContractRefs,
+		Timestamp:    rec.Timestamp,
 	}
 	return SaveBundle(b)
 }
@@ -402,13 +488,15 @@ func ReadTests(objectID string) (*TestsEvidence, bool) {
 	}
 	t := b.Tests
 	return &TestsEvidence{
-		ObjectID:  objectID,
-		Kind:      "tests",
-		Lang:      t.Lang,
-		SpecHash:  t.SpecHash,
-		Timestamp: t.Timestamp,
-		Cases:     t.Cases,
-		TestCode:  t.TestCode,
+		ObjectID:     objectID,
+		Kind:         "tests",
+		Lang:         t.Lang,
+		SpecHash:     t.SpecHash,
+		ContractHash: t.ContractHash,
+		Timestamp:    t.Timestamp,
+		Cases:        t.Cases,
+		TestCode:     t.TestCode,
+		ContractRefs: t.ContractRefs,
 	}, true
 }
 

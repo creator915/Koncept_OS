@@ -50,7 +50,7 @@ type SynthesizeInputs struct {
 	// of inventing it. Each entry is the raw text of one example.
 	Examples []string
 
-	// Contract (2026-05-22, Step 3 of contract landing): the structured
+	// Contract (2026-05-25, Step 3 of contract landing): the structured
 	// clauses produced by typecalc_describe. When non-empty, the prompt
 	// renders these as the PRIMARY source for case generation and
 	// requires every emitted case to carry ContractRefs citing clause
@@ -64,7 +64,7 @@ type SynthesizeInputs struct {
 	// disk yet) and with the legacy adapter in legacy/characterize.
 	Contract []core.ContractClause
 
-	// PreviousTestCode + PreviousFailure (2026-05-22, PB-30 batch 0522
+	// PreviousTestCode + PreviousFailure (2026-05-25, PB-30 batch 0522
 	// follow-up): when non-empty, switch to "fix mode" — the LLM is told
 	// to MODIFY the prior testCode minimally to address PreviousFailure
 	// instead of regenerating from scratch. Cuts the 9 min/full-rewrite
@@ -111,9 +111,16 @@ func SynthesizeTests(ctx context.Context, in SynthesizeInputs) (*SynthesizeOutpu
 // SynthesizeOutput is the parsed result of one synthesize round. Either
 // `Cases` (preferred, schema-driven) is non-nil, or `TestCode` (legacy
 // raw source) is non-empty. Exactly one is expected per call.
+//
+// ContractRefs (2026-05-25, testCode-mode coverage): top-level flat
+// list of clause IDs the whole testCode body covers. Only meaningful
+// in testCode mode — for cases mode every TestCase already carries
+// per-case ContractRefs. The contract-traceability gate unions both
+// sources so the same coverage rule applies regardless of mode.
 type SynthesizeOutput struct {
-	Cases    []core.TestCase
-	TestCode string
+	Cases        []core.TestCase
+	TestCode     string
+	ContractRefs []string
 }
 
 // SynthesizeWithInvoker is the testable seam. The Invoker takes a
@@ -137,8 +144,9 @@ func SynthesizeWithInvoker(ctx context.Context, in SynthesizeInputs, invoke Invo
 	}
 	// Try parsing the JSON envelope.
 	type envelope struct {
-		Cases    []core.TestCase `json:"cases"`
-		TestCode string     `json:"testCode"`
+		Cases        []core.TestCase `json:"cases"`
+		TestCode     string          `json:"testCode"`
+		ContractRefs []string        `json:"contractRefs"`
 	}
 	var env envelope
 	if err := json.Unmarshal([]byte(cleaned), &env); err != nil {
@@ -169,7 +177,7 @@ func SynthesizeWithInvoker(ctx context.Context, in SynthesizeInputs, invoke Invo
 	if len(env.Cases) == 0 && strings.TrimSpace(env.TestCode) == "" {
 		return nil, fmt.Errorf("synthesize: response has neither cases nor testCode")
 	}
-	return &SynthesizeOutput{Cases: env.Cases, TestCode: env.TestCode}, nil
+	return &SynthesizeOutput{Cases: env.Cases, TestCode: env.TestCode, ContractRefs: env.ContractRefs}, nil
 }
 
 func firstN(s string, n int) string {
@@ -214,8 +222,13 @@ Rules:
 4. Each "case" should test ONE specific behavior. Use multiple cases for multiple invariants — do not pile assertions for unrelated behaviors into one case.
 5. The harness automatically: snapshots input ports before each call, snapshots output ports after, appends to .kcpos/typecalc-runtime/<id>.json BEFORE running assertions (so traces are captured even on assertion failure), and runs the assertions. You do NOT need to write any of that.
 6. If the spec is too underspecified to derive meaningful cases, return the literal text CANNOT_SYNTHESIZE on a single line followed by a one-sentence reason. Do not return JSON in that case.
-6a. **Output budget — HARD CAP** (2026-05-22, PB-30 batch 0522 root-cause): cases ≤ 15 AND total testCode body ≤ 8 KB. If the object's declared ports + invariants genuinely need more, the object is too coarse — return ` + "`CANNOT_SYNTHESIZE: object too coarse, split into smaller graph objects (current contract needs >15 cases / >8KB to cover)`" + `. The H_graph_declare granularity gate also enforces ≤4 produces+mutates per object; if you're hitting this cap, you've likely got an outer-graph mismatch the agent should fix by splitting rather than by piling cases in here.
-6b. **Contract traceability — REQUIRED when the user prompt includes a ` + "`## Contract clauses`" + ` section** (Step 3 of contract landing, 2026-05-22): every case MUST include ` + "`\"contractRefs\":[\"c1\",...]`" + ` naming the clause IDs it verifies. Every non-optional clause MUST be cited by ≥1 case. Cases without ` + "`contractRefs`" + ` will be rejected by the Step 4 gate, blocking confirm_object. If a clause cannot be tested in the current shape (e.g. characterization clause needs a runtime trace that isn't available), return ` + "`CANNOT_SYNTHESIZE: cannot cover clause c<N> — <reason>`" + ` instead of emitting cases that ignore it. When the user prompt has no contract section (legacy path), the ContractRefs field is optional.
+6a. **Output budget — HARD CAP** (2026-05-25, PB-30 batch 0522 root-cause): cases ≤ 15 AND total testCode body ≤ 8 KB. If the object's declared ports + invariants genuinely need more, the object is too coarse — return ` + "`CANNOT_SYNTHESIZE: object too coarse, split into smaller graph objects (current contract needs >15 cases / >8KB to cover)`" + `. The H_graph_declare granularity gate also enforces ≤4 produces+mutates per object; if you're hitting this cap, you've likely got an outer-graph mismatch the agent should fix by splitting rather than by piling cases in here.
+6b. **Contract traceability — REQUIRED when the user prompt includes a ` + "`## Contract clauses`" + ` section** (Step 3 + 2026-05-25 testCode extension):
+  - **Schema cases mode (JS-style)**: every case MUST include ` + "`\"contractRefs\":[\"c1\",...]`" + ` naming the clause IDs it verifies.
+  - **Raw testCode mode (C / Go / Python — when you emit the testCode envelope shape)**: the envelope MUST include a TOP-LEVEL ` + "`\"contractRefs\":[\"c1\",\"c2\",...]`" + ` array listing every clause ID the testCode body covers as a whole. Individual ` + "`Test<Name>`" + ` functions don't carry refs; the flat list at envelope level is the coverage declaration the gate reads.
+  - Either way, **every non-optional clause MUST be cited** (the Step 4 gate fails confirm with ` + "`contract-clause-uncovered`" + ` otherwise). Refs that don't match any clause ID fail with ` + "`contract-ref-unknown`" + `.
+  - If a clause genuinely cannot be tested in the current shape (e.g. characterization clause needs a runtime trace that isn't available), return ` + "`CANNOT_SYNTHESIZE: cannot cover clause c<N> — <reason>`" + ` instead of emitting tests that ignore it.
+  - When the user prompt has no contract section (legacy path), ContractRefs are optional in both modes.
 
 **v9.0.2 assertion-style rules (CRITICAL — these prevent brittle tests):**
 
@@ -226,12 +239,13 @@ Rules:
 
 **Why these rules**: tests must verify the *contract* (description-level invariants), not the *implementation* (specific numeric coincidences). A test that fires ` + "`equals: 192`" + ` breaks when the impl is rewritten with a different rounding order producing 192.00001 — even though the contract is satisfied. The harness supports ` + "`between` / `type` / `enum` / `truthy`" + ` precisely so synthesized tests can stay contract-anchored.
 
-Legacy fallback (when a runtime-eval harness for the language doesn't exist — currently Go): instead of "cases", output:
+Legacy fallback (when a runtime-eval harness for the language doesn't exist — C / Go / Python): instead of "cases", output:
 {
   "objectId": "<id>",
-  "testCode": "<raw test source in the target language>"
+  "testCode": "<raw test source in the target language>",
+  "contractRefs": ["c1", "c2", ...]
 }
-The host inspects the field and routes accordingly. Prefer "cases" — the harness path is more robust.
+The host inspects the field and routes accordingly. Prefer "cases" — the harness path is more robust. ` + "`contractRefs`" + ` at envelope level is REQUIRED whenever the user prompt has a ` + "`## Contract clauses`" + ` section (Step 4 gate enforcement, see rule 6b).
 
 **Go (LangGo) — testCode mode specifics (MANDATORY when language is Go):**
 

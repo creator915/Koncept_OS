@@ -121,6 +121,70 @@ func TestWriteFile_AutoInvalidate_ConfirmedImpl_DemotesAndClears(t *testing.T) {
 	}
 }
 
+// TestWriteFile_AutoInvalidate_StripsMirroredCharClauses (B1 audit,
+// 2026-05-25) — when the invalidate path clears the Characterization
+// section, it must also remove mirrored char-* clauses from
+// spec.Contract. Without this, contract_trace.go's unified
+// reconstruction-mode skip path (hasCharacterizationClause) keeps
+// firing on stale data after impl edit, falsely passing confirm on a
+// re-implementation that hasn't been re-locked.
+func TestWriteFile_AutoInvalidate_StripsMirroredCharClauses(t *testing.T) {
+	id := "Doit"
+	implRel := "src/doit.c"
+	origContent := "int doit(){ return 1; }\n"
+	_ = writeConfirmedFixture(t, id, implRel, origContent)
+	// Converge the fixture to the Step 5 single-source shape: real
+	// WriteCharacterization populates Spec.Contract with a char clause
+	// carrying full Detail (CodeHash + LockedCount etc.). Without
+	// going through this API, b.Characterization stays the only source
+	// and the test wouldn't be exercising the post-refactor path.
+	if err := core.WriteCharacterization(id, &core.CharacterizationSection{
+		SuiteID:     "equiv-" + id,
+		Lang:        "C",
+		CodeHash:    core.HashSource(origContent),
+		LockedCount: 12,
+	}); err != nil {
+		t.Fatalf("seed char: %v", err)
+	}
+	// Also write an example clause via WriteSpec so we can verify only
+	// the characterization one gets stripped on invalidate.
+	if err := core.WriteSpec(&core.SpecEvidence{
+		ObjectID:    id,
+		Description: "doit returns 1",
+		Contract:    []core.ContractClause{{ID: "c1", Kind: "example", Body: "doit()=1"}},
+		SourceHash:  core.HashSource(origContent),
+	}); err != nil {
+		t.Fatalf("seed spec: %v", err)
+	}
+	// Sanity: pre-state should have both clauses (WriteSpec preserves char).
+	pre, _ := core.ReadBundle(id)
+	if pre.Spec == nil || len(pre.Spec.Contract) != 2 {
+		t.Fatalf("pre-edit setup wrong: %+v", pre.Spec)
+	}
+
+	// Now edit impl — should auto-invalidate.
+	tool := writeFileTool()
+	_, err := tool.Run(context.Background(), map[string]interface{}{
+		"path":    implRel,
+		"content": "int doit(){ return 99; }\n",
+	})
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+
+	// Re-read bundle: Contract should have ONLY the non-char clause.
+	after, _ := core.ReadBundle(id)
+	if after.Spec == nil {
+		t.Fatal("Spec section should survive invalidate (only char clauses are stripped)")
+	}
+	if len(after.Spec.Contract) != 1 {
+		t.Fatalf("expected 1 surviving clause (the example), got %d: %+v", len(after.Spec.Contract), after.Spec.Contract)
+	}
+	if after.Spec.Contract[0].Kind != "example" {
+		t.Errorf("surviving clause must be the non-characterization one, got kind=%q", after.Spec.Contract[0].Kind)
+	}
+}
+
 func TestWriteFile_AutoInvalidate_SameHash_NoOp(t *testing.T) {
 	// Writing the same content (identical hash) must NOT invalidate.
 	// The hash check is the only guard against churn — re-writing the

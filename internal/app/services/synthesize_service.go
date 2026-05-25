@@ -89,10 +89,23 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 			}
 
 			// Hash cache: if synthesized tests already exist for the
-			// CURRENT spec hash, the suite is still valid — skip the LLM
-			// call. Spec changes invalidate this naturally because the
-			// re-described spec has a new SourceHash.
-			if existing, ok := core.ReadTests(objectID); ok && existing.SpecHash == spec.SourceHash && len(existing.TestCode) > 0 {
+			// CURRENT spec, the suite is still valid — skip the LLM call.
+			//
+			// Two-key check (2026-05-25 audit B2):
+			//   - SpecHash equality catches impl-source drift (the
+			//     original cache key from v8.x).
+			//   - ContractHash equality catches re-describe with a
+			//     different Contract on the SAME impl (Step 3 introduced
+			//     this path; prior to B2 the cache hit on stale testCode
+			//     and the contract-traceability gate failed with refs
+			//     pointing at deleted clause IDs).
+			//
+			// Either drift busts the cache.
+			specContractHash := core.HashContract(spec.Contract)
+			if existing, ok := core.ReadTests(objectID); ok &&
+				existing.SpecHash == spec.SourceHash &&
+				existing.ContractHash == specContractHash &&
+				len(existing.TestCode) > 0 {
 				return fmt.Sprintf(
 					"synthesized tests for %s [cache hit, no LLM call] — kept %s\n\n--- test code (cached) ---\n%s",
 					objectID,
@@ -131,7 +144,7 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 					poJSON = string(raw)
 				}
 			}
-			// Incremental synth (2026-05-22): if prior tests exist AND the
+			// Incremental synth (2026-05-25): if prior tests exist AND the
 			// last test run failed AND the impl hasn't changed since that
 			// run, switch to fix-mode — pass the prior testCode + failure
 			// log to the LLM and ask for a minimal modification. Cuts the
@@ -174,11 +187,13 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 				return out.TestCode, nil
 			}
 			rec := &core.TestsEvidence{
-				ObjectID: objectID,
-				Lang:     lang,
-				SpecHash: spec.SourceHash,
-				Cases:    out.Cases,
-				TestCode: out.TestCode,
+				ObjectID:     objectID,
+				Lang:         lang,
+				SpecHash:     spec.SourceHash,
+				ContractHash: specContractHash,
+				Cases:        out.Cases,
+				TestCode:     out.TestCode,
+				ContractRefs: out.ContractRefs,
 			}
 			if err := core.WriteTests(rec); err != nil {
 				return "", fmt.Errorf("persist tests evidence: %w", err)

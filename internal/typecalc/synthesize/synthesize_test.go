@@ -113,6 +113,95 @@ func TestSynthesizeWithInvoker_PassesThroughCannotSynthesize(t *testing.T) {
 	}
 }
 
+// TestWriteSpec_DescribeAfterCharacterizeDropsChar_DocumentsBug — B3
+// audit finding: WriteSpec replaces Spec.Contract wholesale, so a
+// naive describe-after-characterize sequence loses the mirrored char-*
+// clause. This test documents the RAW behavior of WriteSpec (which is
+// intentional, the caller decides what to write); the fix lives in
+// review_service.go's describe handler where it reads existing
+// characterization clauses and appends them before calling WriteSpec.
+// This test guards the WriteSpec semantic so a future "helpful"
+// merge-on-write refactor doesn't silently shift the responsibility.
+func TestWriteSpec_DescribeAfterCharacterizeDropsChar_DocumentsBug(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+
+	// characterize ran first → mirror clause in Contract.
+	_ = core.WriteCharacterization("Foo", &core.CharacterizationSection{
+		SuiteID: "equiv-Foo", OracleProperty: "locked", LockedCount: 5,
+	})
+	pre, _ := core.ReadSpec("Foo")
+	if !hasCharKind(pre.Contract) {
+		t.Fatal("setup: characterize mirror should have populated char clause")
+	}
+
+	// Naive describe call (would clobber). The fix in
+	// review_service.go is: read existing.Contract, append char-* to
+	// LLM's new clauses, THEN call WriteSpec. Simulating that pattern.
+	llmClauses := []core.ContractClause{{ID: "c1", Kind: "example", Body: "Foo(1)=1"}}
+	merged := append([]core.ContractClause{}, llmClauses...)
+	for _, c := range pre.Contract {
+		if c.Kind == "characterization" {
+			merged = append(merged, c)
+		}
+	}
+	_ = core.WriteSpec(&core.SpecEvidence{
+		ObjectID:    "Foo",
+		Description: "new desc",
+		Contract:    merged,
+		SourceHash:  "newhash",
+	})
+	post, _ := core.ReadSpec("Foo")
+	if !hasCharKind(post.Contract) {
+		t.Errorf("after describe-merge, char clause must survive (B3 fix); got %+v", post.Contract)
+	}
+	if len(post.Contract) != 2 {
+		t.Errorf("expected 2 clauses (example + char), got %d", len(post.Contract))
+	}
+}
+
+func hasCharKind(clauses []core.ContractClause) bool {
+	for _, c := range clauses {
+		if c.Kind == "characterization" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHashContract_StableUnderReorder (B2, 2026-05-25 audit) —
+// reordering clauses by ID must produce the same hash so re-describe
+// emitting clauses in different order doesn't bust the synth cache.
+// Different content must produce different hashes (cache MUST bust on
+// real change).
+func TestHashContract_StableUnderReorder(t *testing.T) {
+	a := []core.ContractClause{
+		{ID: "c1", Kind: "example", Body: "x"},
+		{ID: "c2", Kind: "invariant", Body: "y"},
+	}
+	b := []core.ContractClause{
+		{ID: "c2", Kind: "invariant", Body: "y"},
+		{ID: "c1", Kind: "example", Body: "x"},
+	}
+	c := []core.ContractClause{
+		{ID: "c1", Kind: "example", Body: "X-CHANGED"},
+		{ID: "c2", Kind: "invariant", Body: "y"},
+	}
+	ha, hb, hc := core.HashContract(a), core.HashContract(b), core.HashContract(c)
+	if ha != hb {
+		t.Errorf("reorder-only must yield same hash: %s vs %s", ha[:12], hb[:12])
+	}
+	if ha == "" {
+		t.Errorf("non-empty contract must produce non-empty hash")
+	}
+	if ha == hc {
+		t.Errorf("content change must bust hash: %s == %s", ha[:12], hc[:12])
+	}
+	if h := core.HashContract(nil); h != "" {
+		t.Errorf("nil contract should hash to empty (legacy match), got %q", h)
+	}
+}
+
 // TestSynthesizeWithInvoker_RendersContractWhenPresent (Step 3) — when
 // SynthesizeInputs.Contract is non-empty, the prompt must include a
 // "## Contract clauses" section listing each clause's ID/kind/body so

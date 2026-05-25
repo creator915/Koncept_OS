@@ -35,7 +35,7 @@ func typecalcDescribeTool() toolcall.Tool {
 			Type: "function",
 			Function: transport.ToolFunction{
 				Name: "typecalc_describe",
-				Description: "Read an object's def + impl files and have an LLM produce a precise description of what the implementation does. Persists kind=spec evidence at .kcpos/typecalc-evidence/<id>.spec.json.\n\nThis is the FIRST step of the review pipeline (describe → review → confirmed). The description complements the original `intent` field: intent is what was wanted, description is what was built. Both feed into the reasonableness reviewer.\n\nRe-run after any non-trivial impl change — the description's SourceHash is keyed to the impl content, and a stale description will fail the static check during review.",
+				Description: "Read an object's def + impl files and have an LLM produce a precise description of what the implementation does. Persists kind=spec evidence at .kcpos/typecalc-evidence/<id>.spec.json.\n\nThis is the FIRST step of the review pipeline (describe → review → confirmed). The description complements the original `intent` field: intent is what was wanted, description is what was built. Both feed into the reasonableness reviewer.\n\n**Contract output (2026-05-25 Step 2)**: in addition to the prose description, the LLM produces a structured `---CONTRACT---` block listing atomic testable clauses — `example` (concrete I/O pair from the spec/README), `invariant` (testable property without knowing the answer like idempotence or round-trip), and `characterization` (locked observation via probe). These clauses become the SOLE source for typecalc_synthesize_tests' test case generation and the contract-traceability gate enforces that every test cites a clause (`contractRefs`). The tool reply surfaces `--- contract: N clauses (example=X, invariant=Y, characterization=Z) ---`; if you see `--- contract: no contract clauses ---` the LLM forgot the contract block and confirm_object will later be stuck — re-run describe and ensure the LLM emits the contract block.\n\nRe-run after any non-trivial impl change — the description's SourceHash is keyed to the impl content, and a stale description will fail the static check during review.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -130,14 +130,24 @@ func typecalcDescribeTool() toolcall.Tool {
 			// whether the contract block came through. Step 4's gate
 			// will fail confirm on empty Contract; better the agent
 			// learns now and re-describes than discovers it post-test.
+			//
+			// Read the merged Contract back from disk — WriteSpec's
+			// mergePreservingChar preserves characterization clauses
+			// from prior writes, so the on-disk total may exceed what
+			// the LLM just emitted.
+			merged, _ := core.ReadSpec(objectID)
+			finalContract := out.Contract
+			if merged != nil {
+				finalContract = merged.Contract
+			}
 			byKind := map[string]int{}
-			for _, c := range out.Contract {
+			for _, c := range finalContract {
 				byKind[c.Kind]++
 			}
 			contractSummary := "no contract clauses"
-			if len(out.Contract) > 0 {
+			if len(finalContract) > 0 {
 				contractSummary = fmt.Sprintf("%d clauses (example=%d, invariant=%d, characterization=%d)",
-					len(out.Contract), byKind["example"], byKind["invariant"], byKind["characterization"])
+					len(finalContract), byKind["example"], byKind["invariant"], byKind["characterization"])
 			}
 			return fmt.Sprintf(
 				"described %s — wrote %s\n--- contract: %s ---\n--- description ---\n%s",
@@ -239,7 +249,7 @@ func typecalcReviewTool() toolcall.Tool {
 			runtimeIssues := runtimeReport.Issues()
 
 			// 1.6. Contract traceability (Step 4 of contract landing,
-			//      2026-05-22): every non-optional spec.Contract clause
+			//      2026-05-25): every non-optional spec.Contract clause
 			//      cited by ≥1 case; every case's ContractRefs resolvable.
 			//      Skip-passes for legacy bundles (no Contract on disk),
 			//      reconstruction-mode (characterization path), and HTML

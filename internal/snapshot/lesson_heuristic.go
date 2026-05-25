@@ -64,6 +64,26 @@ func lessonHeuristic(reason string) (key string, whatWentWrong string, dosAndDon
 				"Avoid declaring top-level main() or orchestrator loops as graph objects — model them as plain glue code.",
 			}
 
+	case strings.Contains(lower, "produces+mutates ports") && strings.Contains(lower, "cap="):
+		// Added 2026-05-25 after PB-30 batch 0522 tty-clock burned 3
+		// retries on this exact failure with `heuristic:no-match` —
+		// the generic lesson didn't teach the agent to keep object
+		// granularity ≤4 ports, so attempts 2 and 3 re-declared the
+		// same monolithic ProvideClockConfig (11 ports) each time.
+		return "object-too-many-ports",
+			"H_graph_declare refused to advance because an object's produces+mutates port total exceeded the " +
+				"per-object cap (=4). Monolithic objects with many output ports make typecalc_synthesize_tests " +
+				"stream tens of KB per call (5-9 min wall time) and exhaust handler_max_iter. The lesson the " +
+				"previous attempt failed to extract: split the wide object into smaller pieces with ≤4 output " +
+				"ports each, OR group related scalar outputs into a single structured port.",
+			[]string{
+				"Identify the offending object from the failure message (it names the object + port count).",
+				"REWRITE the graph_create_object for that object: replace its many scalar produces with ONE structured produce (e.g. a `config` attribute whose value carries all 19 flags as nested fields).",
+				"OR split the object into ≤4-port sub-objects: e.g. one object per logical group of flags (display flags / behavior flags / runtime flags).",
+				"Do NOT re-declare the same wide object hoping the gate will change its mind — the cap is hard. The fix MUST happen at graph_create_object call time, before graph_preflight.",
+				"After re-declaration, every object's `produces` + `mutates` total must be ≤4 OR confirm_object will be inaccessible.",
+			}
+
 	case strings.Contains(lower, "compile-not-enough"):
 		return "compile-not-enough",
 			"The gate refused to accept compile-only evidence for a language outside the test-runner whitelist. " +

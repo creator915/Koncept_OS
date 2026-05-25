@@ -370,11 +370,28 @@ func invalidateConfirmedImplOnEdit(objectIDs []string, newContent string) []stri
 		graphMutated = true
 		// Clear downstream evidence so re-confirmation runs cleanly.
 		if b, hasB := core.ReadBundle(id); hasB && b != nil {
+			// Legacy field — kept for read-compat on pre-Step-5
+			// bundles; post-Step-5 it's always nil at this point.
 			b.Characterization = nil
 			b.Accepted = nil
 			b.Test = nil
 			b.Cycles = nil
 			b.RuntimeTrace = nil
+			// Step 5 single-source: strip characterization clauses
+			// from spec.Contract — that's the canonical store now.
+			// Without this, contract_trace.go's reconstruction-mode
+			// skip would still fire on stale clauses after impl edit,
+			// letting confirm pass on a re-implementation that hasn't
+			// been re-locked.
+			if b.Spec != nil && len(b.Spec.Contract) > 0 {
+				kept := b.Spec.Contract[:0]
+				for _, c := range b.Spec.Contract {
+					if c.Kind != "characterization" {
+						kept = append(kept, c)
+					}
+				}
+				b.Spec.Contract = kept
+			}
 			_ = core.SaveBundle(b)
 		}
 		invalidated = append(invalidated, id)

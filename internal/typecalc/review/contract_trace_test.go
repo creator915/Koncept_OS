@@ -172,7 +172,7 @@ func TestContractTraceCheck_UnknownRef_Fail(t *testing.T) {
 }
 
 // TestContractTraceCheck_UnifiedCharacterizationClause_Skip (Step 5,
-// 2026-05-22) — the unified path: when spec.Contract carries a
+// 2026-05-25) — the unified path: when spec.Contract carries a
 // Kind="characterization" clause (mirror written by
 // WriteCharacterization), the reconstruction-mode skip fires even if
 // the standalone CharacterizationSection isn't read. Forward-compat
@@ -247,6 +247,181 @@ func TestWriteCharacterization_MirrorsToContract(t *testing.T) {
 	}
 	if !strings.Contains(spec2.Contract[0].Body, "locked=10") {
 		t.Errorf("re-write should update body: %q", spec2.Contract[0].Body)
+	}
+}
+
+// TestContractTraceCheck_TestCodeMode_TopLevelRefsCoverage (2026-05-25)
+// — C/Go/Python tests don't have per-case ContractRefs (they emit raw
+// testCode), so coverage MUST come from the top-level
+// tests.ContractRefs flat list. Without this extension the gate
+// silently skipped on non-JS languages — the whole batch of 5
+// PB-30 tasks (all C/Go) showed contract clauses landed but the
+// traceability rule never fired.
+func TestContractTraceCheck_TestCodeMode_TopLevelRefsCoverage(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	_ = core.WriteSpec(&core.SpecEvidence{
+		ObjectID: "Adder", SourceHash: "h",
+		Contract: []core.ContractClause{
+			{ID: "c1", Kind: "example", Body: "Add(2,3)=5"},
+			{ID: "c2", Kind: "invariant", Body: "commutative"},
+			{ID: "c3", Kind: "example", Body: "extra", Optional: true},
+		},
+	})
+	// testCode mode: no Cases, refs at envelope level. Cover non-
+	// optional c1+c2; optional c3 may stay uncited.
+	_ = core.WriteTests(&core.TestsEvidence{
+		ObjectID: "Adder", Lang: "Go", SpecHash: "h",
+		TestCode:     "func TestAdd(t *testing.T){...}",
+		ContractRefs: []string{"c1", "c2"},
+	})
+	g := minimalGraph("Adder")
+	rep := ContractTraceCheck(g, "Adder")
+	ok, _, failed := core.AggregateOK(rep, ContractTraceRuleCodes)
+	if !ok {
+		t.Errorf("testCode with top-level refs covering all non-optional should pass; failed: %v", failed)
+	}
+}
+
+// TestContractTraceCheck_TestCodeMode_UnknownTopLevelRef — top-level
+// refs that don't resolve to a clause ID must fail
+// contract-ref-unknown (mirrors the schema-mode check).
+func TestContractTraceCheck_TestCodeMode_UnknownTopLevelRef(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	_ = core.WriteSpec(&core.SpecEvidence{
+		ObjectID: "Adder", SourceHash: "h",
+		Contract: []core.ContractClause{{ID: "c1", Kind: "example", Body: "x"}},
+	})
+	_ = core.WriteTests(&core.TestsEvidence{
+		ObjectID: "Adder", Lang: "Go", SpecHash: "h",
+		TestCode:     "...",
+		ContractRefs: []string{"c1", "c99"}, // c99 is stale/wrong
+	})
+	g := minimalGraph("Adder")
+	rep := ContractTraceCheck(g, "Adder")
+	if got := statusOf(rep, "contract-ref-unknown"); got != core.StatusFail {
+		t.Fatalf("unknown top-level ref should fail, got %v", got)
+	}
+}
+
+// TestContractTraceCheck_TestCodeMode_MissingRefsLeavesUncovered —
+// testCode without any ContractRefs leaves every non-optional clause
+// uncovered → fails contract-clause-uncovered. The whole point of
+// the testCode extension: catching this case which previously slipped
+// silently.
+func TestContractTraceCheck_TestCodeMode_MissingRefsLeavesUncovered(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	_ = core.WriteSpec(&core.SpecEvidence{
+		ObjectID: "X", SourceHash: "h",
+		Contract: []core.ContractClause{
+			{ID: "c1", Kind: "example", Body: "must-cover"},
+		},
+	})
+	_ = core.WriteTests(&core.TestsEvidence{
+		ObjectID: "X", Lang: "Go", SpecHash: "h",
+		TestCode: "func TestX(t *testing.T){}",
+		// no ContractRefs — the pre-2026-05-25 silent-skip path
+	})
+	g := minimalGraph("X")
+	rep := ContractTraceCheck(g, "X")
+	if got := statusOf(rep, "contract-clause-uncovered"); got != core.StatusFail {
+		t.Fatalf("testCode missing refs must now fail uncovered, got %v (the regression we just fixed)", got)
+	}
+}
+
+// TestWriteCharacterization_ClearsLegacyField (Step 5 single-source
+// refactor, 2026-05-25) — invariant: after WriteCharacterization,
+// b.Characterization is ALWAYS nil (data lives only in Spec.Contract).
+// Guards against a future refactor reintroducing the dual-storage
+// pattern that B1 + B3 were symptoms of.
+func TestWriteCharacterization_ClearsLegacyField(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	// Pre-seed b.Characterization to simulate a mid-refactor bundle.
+	b := core.LoadOrInitBundle("Foo")
+	b.Characterization = &core.CharacterizationSection{
+		SuiteID: "old-equiv", LockedCount: 3,
+	}
+	_ = core.SaveBundle(b)
+	// Now call WriteCharacterization with new data.
+	if err := core.WriteCharacterization("Foo", &core.CharacterizationSection{
+		SuiteID: "equiv-Foo", LockedCount: 7,
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	after, _ := core.ReadBundle("Foo")
+	if after.Characterization != nil {
+		t.Errorf("post-Step-5 b.Characterization must be nil after WriteCharacterization, got %+v", after.Characterization)
+	}
+	if after.Spec == nil || len(after.Spec.Contract) != 1 {
+		t.Fatalf("char clause should be in Spec.Contract, got %+v", after.Spec)
+	}
+}
+
+// TestWriteSpec_PreservesCharacterizationClauses (Step 5 elegant fix
+// for B3) — WriteSpec called WITHOUT any char clauses in rec.Contract
+// must still preserve characterization clauses from the prior Spec.
+// This is the structural mechanism that makes describe-after-
+// characterize Just Work without the caller doing a manual merge
+// (the prior B3 patch shape).
+func TestWriteSpec_PreservesCharacterizationClauses(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	// characterize ran first → char clause in Spec.Contract.
+	_ = core.WriteCharacterization("Foo", &core.CharacterizationSection{
+		SuiteID: "equiv-Foo", LockedCount: 5, OracleProperty: "locked",
+	})
+	// describe runs WITHOUT any char clause in its returned Contract.
+	_ = core.WriteSpec(&core.SpecEvidence{
+		ObjectID:    "Foo",
+		Description: "new",
+		Contract:    []core.ContractClause{{ID: "c1", Kind: "example", Body: "x"}},
+		SourceHash:  "hash1",
+	})
+	after, _ := core.ReadSpec("Foo")
+	if len(after.Contract) != 2 {
+		t.Fatalf("describe-after-char should yield example + preserved char = 2 clauses, got %d: %+v",
+			len(after.Contract), after.Contract)
+	}
+	hasChar := false
+	for _, c := range after.Contract {
+		if c.Kind == "characterization" {
+			hasChar = true
+		}
+	}
+	if !hasChar {
+		t.Errorf("characterization clause must survive describe-only WriteSpec")
+	}
+}
+
+// TestReadCharacterization_BridgesBothStorageSites — compat bridge:
+// the v8.x-shaped ReadCharacterization returns equivalent data
+// whether the lock was written via the legacy field (old bundle) or
+// via the Step 5 Contract path. Guards the migration window.
+func TestReadCharacterization_BridgesBothStorageSites(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	// Legacy bundle: b.Characterization set, no Spec.
+	b := core.LoadOrInitBundle("Legacy")
+	b.Characterization = &core.CharacterizationSection{
+		SuiteID: "old", LockedCount: 9, CodeHash: "h1",
+	}
+	_ = core.SaveBundle(b)
+	got, ok := core.ReadCharacterization("Legacy")
+	if !ok || got.LockedCount != 9 || got.CodeHash != "h1" {
+		t.Errorf("legacy read should return field data: %+v", got)
+	}
+
+	// Step 5 bundle: written via real WriteCharacterization →
+	// b.Characterization=nil, data in Spec.Contract Detail.
+	_ = core.WriteCharacterization("Modern", &core.CharacterizationSection{
+		SuiteID: "new", LockedCount: 9, CodeHash: "h1",
+	})
+	got2, ok := core.ReadCharacterization("Modern")
+	if !ok || got2.LockedCount != 9 || got2.CodeHash != "h1" {
+		t.Errorf("Contract-backed read should reconstruct same data: %+v", got2)
 	}
 }
 

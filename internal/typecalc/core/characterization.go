@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -65,18 +66,30 @@ type CharacterizationSection struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// WriteCharacterization stores the characterization lock as the
-// bundle's Characterization section, leaving every other section
-// untouched (load → set one section → save, the established
-// non-disturbing pattern used by WriteSpec/WriteTests/etc.).
+// WriteCharacterization persists a characterization lock as a
+// characterization-kind clause inside the bundle's Spec.Contract.
 //
-// 2026-05-22 (Step 5 of contract landing): ALSO mirrors the lock into
-// the Spec section's Contract field as a Kind="characterization"
-// clause. This is the single-source-of-truth migration path —
-// downstream readers (gate, synth) progressively shift from
-// CharacterizationSection to Contract clauses; once every reader has
-// migrated, the standalone section can be retired. The mirror is
-// idempotent (dedup by clause ID).
+// 2026-05-25 Step 5 single-source refactor: Contract is the ONLY
+// place characterization data lives. The old standalone
+// b.Characterization section is cleared (set to nil) if present so
+// nothing reads stale data — readers must now go through
+// ReadCharacterizationClauses (Contract-based) or peek at
+// b.Spec.Contract directly.
+//
+// Clause shape:
+//   - ID:     "char-" + SuiteID  (stable, repeat calls overwrite)
+//   - Kind:   "characterization"
+//   - Body:   OracleProperty + locked/unlocked counts
+//   - Source: "char:suite=" + SuiteID
+//   - Detail: the full lossless CharacterizationSection as JSON for
+//             audit (consumers wanting Cases / CodeHash / etc. parse
+//             this back into a CharacterizationSection)
+//
+// Rationale: the previous mirror-and-also-write-the-old-field design
+// created two sources of truth, forcing every invalidate / WriteSpec /
+// re-describe path to remember to sync both. Single source eliminates
+// that synchronization debt — B1 and B3 from the 2026-05-25 audit
+// were symptoms of the dual-storage shape.
 func WriteCharacterization(objectID string, sec *CharacterizationSection) error {
 	if objectID == "" || sec == nil {
 		return nil
@@ -85,34 +98,34 @@ func WriteCharacterization(objectID string, sec *CharacterizationSection) error 
 		sec.Timestamp = time.Now().UTC()
 	}
 	b := LoadOrInitBundle(objectID)
-	b.Characterization = sec
-	// Mirror as a Contract characterization clause. Use a stable ID
-	// derived from SuiteID so repeated WriteCharacterization calls (e.g.
-	// after re-running equiv_oracle) overwrite the same clause rather
-	// than accumulating duplicates. Source carries SuiteID for audit.
+	// Clear the legacy field if a prior write left it populated.
+	// Mid-refactor bundles may have both; this convergence pass
+	// guarantees the legacy field stops being a stale shadow.
+	b.Characterization = nil
 	if b.Spec == nil {
 		// No describe yet — create an empty Spec section so the clause
-		// has somewhere to live. Description stays empty; the gate's
-		// stale-spec rule continues to fire if needed, and the next
-		// describe will populate Description without dropping our
-		// mirrored clause (WriteSpec preserves Contract).
+		// has somewhere to live. WriteSpec's merge semantics preserve
+		// our clause when describe eventually runs.
 		b.Spec = &SpecSection{Timestamp: time.Now().UTC()}
 	}
-	mirror := ContractClause{
+	// Stash the full lossless lock data as Detail for audit consumers.
+	detail, _ := json.Marshal(sec)
+	clause := ContractClause{
 		ID:   "char-" + nonEmpty(sec.SuiteID, "default"),
 		Kind: "characterization",
 		Body: fmt.Sprintf("%s (locked=%d, unlocked=%d)",
 			nonEmpty(sec.OracleProperty, "impl behaviorally locked"),
 			sec.LockedCount, sec.UnlockedCount),
 		Source: "char:suite=" + nonEmpty(sec.SuiteID, "default"),
+		Detail: detail,
 	}
-	b.Spec.Contract = upsertClause(b.Spec.Contract, mirror)
+	b.Spec.Contract = upsertClause(b.Spec.Contract, clause)
 	return SaveBundle(b)
 }
 
 // upsertClause replaces an existing clause with the same ID, or
-// appends if absent. Used by WriteCharacterization's mirror so
-// re-running characterize doesn't accumulate stale clauses.
+// appends if absent. Used by WriteCharacterization so re-running
+// characterize doesn't accumulate stale clauses.
 func upsertClause(list []ContractClause, c ContractClause) []ContractClause {
 	for i, existing := range list {
 		if existing.ID == c.ID {
@@ -121,6 +134,50 @@ func upsertClause(list []ContractClause, c ContractClause) []ContractClause {
 		}
 	}
 	return append(list, c)
+}
+
+// ReadCharacterizationClauses returns every Kind="characterization"
+// clause from the bundle's Spec.Contract. The canonical read path
+// post-Step-5 — replaces the legacy ReadCharacterization for the
+// "is this object characterized?" question.
+//
+// Returns (nil, false) when no spec / no characterization clauses
+// exist. Callers wanting the lossless CharacterizationSection data
+// can unmarshal Detail back.
+func ReadCharacterizationClauses(objectID string) ([]ContractClause, bool) {
+	b, ok := ReadBundle(objectID)
+	if !ok || b.Spec == nil {
+		return nil, false
+	}
+	var out []ContractClause
+	for _, c := range b.Spec.Contract {
+		if c.Kind == "characterization" {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// LockedCountFromClauses sums the (locked=N) annotation across char
+// clauses for callers that want the v8.x scalar. Parses the Body
+// suffix "(locked=N, unlocked=M)"; clauses written by Step 5 always
+// have this shape, so the sum is exact rather than approximate.
+//
+// Returns 0 when no parseable clause exists.
+func LockedCountFromClauses(clauses []ContractClause) int {
+	total := 0
+	for _, c := range clauses {
+		var locked int
+		// Format: "<text> (locked=N, unlocked=M)"
+		if i := strings.Index(c.Body, "(locked="); i >= 0 {
+			fmt.Sscanf(c.Body[i:], "(locked=%d", &locked)
+		}
+		total += locked
+	}
+	return total
 }
 
 // nonEmpty returns s when non-empty, fallback otherwise. Lives in core
@@ -136,10 +193,82 @@ func nonEmpty(s, fallback string) string {
 // ReadCharacterization returns the bundle's Characterization section.
 // (nil, false) when the object was never characterized — which is the
 // case for every greenfield object.
+//
+// Step 5 single-source refactor (2026-05-25): characterization data
+// now lives ONLY in Spec.Contract clauses of Kind="characterization"
+// (the legacy b.Characterization field is cleared on every
+// WriteCharacterization). This reader transparently reconstructs the
+// flat CharacterizationSection from the most recent char clause's
+// Detail blob, keeping the v8.x-shaped API alive for callers that
+// still want CodeHash / LockedCount / etc. without forcing them to
+// migrate.
+//
+// Read order:
+//  1. If b.Spec carries char clauses → unmarshal the most recent
+//     one's Detail (which WriteCharacterization stored as the full
+//     serialized section). Aggregated LockedCount across all char
+//     clauses if Detail is absent (older convergence).
+//  2. Else if b.Characterization is set (legacy bundle pre-Step-5) →
+//     return it directly.
+//  3. Else (nil, false).
+//
+// This is the bridge that lets the dual-storage debt vanish without
+// a flag-day migration of every caller.
 func ReadCharacterization(objectID string) (*CharacterizationSection, bool) {
 	b, ok := ReadBundle(objectID)
-	if !ok || b.Characterization == nil {
+	if !ok {
 		return nil, false
 	}
-	return b.Characterization, true
+	// Prefer Contract storage (Step 5 canonical).
+	if b.Spec != nil {
+		var chars []ContractClause
+		for _, c := range b.Spec.Contract {
+			if c.Kind == "characterization" {
+				chars = append(chars, c)
+			}
+		}
+		if len(chars) > 0 {
+			// Reconstruct from the most recent clause's Detail blob.
+			// Multiple char clauses can coexist (one per SuiteID); the
+			// most recent by Detail.Timestamp wins. For correctness we
+			// don't actually need to pick the "most recent" — any
+			// representative section that carries LockedCount + CodeHash
+			// satisfies the readers — but pick deterministically.
+			latest := chars[0]
+			for _, c := range chars[1:] {
+				if len(c.Detail) > len(latest.Detail) {
+					latest = c
+				}
+			}
+			if len(latest.Detail) > 0 {
+				var sec CharacterizationSection
+				if err := json.Unmarshal(latest.Detail, &sec); err == nil {
+					// Sum LockedCount across ALL char clauses so multi-
+					// suite cases report total lock coverage.
+					total := 0
+					for _, c := range chars {
+						var s CharacterizationSection
+						if json.Unmarshal(c.Detail, &s) == nil {
+							total += s.LockedCount
+						}
+					}
+					if total > sec.LockedCount {
+						sec.LockedCount = total
+					}
+					return &sec, true
+				}
+			}
+			// Detail empty / unparseable but clauses exist — synthesize
+			// a minimal section so callers see "yes, characterized".
+			return &CharacterizationSection{
+				LockedCount:   LockedCountFromClauses(chars),
+				OracleProperty: latest.Body,
+			}, true
+		}
+	}
+	// Legacy bundle (pre-Step-5 mid-refactor convergence).
+	if b.Characterization != nil {
+		return b.Characterization, true
+	}
+	return nil, false
 }

@@ -140,7 +140,7 @@ type RuntimeSmokeCanvas struct {
 // of generation; if the parent bundle's SourceHash drifts, the spec
 // is stale (the static_check stale-spec rule continues to read this).
 //
-// Contract (2026-05-22, Step 1 of contract landing): structured
+// Contract (2026-05-25, Step 1 of contract landing): structured
 // clause-level view of the spec. Description remains as the prose
 // summary; Contract is the testable decomposition. Empty for legacy
 // bundles — readers must tolerate nil. Populated by typecalc_describe
@@ -182,22 +182,43 @@ type SpecSection struct {
 // Optional marks clauses that don't *require* coverage to pass the
 // gate (e.g. an "out-of-scope" example listed for context). Default
 // false.
+//
+// Detail (Step 5 single-source refactor, 2026-05-25): lossless audit
+// payload for clauses that carry rich structured data — primarily
+// characterization clauses where the full CharResult / equiv-oracle
+// battery + probe trace lives here. Opaque to the gate (which reads
+// only ID/Kind/Body/Source/Optional); kept so audits can reconstruct
+// the agent's evidence path WITHOUT re-running characterize.
+// Empty for the typical example/invariant clause whose body is the
+// entire data.
 type ContractClause struct {
-	ID       string `json:"id"`
-	Kind     string `json:"kind"`
-	Body     string `json:"body"`
-	Source   string `json:"source,omitempty"`
-	Optional bool   `json:"optional,omitempty"`
+	ID       string          `json:"id"`
+	Kind     string          `json:"kind"`
+	Body     string          `json:"body"`
+	Source   string          `json:"source,omitempty"`
+	Optional bool            `json:"optional,omitempty"`
+	Detail   json.RawMessage `json:"detail,omitempty"`
 }
 
 // TestsSection records the spec-synthesized test cases (and/or raw
 // test code for languages without a harness).
+//
+// ContractHash (2026-05-25 audit B2): hash of spec.Contract at synth
+// time. Synth cache check must match BOTH SpecHash AND ContractHash;
+// a re-describe with same impl but new clauses bumps ContractHash and
+// busts the cache. Empty for legacy bundles (no Contract → empty hash
+// → matches empty Contract on cache check).
+//
+// ContractRefs (2026-05-25): testCode-mode coverage declaration —
+// see TestsEvidence.ContractRefs for the full rationale.
 type TestsSection struct {
-	Lang      string     `json:"lang"`
-	SpecHash  string     `json:"specHash"` // spec that drove the synthesis
-	Cases     []TestCase `json:"cases,omitempty"`
-	TestCode  string     `json:"testCode,omitempty"`
-	Timestamp time.Time  `json:"timestamp"`
+	Lang         string     `json:"lang"`
+	SpecHash     string     `json:"specHash"`     // spec that drove the synthesis
+	ContractHash string     `json:"contractHash,omitempty"`
+	Cases        []TestCase `json:"cases,omitempty"`
+	TestCode     string     `json:"testCode,omitempty"`
+	ContractRefs []string   `json:"contractRefs,omitempty"`
+	Timestamp    time.Time  `json:"timestamp"`
 }
 
 // CompileSection records the most recent typecalc_compile result.

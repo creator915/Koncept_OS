@@ -384,6 +384,7 @@ func TestLessonHeuristic_PatternCoverage(t *testing.T) {
 		"phase=gate | ✗ runtime-trace-missing":                        "runtime-trace-missing",
 		"phase=confirm_one | object Foo did not reach confirmed after sub-agent loop": "confirm-sub-agent-exhausted",
 		"phase=test | chain stage \"compile\" exceeded the per-step inactivity timeout": "step-timeout",
+		"phase=graph_declare | object \"ProvideClockConfig\" has 11 produces+mutates ports (cap=4) — monolithic": "object-too-many-ports",
 	}
 	for reason, wantKey := range cases {
 		t.Run(wantKey, func(t *testing.T) {
