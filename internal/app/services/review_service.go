@@ -238,6 +238,19 @@ func typecalcReviewTool() toolcall.Tool {
 			runtimeReport := review.RuntimeCheck(g, objectID)
 			runtimeIssues := runtimeReport.Issues()
 
+			// 1.6. Contract traceability (Step 4 of contract landing,
+			//      2026-05-22): every non-optional spec.Contract clause
+			//      cited by ≥1 case; every case's ContractRefs resolvable.
+			//      Skip-passes for legacy bundles (no Contract on disk),
+			//      reconstruction-mode (characterization path), and HTML
+			//      deliverables — so this is grandfather-safe.
+			contractReport := review.ContractTraceCheck(g, objectID)
+			contractIssues := contractReport.Issues()
+			// Surface alongside runtime issues so the accepted-evidence
+			// reader sees them in the same RuntimeIssues bucket; a
+			// dedicated bucket would force an evidence-schema migration.
+			runtimeIssues = append(runtimeIssues, contractIssues...)
+
 			// 2. Reasonableness — only attempted when static check passed,
 			//    since a stale spec or missing impl would corrupt the
 			//    judgement. If static failed, we still persist accepted
@@ -284,11 +297,14 @@ func typecalcReviewTool() toolcall.Tool {
 			// branch) was an instance of.
 			staticOK, staticMissing, staticFailed := core.AggregateOK(staticReport, review.StaticRuleCodes)
 			runtimeOK, runtimeMissing, runtimeFailed := core.AggregateOK(runtimeReport, review.RuntimeRuleCodes)
-			cleanRun := staticOK && runtimeOK
+			contractOK, contractMissing, contractFailed := core.AggregateOK(contractReport, review.ContractTraceRuleCodes)
+			cleanRun := staticOK && runtimeOK && contractOK
 			_ = staticMissing
 			_ = staticFailed
 			_ = runtimeMissing
 			_ = runtimeFailed
+			_ = contractMissing
+			_ = contractFailed
 			verdict, err = review.ReviewReasonableness(ctx, review.ReviewInputs{
 				ObjectID:    objectID,
 				Intent:      obj.Intent,
