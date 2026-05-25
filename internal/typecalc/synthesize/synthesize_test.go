@@ -202,6 +202,71 @@ func TestHashContract_StableUnderReorder(t *testing.T) {
 	}
 }
 
+// TestSynthesizeWithInvoker_DropsCharacterizationFromPrompt (2026-05-25,
+// PB-30 batch 0522 v4 root-cause fix) — characterization clauses MUST
+// NOT appear in synth's rendered Contract section. They're audit data
+// (equiv_oracle's lock evidence), not testable contract. PB tasks
+// death-looped because LLM saw char clauses and returned
+// CANNOT_SYNTHESIZE 13-20 times trying to cover them.
+func TestSynthesizeWithInvoker_DropsCharacterizationFromPrompt(t *testing.T) {
+	captured := ""
+	_, _ = SynthesizeWithInvoker(context.Background(),
+		SynthesizeInputs{
+			ObjectID: "Adder",
+			Lang:     "Go",
+			Contract: []core.ContractClause{
+				{ID: "c1", Kind: "example", Body: "Add(2,3)=5"},
+				{ID: "c2", Kind: "invariant", Body: "commutative"},
+				{ID: "char-equiv-Adder", Kind: "characterization", Body: "impl matches reference on 35 inputs"},
+			},
+		},
+		func(ctx context.Context, prompt string) (string, error) {
+			captured = prompt
+			return `{"objectId":"Adder","cases":[{"name":"a","call":"Add()","contractRefs":["c1"]}]}`, nil
+		})
+	if !strings.Contains(captured, "## Contract clauses") {
+		t.Fatal("contract section should still render for example/invariant clauses")
+	}
+	if !strings.Contains(captured, "**c1**") || !strings.Contains(captured, "**c2**") {
+		t.Errorf("testable clauses (example/invariant) must remain")
+	}
+	if strings.Contains(captured, "char-equiv-Adder") {
+		t.Errorf("characterization clause MUST be filtered out of synth's view (audit data, not test source); got prompt:\n%s", captured)
+	}
+}
+
+// TestFilterTestableClauses_NoOpWhenNoChar — common path: greenfield
+// objects with no characterization clauses get the slice back unchanged
+// (no unnecessary copy).
+func TestFilterTestableClauses_NoOpWhenNoChar(t *testing.T) {
+	in := []core.ContractClause{
+		{ID: "c1", Kind: "example"},
+		{ID: "c2", Kind: "invariant"},
+	}
+	out := filterTestableClauses(in)
+	if len(out) != 2 {
+		t.Errorf("no-char input should pass through unchanged, got len=%d", len(out))
+	}
+}
+
+// TestFilterTestableClauses_DropsOnlyChar — exactly the char clauses
+// disappear; example/invariant survive in original order.
+func TestFilterTestableClauses_DropsOnlyChar(t *testing.T) {
+	in := []core.ContractClause{
+		{ID: "c1", Kind: "example"},
+		{ID: "char-1", Kind: "characterization"},
+		{ID: "c2", Kind: "invariant"},
+		{ID: "char-2", Kind: "characterization"},
+	}
+	out := filterTestableClauses(in)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 clauses post-filter, got %d", len(out))
+	}
+	if out[0].ID != "c1" || out[1].ID != "c2" {
+		t.Errorf("order should be preserved: %+v", out)
+	}
+}
+
 // TestSynthesizeWithInvoker_RendersContractWhenPresent (Step 3) — when
 // SynthesizeInputs.Contract is non-empty, the prompt must include a
 // "## Contract clauses" section listing each clause's ID/kind/body so

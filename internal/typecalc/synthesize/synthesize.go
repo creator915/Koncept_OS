@@ -356,6 +356,38 @@ func fixModeOn(in SynthesizeInputs) bool {
 	return strings.TrimSpace(in.PreviousTestCode) != "" && strings.TrimSpace(in.PreviousFailure) != ""
 }
 
+// filterTestableClauses drops Kind="characterization" clauses from
+// the slice. Characterization clauses carry probe-derived lock
+// evidence (via WriteCharacterization's mirror); they're audit-only,
+// verified by equiv_oracle's behavioral-equivalence battery, NOT by
+// the testCode harness. Synth was previously seeing them and looping
+// on CANNOT_SYNTHESIZE; the contract-traceability gate already skips
+// these objects via reconstruction-mode (hasCharacterizationClause)
+// so dropping them from synth doesn't break coverage checks.
+//
+// Returns the input slice unchanged if no characterization clauses
+// exist (common case for greenfield objects).
+func filterTestableClauses(clauses []core.ContractClause) []core.ContractClause {
+	hasChar := false
+	for _, c := range clauses {
+		if c.Kind == "characterization" {
+			hasChar = true
+			break
+		}
+	}
+	if !hasChar {
+		return clauses
+	}
+	out := make([]core.ContractClause, 0, len(clauses))
+	for _, c := range clauses {
+		if c.Kind == "characterization" {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 func buildSynthesizePrompt(in SynthesizeInputs) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Object id: %s\nLanguage: %s\n\n", in.ObjectID, nonEmpty(in.Lang, "(unknown)"))
@@ -367,9 +399,24 @@ func buildSynthesizePrompt(in SynthesizeInputs) string {
 	// test source. Description stays for grounding/context but cases must
 	// cite clause IDs via ContractRefs. Empty Contract → legacy path: cases
 	// don't need ContractRefs and the prompt's coverage demand is dropped.
-	if len(in.Contract) > 0 {
+	//
+	// Filter (2026-05-25, PB-30 batch 0522 v4 root-cause): characterization
+	// clauses are EXCLUDED from synth's view. They're audit data carrying
+	// equiv_oracle lock evidence (probe-derived observations); the
+	// contract-traceability gate already routes objects with char clauses
+	// through the reconstruction-mode skip path (hasCharacterizationClause).
+	// Showing them to synth caused 5/5 PB tasks to death-loop: LLM saw a
+	// "characterization" clause whose body referenced probe-derived data
+	// it had no access to, returned CANNOT_SYNTHESIZE, agent retried
+	// 13-20 times per object burning the entire handler_max_iter budget,
+	// never reaching the remaining objects. The Step 5 elegant single-
+	// source refactor unintentionally exposed char clauses to synth via
+	// the mirror; this filter restores the pre-refactor synth view
+	// (test-time clauses only) while keeping the gate's audit view intact.
+	testableClauses := filterTestableClauses(in.Contract)
+	if len(testableClauses) > 0 {
 		b.WriteString("## Contract clauses (AUTHORITATIVE test source — cite IDs via contractRefs in every case)\n\n")
-		for _, c := range in.Contract {
+		for _, c := range testableClauses {
 			optMark := ""
 			if c.Optional {
 				optMark = " [optional]"
