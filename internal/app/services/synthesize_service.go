@@ -154,6 +154,7 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 				Lang:             lang,
 				Intent:           obj.Intent,
 				Description:      spec.Description,
+				Contract:         spec.Contract,
 				Signature:        string(defBody),
 				ImplSymbol:       obj.ImplSymbol,
 				Consumes:         obj.Consumes,

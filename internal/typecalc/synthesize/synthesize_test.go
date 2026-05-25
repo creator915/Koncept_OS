@@ -113,6 +113,90 @@ func TestSynthesizeWithInvoker_PassesThroughCannotSynthesize(t *testing.T) {
 	}
 }
 
+// TestSynthesizeWithInvoker_RendersContractWhenPresent (Step 3) — when
+// SynthesizeInputs.Contract is non-empty, the prompt must include a
+// "## Contract clauses" section listing each clause's ID/kind/body so
+// the LLM can cite them via contractRefs. The optional flag must be
+// surfaced too — the gate uses it to know which clauses can be skipped.
+func TestSynthesizeWithInvoker_RendersContractWhenPresent(t *testing.T) {
+	captured := ""
+	_, _ = SynthesizeWithInvoker(context.Background(),
+		SynthesizeInputs{
+			ObjectID: "Adder",
+			Lang:     "Go",
+			Contract: []core.ContractClause{
+				{ID: "c1", Kind: "example", Body: "Add(2,3)=5", Source: "spec:S§1"},
+				{ID: "c2", Kind: "invariant", Body: "commutative", Source: "intent", Optional: true},
+			},
+		},
+		func(ctx context.Context, prompt string) (string, error) {
+			captured = prompt
+			return `{"objectId":"Adder","cases":[{"name":"a","call":"Add()","contractRefs":["c1"]}]}`, nil
+		})
+	if !strings.Contains(captured, "## Contract clauses") {
+		t.Fatalf("prompt missing contract section:\n%s", captured)
+	}
+	if !strings.Contains(captured, "**c1**") || !strings.Contains(captured, "**c2**") {
+		t.Errorf("prompt should bold-format clause IDs")
+	}
+	if !strings.Contains(captured, "[optional]") {
+		t.Errorf("optional flag must surface so gate downgrades correctly")
+	}
+	if !strings.Contains(captured, "contractRefs") {
+		t.Errorf("prompt should instruct LLM about contractRefs requirement")
+	}
+}
+
+// TestSynthesizeWithInvoker_NoContractSectionWhenEmpty — legacy path:
+// empty Contract means no contract section in the prompt. Critical
+// for backward compat with bundles whose describe ran pre-Step-2.
+func TestSynthesizeWithInvoker_NoContractSectionWhenEmpty(t *testing.T) {
+	captured := ""
+	_, _ = SynthesizeWithInvoker(context.Background(),
+		SynthesizeInputs{ObjectID: "X", Lang: "Go", Description: "x is x"},
+		func(ctx context.Context, prompt string) (string, error) {
+			captured = prompt
+			return `{"objectId":"X","cases":[{"name":"a","call":"X()"}]}`, nil
+		})
+	if strings.Contains(captured, "## Contract clauses") {
+		t.Fatalf("legacy path should not render contract section:\n%s", captured)
+	}
+}
+
+// TestTestCase_ContractRefsRoundTrip — the new ContractRefs field must
+// survive JSON round-trip via TestsEvidence write/read so the gate can
+// read what synth wrote.
+func TestTestCase_ContractRefsRoundTrip(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+	rec := &core.TestsEvidence{
+		ObjectID: "Adder",
+		Lang:     "JavaScript",
+		SpecHash: core.HashSource("v1"),
+		Cases: []core.TestCase{
+			{Name: "happy", Call: "Adder(2,3)", ContractRefs: []string{"c1", "c2"}},
+			{Name: "edge", Call: "Adder(0,0)", ContractRefs: []string{"c1"}},
+			{Name: "legacy_no_refs", Call: "Adder(1,1)"}, // empty refs allowed in struct
+		},
+	}
+	if err := core.WriteTests(rec); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	back, ok := core.ReadTests("Adder")
+	if !ok {
+		t.Fatal("read missed")
+	}
+	if len(back.Cases) != 3 {
+		t.Fatalf("case count: %d", len(back.Cases))
+	}
+	if len(back.Cases[0].ContractRefs) != 2 || back.Cases[0].ContractRefs[1] != "c2" {
+		t.Errorf("case[0] refs: %+v", back.Cases[0].ContractRefs)
+	}
+	if len(back.Cases[2].ContractRefs) != 0 {
+		t.Errorf("case[2] should have nil/empty refs, got %+v", back.Cases[2].ContractRefs)
+	}
+}
+
 // TestSynthesizeWithInvoker_FixModeRendersPriorCodeAndFailure — when
 // PreviousTestCode + PreviousFailure are set, the prompt must include a
 // FIX MODE section carrying both verbatim so the LLM can diff in place.

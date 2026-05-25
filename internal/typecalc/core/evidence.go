@@ -211,11 +211,22 @@ type TestsEvidence struct {
 }
 
 // TestCase is one entry in a schema-driven test suite.
+//
+// ContractRefs (2026-05-22, Step 3 of contract landing): the IDs of
+// SpecEvidence.Contract clauses this case verifies. Required for the
+// Step 4 [contract-traceability] gate: empty or unknown-ID refs fail
+// confirm. One case may cite multiple clauses (a happy-path test
+// often covers both an example and an invariant).
+//
+// Empty for legacy tests written before Step 3 — Step 4 grandfathers
+// those via the SpecHash check (no Contract on disk → traceability
+// rule skipped).
 type TestCase struct {
-	Name   string        `json:"name"`
-	Setup  []SetupOp     `json:"setup,omitempty"`
-	Call   string        `json:"call"`
-	Expect []Expectation `json:"expect,omitempty"`
+	Name         string        `json:"name"`
+	Setup        []SetupOp     `json:"setup,omitempty"`
+	Call         string        `json:"call"`
+	Expect       []Expectation `json:"expect,omitempty"`
+	ContractRefs []string      `json:"contractRefs,omitempty"`
 }
 
 // SetupOp is a pre-call port assignment.

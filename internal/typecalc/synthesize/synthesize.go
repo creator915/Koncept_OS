@@ -50,6 +50,20 @@ type SynthesizeInputs struct {
 	// of inventing it. Each entry is the raw text of one example.
 	Examples []string
 
+	// Contract (2026-05-22, Step 3 of contract landing): the structured
+	// clauses produced by typecalc_describe. When non-empty, the prompt
+	// renders these as the PRIMARY source for case generation and
+	// requires every emitted case to carry ContractRefs citing clause
+	// IDs from this list. The Step 4 gate then enforces bidirectional
+	// coverage (every clause covered by ≥1 case; every case cites only
+	// known clauses).
+	//
+	// Empty/nil → legacy mode: prompt falls back to using Description
+	// alone, no ContractRefs requirement. This preserves backward
+	// compatibility with bundles written before Step 2 (no Contract on
+	// disk yet) and with the legacy adapter in legacy/characterize.
+	Contract []core.ContractClause
+
 	// PreviousTestCode + PreviousFailure (2026-05-22, PB-30 batch 0522
 	// follow-up): when non-empty, switch to "fix mode" — the LLM is told
 	// to MODIFY the prior testCode minimally to address PreviousFailure
@@ -201,6 +215,7 @@ Rules:
 5. The harness automatically: snapshots input ports before each call, snapshots output ports after, appends to .kcpos/typecalc-runtime/<id>.json BEFORE running assertions (so traces are captured even on assertion failure), and runs the assertions. You do NOT need to write any of that.
 6. If the spec is too underspecified to derive meaningful cases, return the literal text CANNOT_SYNTHESIZE on a single line followed by a one-sentence reason. Do not return JSON in that case.
 6a. **Output budget — HARD CAP** (2026-05-22, PB-30 batch 0522 root-cause): cases ≤ 15 AND total testCode body ≤ 8 KB. If the object's declared ports + invariants genuinely need more, the object is too coarse — return ` + "`CANNOT_SYNTHESIZE: object too coarse, split into smaller graph objects (current contract needs >15 cases / >8KB to cover)`" + `. The H_graph_declare granularity gate also enforces ≤4 produces+mutates per object; if you're hitting this cap, you've likely got an outer-graph mismatch the agent should fix by splitting rather than by piling cases in here.
+6b. **Contract traceability — REQUIRED when the user prompt includes a ` + "`## Contract clauses`" + ` section** (Step 3 of contract landing, 2026-05-22): every case MUST include ` + "`\"contractRefs\":[\"c1\",...]`" + ` naming the clause IDs it verifies. Every non-optional clause MUST be cited by ≥1 case. Cases without ` + "`contractRefs`" + ` will be rejected by the Step 4 gate, blocking confirm_object. If a clause cannot be tested in the current shape (e.g. characterization clause needs a runtime trace that isn't available), return ` + "`CANNOT_SYNTHESIZE: cannot cover clause c<N> — <reason>`" + ` instead of emitting cases that ignore it. When the user prompt has no contract section (legacy path), the ContractRefs field is optional.
 
 **v9.0.2 assertion-style rules (CRITICAL — these prevent brittle tests):**
 
@@ -334,7 +349,22 @@ func buildSynthesizePrompt(in SynthesizeInputs) string {
 		fmt.Fprintf(&b, "ImplSymbol: %s  (use this for the function/import name in generated code — it differs from ObjectID)\n\n", in.ImplSymbol)
 	}
 	fmt.Fprintf(&b, "## Intent (immutable user contract)\n%s\n\n", nonEmpty(in.Intent, "(empty)"))
-	fmt.Fprintf(&b, "## Description (post-hoc behaviour catalogue)\n%s\n\n", nonEmpty(in.Description, "(none)"))
+	// Contract clauses (Step 3): when present, these are the AUTHORITATIVE
+	// test source. Description stays for grounding/context but cases must
+	// cite clause IDs via ContractRefs. Empty Contract → legacy path: cases
+	// don't need ContractRefs and the prompt's coverage demand is dropped.
+	if len(in.Contract) > 0 {
+		b.WriteString("## Contract clauses (AUTHORITATIVE test source — cite IDs via contractRefs in every case)\n\n")
+		for _, c := range in.Contract {
+			optMark := ""
+			if c.Optional {
+				optMark = " [optional]"
+			}
+			fmt.Fprintf(&b, "- **%s** (%s%s, source=%s): %s\n", c.ID, c.Kind, optMark, nonEmpty(c.Source, "?"), c.Body)
+		}
+		b.WriteString("\nEvery test case you emit MUST include a `\"contractRefs\":[\"<id>\",...]` field listing the clause IDs it covers. Every NON-OPTIONAL clause above MUST be cited by at least one case (the Step 4 gate checks both directions). If you cannot devise a test for a clause, return CANNOT_SYNTHESIZE with the uncoverable clause's ID and reason — DO NOT silently skip it. Multiple clauses may share one case (a happy-path case often satisfies one example + one invariant).\n\n")
+	}
+	fmt.Fprintf(&b, "## Description (post-hoc behaviour catalogue — supporting context, not test source)\n%s\n\n", nonEmpty(in.Description, "(none)"))
 	if in.Signature != "" {
 		fmt.Fprintf(&b, "## Signature (def file)\n```\n%s\n```\n\n", clip(in.Signature, 4000))
 	}
