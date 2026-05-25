@@ -180,6 +180,72 @@ func TestFixModeOn_RequiresBothFields(t *testing.T) {
 	}
 }
 
+// TestEvidenceRoundTrip_SpecContract (Step 1 of contract landing) —
+// the new Contract field on SpecEvidence must round-trip through
+// WriteSpec → ReadSpec without loss, including all three clause kinds
+// and the optional flag. Legacy specs (no Contract) must still load.
+func TestEvidenceRoundTrip_SpecContract(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+
+	rec := &core.SpecEvidence{
+		ObjectID:    "Adder",
+		Description: "Adds two ints, panics on overflow.",
+		SourceHash:  core.HashSource("src v1"),
+		Contract: []core.ContractClause{
+			{ID: "c1", Kind: "example", Body: "Add(2,3) = 5", Source: "spec:S§1"},
+			{ID: "c2", Kind: "invariant", Body: "Add(a,b) == Add(b,a) for all a,b in range", Source: "spec:S§2"},
+			{ID: "c3", Kind: "characterization", Body: "Add(MAX_INT,1) panics with 'overflow'", Source: "char:probe_5"},
+			{ID: "c4", Kind: "example", Body: "Add(-1,1) = 0", Source: "spec:S§1", Optional: true},
+		},
+	}
+	if err := core.WriteSpec(rec); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	back, ok := core.ReadSpec("Adder")
+	if !ok {
+		t.Fatal("read missed")
+	}
+	if len(back.Contract) != 4 {
+		t.Fatalf("contract length: got %d want 4: %+v", len(back.Contract), back.Contract)
+	}
+	for i, want := range rec.Contract {
+		got := back.Contract[i]
+		if got.ID != want.ID || got.Kind != want.Kind || got.Body != want.Body ||
+			got.Source != want.Source || got.Optional != want.Optional {
+			t.Errorf("clause[%d] mismatch:\n got=%+v\nwant=%+v", i, got, want)
+		}
+	}
+}
+
+// TestEvidenceRoundTrip_SpecLegacyNoContract — bundles written before
+// the Contract field existed (or by tools that don't populate it) must
+// still load cleanly with Contract == nil. Guards against accidental
+// `len(nil)` panics or unmarshal errors when reading old data.
+func TestEvidenceRoundTrip_SpecLegacyNoContract(t *testing.T) {
+	cleanup := useTempEvidenceDir(t)
+	defer cleanup()
+
+	rec := &core.SpecEvidence{
+		ObjectID:    "Legacy",
+		Description: "no contract here",
+		SourceHash:  core.HashSource("v1"),
+	}
+	if err := core.WriteSpec(rec); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	back, ok := core.ReadSpec("Legacy")
+	if !ok {
+		t.Fatal("read missed")
+	}
+	if back.Contract != nil {
+		t.Errorf("expected nil Contract for legacy, got %+v", back.Contract)
+	}
+	if back.Description != "no contract here" {
+		t.Errorf("Description corrupted: %q", back.Description)
+	}
+}
+
 func TestEvidenceRoundTrip_TestsEvidence(t *testing.T) {
 	cleanup := useTempEvidenceDir(t)
 	defer cleanup()

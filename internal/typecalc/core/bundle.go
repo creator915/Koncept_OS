@@ -139,10 +139,55 @@ type RuntimeSmokeCanvas struct {
 // typecalc_describe. SpecHash binds it to the impl source at the time
 // of generation; if the parent bundle's SourceHash drifts, the spec
 // is stale (the static_check stale-spec rule continues to read this).
+//
+// Contract (2026-05-22, Step 1 of contract landing): structured
+// clause-level view of the spec. Description remains as the prose
+// summary; Contract is the testable decomposition. Empty for legacy
+// bundles — readers must tolerate nil. Populated by typecalc_describe
+// in Step 2; consumed by typecalc_synthesize_tests + the
+// contract-traceability gate in Steps 3+4.
 type SpecSection struct {
-	Description string    `json:"description"`
-	SpecHash    string    `json:"specHash,omitempty"` // = parent SourceHash at spec time
-	Timestamp   time.Time `json:"timestamp"`
+	Description string           `json:"description"`
+	Contract    []ContractClause `json:"contract,omitempty"`
+	SpecHash    string           `json:"specHash,omitempty"` // = parent SourceHash at spec time
+	Timestamp   time.Time        `json:"timestamp"`
+}
+
+// ContractClause is one atomic, testable expectation derived from the
+// spec. Three kinds, mutually exclusive:
+//
+//   - "example": a concrete (input, output) pair lifted from explicit
+//     requirements (e.g. README "calling fib(7) returns 13"). Generates
+//     a deterministic test case.
+//   - "invariant": a structural property that's testable WITHOUT
+//     knowing the full answer (idempotence, sort-after-sort = sort,
+//     parse→print→parse round-trip, money conservation, valid state
+//     transition). Generates property-style tests.
+//   - "characterization": a behavior observed via probe/run_local and
+//     LOCKED as expected. Used in both brownfield (lock legacy) and
+//     greenfield (lock the design's first accepted behavior). Each
+//     characterization clause carries the observation's source so
+//     replay/audit can re-derive it.
+//
+// ID is the trace anchor — TestCase.ContractRefs cite IDs from this
+// list; the confirm gate refuses any case whose ContractRefs is empty
+// or references an unknown ID (Step 4).
+//
+// Source is "where this clause came from": "spec:S§N" for requirement
+// excerpts, "char:probe_<n>" for characterization, "user:line<n>" for
+// human-authored, "equiv:reference" for cross-impl equivalence clauses
+// (Step 5). Free-form string; intended for human + tool inspection,
+// not parsed by the gate.
+//
+// Optional marks clauses that don't *require* coverage to pass the
+// gate (e.g. an "out-of-scope" example listed for context). Default
+// false.
+type ContractClause struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Body     string `json:"body"`
+	Source   string `json:"source,omitempty"`
+	Optional bool   `json:"optional,omitempty"`
 }
 
 // TestsSection records the spec-synthesized test cases (and/or raw

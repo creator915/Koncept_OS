@@ -162,12 +162,13 @@ func isHTMLPath(p string) bool {
 // SymbolHash (v9.0.2): per-object fragment hash for single-file-impl
 // projects — see EvidenceBundle.SymbolHash. Optional.
 type SpecEvidence struct {
-	ObjectID    string    `json:"objectId"`
-	Kind        string    `json:"kind"`
-	Description string    `json:"description"`
-	SourceHash  string    `json:"sourceHash"`
-	SymbolHash  string    `json:"symbolHash,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
+	ObjectID    string           `json:"objectId"`
+	Kind        string           `json:"kind"`
+	Description string           `json:"description"`
+	Contract    []ContractClause `json:"contract,omitempty"`
+	SourceHash  string           `json:"sourceHash"`
+	SymbolHash  string           `json:"symbolHash,omitempty"`
+	Timestamp   time.Time        `json:"timestamp"`
 }
 
 // StaticIssue is one finding from the mechanical (non-LLM) checker.
@@ -283,6 +284,7 @@ func WriteSpec(rec *SpecEvidence) error {
 	b := LoadOrInitBundle(rec.ObjectID)
 	b.Spec = &SpecSection{
 		Description: rec.Description,
+		Contract:    rec.Contract,
 		SpecHash:    rec.SourceHash,
 		Timestamp:   rec.Timestamp,
 	}
@@ -306,6 +308,7 @@ func ReadSpec(objectID string) (*SpecEvidence, bool) {
 		ObjectID:    objectID,
 		Kind:        "spec",
 		Description: b.Spec.Description,
+		Contract:    b.Spec.Contract,
 		SourceHash:  b.Spec.SpecHash,
 		SymbolHash:  b.SymbolHash, // v9.0.2 — bundle-level field
 		Timestamp:   b.Spec.Timestamp,
