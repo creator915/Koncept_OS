@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/creator915/Koncept_OS/internal/infra/persistence"
 	"github.com/creator915/Koncept_OS/internal/router"
 	"github.com/creator915/Koncept_OS/internal/tools"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // Outer Handlers — see router/outerflow.go for the type-flow design.
@@ -293,9 +295,20 @@ func handleConfirmOne(deps *OuterDeps) func(ctx context.Context, in router.Typed
 
 		det2, _ := router.InferOuterStateDetail(deps.RootSessionID)
 		if confirmedSetEq(det2.ConfirmedObjectIDs, det.ConfirmedObjectIDs) {
-			return emitObstacle("confirm_one",
-				fmt.Sprintf("object %q did not reach confirmed after sub-agent loop", target),
-				"check .kcpos/typecalc/"+target+".json for the latest accepted section"), nil
+			// 中步 (2026-05-25): instead of going straight to terminal
+			// Obstacle, route through Outer.GraphRepair. H_repair_graph
+			// will inspect the failed object's contract clause shape
+			// against a heuristic library. A match (e.g. IO-boundary)
+			// runs a graph-mutation sub-agent loop and re-enters
+			// GraphDeclared with the fixed graph; no match passes
+			// through to Obstacle. The agent's view: "confirm failed
+			// because the GRAPH was wrong, not just the impl."
+			return router.MarshalPayload(router.OuterTypeGraphRepair, map[string]interface{}{
+				"rootSessionID": deps.RootSessionID,
+				"failedObject":  target,
+				"reason": fmt.Sprintf("object %q did not reach confirmed after sub-agent loop — check .kcpos/typecalc/%s.json for the latest accepted section",
+					target, target),
+			}), nil
 		}
 		if len(det2.RemainingObjectIDs) == 0 {
 			return router.MarshalPayload(router.OuterTypeAllConfirmed, map[string]string{
@@ -314,7 +327,7 @@ func handleConfirmOne(deps *OuterDeps) func(ctx context.Context, in router.Typed
 func H_confirm_one_from_declared(deps *OuterDeps) router.Handler {
 	return &router.HandlerFunc{
 		In:  router.OuterTypeGraphDeclared,
-		Out: []string{router.OuterTypeSomeConfirmed, router.OuterTypeAllConfirmed, router.OuterTypeObstacle},
+		Out: []string{router.OuterTypeSomeConfirmed, router.OuterTypeAllConfirmed, router.OuterTypeGraphRepair, router.OuterTypeObstacle},
 		Run: handleConfirmOne(deps),
 	}
 }
@@ -324,7 +337,7 @@ func H_confirm_one_from_declared(deps *OuterDeps) router.Handler {
 func H_confirm_one_loop(deps *OuterDeps) router.Handler {
 	return &router.HandlerFunc{
 		In:  router.OuterTypeSomeConfirmed,
-		Out: []string{router.OuterTypeSomeConfirmed, router.OuterTypeAllConfirmed, router.OuterTypeObstacle},
+		Out: []string{router.OuterTypeSomeConfirmed, router.OuterTypeAllConfirmed, router.OuterTypeGraphRepair, router.OuterTypeObstacle},
 		Run: handleConfirmOne(deps),
 	}
 }
@@ -575,6 +588,172 @@ func H_repair_object(deps *OuterDeps) router.Handler {
 			return router.MarshalPayload(router.OuterTypeSomeConfirmed, map[string]interface{}{
 				"rootSessionID":      deps.RootSessionID,
 				"remainingObjectIDs": det.RemainingObjectIDs,
+			}), nil
+		},
+	}
+}
+
+// H_repair_graph: Outer.GraphRepair → Outer.GraphDeclared | Outer.Obstacle
+//
+// 中步 graph auto-repair (2026-05-25): H_confirm_one's sub-agent loop
+// exhausts on object X when the inner chain can't drive X to
+// confirmed in handler_max_iter rounds. Before this handler existed,
+// that exhaustion went straight to terminal Outer.Obstacle and Phase 7
+// retry was the only recovery — but retries with the SAME graph keep
+// hitting the same wall (PB-30 batch 0522: 5/5 tasks did exactly this).
+//
+// H_repair_graph inserts a heuristic-driven repair attempt between
+// confirm-exhausted and Obstacle:
+//
+//   1. Read failed-object's spec.Contract clauses + signature.
+//   2. detectRepairProposal() pattern-matches against known bad shapes
+//      (currently just IO-boundary: 0 example + 0 invariant + ≥1
+//      characterization). No match → fall through to Obstacle (we have
+//      no actionable proposal, retry budget should give up).
+//   3. On match: run a sub-agent loop with GRAPH-ONLY tools, giving
+//      the structured proposal as the task. The sub-agent's job is to
+//      mutate K/graph.json to match the proposal (delete the bad
+//      object, declare pure-data replacements, etc.).
+//   4. Post-condition: graph must have changed meaningfully — the
+//      failed object should be gone OR transformed. If the agent
+//      didn't follow the proposal, emit Obstacle (Phase 7 retry will
+//      take it from here with a now-different graph state on attempt 2,
+//      hopefully avoiding the same wall).
+//   5. Emit GraphDeclared with the new declared object set; H_confirm_one
+//      re-enters and walks the mutated graph.
+//
+// Connection to contract Steps 1-5: the clause kind distribution
+// (example/invariant/characterization) IS the diagnostic signal —
+// before contract clauses existed there was no machine-readable way to
+// detect IO-boundary. This handler bills that data finally.
+func H_repair_graph(deps *OuterDeps) router.Handler {
+	return &router.HandlerFunc{
+		In:  router.OuterTypeGraphRepair,
+		Out: []string{router.OuterTypeGraphDeclared, router.OuterTypeObstacle},
+		Run: func(ctx context.Context, in router.TypedValue) (router.TypedValue, error) {
+			var payload struct {
+				FailedObject string `json:"failedObject"`
+				Reason       string `json:"reason"`
+			}
+			_ = json.Unmarshal(in.Content, &payload)
+			if payload.FailedObject == "" {
+				return emitObstacle("repair_graph",
+					"GraphRepair payload missing failedObject — no target to diagnose"), nil
+			}
+
+			// Read the object's spec for clause-kind analysis.
+			spec, ok := core.ReadSpec(payload.FailedObject)
+			if !ok || spec == nil {
+				// No spec means describe never ran on this object — the
+				// repair heuristic needs clause kinds to fire. Hand off
+				// to Obstacle; retry budget may have a different graph
+				// shape on the next attempt where describe DID run.
+				return emitObstacle("repair_graph", fmt.Sprintf(
+					"object %q has no spec evidence — heuristic detector needs contract clauses to fire; "+
+						"object likely failed before describe ran. Generic confirm-exhaustion: %s",
+					payload.FailedObject, payload.Reason)), nil
+			}
+
+			// Read def signature for the IO hint detector.
+			signature := ""
+			if g, gerr := persistence.LoadGraph(persistence.GraphDefaultPath); gerr == nil && g != nil {
+				if obj, ok := g.Objects[payload.FailedObject]; ok && obj.Def != "" {
+					if body, ferr := os.ReadFile(obj.Def); ferr == nil {
+						signature = string(body)
+					}
+				}
+			}
+
+			proposal := detectRepairProposal(payload.FailedObject, spec.Contract, signature)
+			if proposal == nil {
+				// No heuristic matched — the bad shape isn't one we
+				// know how to fix automatically. Fall through to
+				// Obstacle; big-step's LLM proposer would handle the
+				// long tail here.
+				return emitObstacle("repair_graph", fmt.Sprintf(
+					"no heuristic match for object %q's failure shape (clauses=%d, reason=%s) — "+
+						"no actionable graph repair proposal available; consider manual graph_split_object or "+
+						"different decomposition. Original confirm failure: %s",
+					payload.FailedObject, len(spec.Contract), payload.Reason, payload.Reason)), nil
+			}
+
+			// Snapshot graph object set before repair for post-condition.
+			beforeIDs := map[string]bool{}
+			if g, gerr := persistence.LoadGraph(persistence.GraphDefaultPath); gerr == nil && g != nil {
+				for id := range g.Objects {
+					beforeIDs[id] = true
+				}
+			}
+
+			// Build a focused repair task. The sub-agent gets ONLY
+			// graph_* + read tools (no write_file, no describe, no
+			// synth, no compile) — the goal is purely structural.
+			sys := fmt.Sprintf(
+				"You are the graph-repair sub-agent. The confirm chain exhausted on object %q because of "+
+					"its shape (not its impl). Your ONLY job is to mutate K/graph.json so the bad shape goes "+
+					"away. Steps:\n"+
+					"  (1) Call graph_show on %q and graph_validate to see the current state.\n"+
+					"  (2) Apply the structured proposal below — use graph_delete_object / graph_create_object / "+
+					"graph_link_consume / graph_link_produce / graph_merge_object as needed.\n"+
+					"  (3) Call graph_preflight to confirm the mutated graph is structurally sound.\n"+
+					"  (4) Output `DONE` with no further tool calls.\n\n"+
+					"DO NOT call typecalc_*, compile, run_local, characterize, or write_file. The next pass of "+
+					"the outer chain will re-do describe/synth/test on the new graph shape.",
+				payload.FailedObject, payload.FailedObject)
+
+			task := fmt.Sprintf(
+				"## Repair proposal (heuristic: %s)\n\n### Diagnosis\n%s\n\n### Action\n%s\n\n"+
+					"### Suggested graph mutations\n- %s\n\n### Post-condition\n%s\n\n"+
+					"Apply this proposal to K/graph.json now.",
+				proposal.Kind, proposal.Diagnosis, proposal.Action,
+				strings.Join(proposal.GraphMutations, "\n- "), proposal.ExpectedShape)
+
+			_ = deps.runScopedLLM(ctx, sys, task, []string{
+				"graph_show", "graph_validate", "graph_render", "graph_preflight",
+				"graph_create_attribute", "graph_create_object",
+				"graph_merge_object", "graph_merge_attribute",
+				"graph_delete_object", "graph_delete_attribute",
+				"graph_link_consume", "graph_link_produce", "graph_link_mutate",
+				"graph_autowire",
+				"read_file", "markdown_outline", "markdown_section", "list_dir", "glob",
+			})
+
+			// Post-condition: graph object set must have changed
+			// meaningfully (target removed OR new objects added). If
+			// the agent did nothing, fall through to Obstacle so we
+			// don't infinite-loop on no-op repairs.
+			afterIDs := map[string]bool{}
+			afterCount := 0
+			if g, gerr := persistence.LoadGraph(persistence.GraphDefaultPath); gerr == nil && g != nil {
+				for id := range g.Objects {
+					afterIDs[id] = true
+				}
+				afterCount = len(g.Objects)
+			}
+			targetGone := beforeIDs[payload.FailedObject] && !afterIDs[payload.FailedObject]
+			newObjects := 0
+			for id := range afterIDs {
+				if !beforeIDs[id] {
+					newObjects++
+				}
+			}
+			if !targetGone && newObjects == 0 {
+				return emitObstacle("repair_graph", fmt.Sprintf(
+					"sub-agent ran but graph unchanged — target %q still present and no new objects "+
+						"declared. Repair proposal (%s) was not applied; agent likely didn't follow the "+
+						"action. Original failure: %s",
+					payload.FailedObject, proposal.Kind, payload.Reason)), nil
+				}
+			if afterCount == 0 {
+				return emitObstacle("repair_graph",
+					"sub-agent left graph empty after repair — over-deletion"), nil
+			}
+			det, _ := router.InferOuterStateDetail(deps.RootSessionID)
+			return router.MarshalPayload(router.OuterTypeGraphDeclared, map[string]interface{}{
+				"rootSessionID":     deps.RootSessionID,
+				"declaredObjectIDs": det.DeclaredObjectIDs,
+				"repairedFrom":      payload.FailedObject,
+				"repairHeuristic":   proposal.Kind,
 			}), nil
 		},
 	}

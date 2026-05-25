@@ -73,6 +73,21 @@ const (
 	OuterTypeGateFailBuild      = "Outer.GateFailBuild"      // deliverable file missing / empty
 	OuterTypeGateFailAttrs      = "Outer.GateFailAttrs"      // attribute backfill: produced/mutated attrs still status=declared
 
+	// GraphRepair (2026-05-25): H_confirm_one's sub-agent loop
+	// exhausted on a specific object. Before falling through to
+	// terminal Obstacle, hand the failure to H_repair_graph which
+	// inspects the object's contract clause shape (kind distribution,
+	// signature) against a heuristic library. A match (e.g. IO-boundary:
+	// 0 example + 0 invariant + ≥1 characterization clauses) generates
+	// a structured graph mutation proposal and runs a graph-only
+	// sub-agent loop to apply it; the chain then re-enters
+	// GraphDeclared with the mutated graph and retries confirm. No
+	// heuristic match falls through to terminal Obstacle (the design
+	// gap big-step's LLM-driven proposer would fill).
+	//
+	// Content: { rootSessionID, failedObject, reason, fromState }.
+	OuterTypeGraphRepair = "Outer.GraphRepair"
+
 	// TERMINALS
 
 	// session_status root finished. Run is complete; deliverable
@@ -95,8 +110,9 @@ const (
 var OuterFlowRules = []FlowRule{
 	{OuterTypeTask, []string{OuterTypeArchitecture, OuterTypeObstacle}},
 	{OuterTypeArchitecture, []string{OuterTypeGraphDeclared, OuterTypeObstacle}},
-	{OuterTypeGraphDeclared, []string{OuterTypeSomeConfirmed, OuterTypeAllConfirmed, OuterTypeObstacle}},
-	{OuterTypeSomeConfirmed, []string{OuterTypeSomeConfirmed, OuterTypeAllConfirmed, OuterTypeObstacle}},
+	{OuterTypeGraphDeclared, []string{OuterTypeSomeConfirmed, OuterTypeAllConfirmed, OuterTypeGraphRepair, OuterTypeObstacle}},
+	{OuterTypeSomeConfirmed, []string{OuterTypeSomeConfirmed, OuterTypeAllConfirmed, OuterTypeGraphRepair, OuterTypeObstacle}},
+	{OuterTypeGraphRepair, []string{OuterTypeGraphDeclared, OuterTypeObstacle}},
 	{OuterTypeAllConfirmed, []string{OuterTypeAggregated, OuterTypeObstacle}},
 	{OuterTypeAggregated, []string{OuterTypeBuilt, OuterTypeCheckpointed, OuterTypeObstacle}},
 	{OuterTypeBuilt, []string{OuterTypeCheckpointed, OuterTypeGateFailBuild, OuterTypeObstacle}},

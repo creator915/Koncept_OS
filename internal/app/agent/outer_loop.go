@@ -94,6 +94,7 @@ func BuildOuterRouter(deps *OuterDeps) (*router.Router, error) {
 	r.Register(H_repair_checkpoint(deps))
 	r.Register(H_repair_build(deps))
 	r.Register(H_repair_attrs(deps))
+	r.Register(H_repair_graph(deps))
 
 	// Terminals.
 	r.RegisterTerminal(router.OuterTypeFinished)
