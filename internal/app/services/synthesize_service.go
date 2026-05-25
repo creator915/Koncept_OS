@@ -106,6 +106,15 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 				existing.SpecHash == spec.SourceHash &&
 				existing.ContractHash == specContractHash &&
 				len(existing.TestCode) > 0 {
+				// Audit 2026-05-25 #2: a prior CANNOT_SYNTHESIZE may
+				// have left LastSynthFailure non-empty. The cache says
+				// "tests are valid" — clear the stale failure mark so
+				// H_repair_graph doesn't read it later and misdiagnose.
+				if existing.LastSynthFailure != "" {
+					refreshed := *existing
+					refreshed.LastSynthFailure = ""
+					_ = core.WriteTests(&refreshed)
+				}
 				return fmt.Sprintf(
 					"synthesized tests for %s [cache hit, no LLM call] — kept %s\n\n--- test code (cached) ---\n%s",
 					objectID,
@@ -203,7 +212,13 @@ func typecalcSynthesizeTestsTool() toolcall.Tool {
 					ContractHash:     specContractHash,
 					LastSynthFailure: strings.TrimSpace(out.TestCode),
 				}
-				if prior != nil {
+				// Audit 2026-05-25 #3: preserve prior cases ONLY when
+				// the prior was written against the SAME contract.
+				// Otherwise the prior cases cite clause IDs that no
+				// longer exist in the current spec → contract-trace
+				// gate fails with unknown-ref errors that the agent
+				// can't fix (the refs are pinned in cached testCode).
+				if prior != nil && prior.ContractHash == specContractHash {
 					rec.Cases = prior.Cases
 					rec.TestCode = prior.TestCode
 					rec.ContractRefs = prior.ContractRefs

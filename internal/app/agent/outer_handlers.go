@@ -680,12 +680,33 @@ func H_repair_graph(deps *OuterDeps) router.Handler {
 
 			proposal := detectRepairProposal(payload.FailedObject, failureReason, signature)
 			if proposal == nil {
+				// Differentiate the two no-proposal cases so the agent
+				// + future readers know WHICH gap they're hitting:
+				//
+				//   (a) no LastSynthFailure on disk → confirm-exhausted
+				//       came from outside the synth path (compile errors,
+				//       test mismatches, characterize loops). We have no
+				//       LLM-stated structural diagnosis. Phase 7 retries
+				//       the original failure with lessons.
+				//   (b) LastSynthFailure exists but no detector matched
+				//       its text. Synth WAS the failure surface but our
+				//       reason vocabulary doesn't cover this phrasing.
+				//       If this fires often → reason categories need
+				//       extension (or big-step LLM proposer).
+				if strings.TrimSpace(failureReason) == "" {
+					return emitObstacle("repair_graph", fmt.Sprintf(
+						"no CANNOT_SYNTHESIZE recorded for object %q — confirm-exhausted likely came from "+
+							"impl issues (compile / test / characterize), not graph shape. No structural "+
+							"repair available; Phase 7 retry handles the original failure. Original confirm "+
+							"failure: %s",
+						payload.FailedObject, payload.Reason)), nil
+				}
 				return emitObstacle("repair_graph", fmt.Sprintf(
-					"no reason-based repair match for object %q — either synth never returned CANNOT_SYNTHESIZE "+
-						"(so we have no LLM-stated structural reason to act on) or the reason text didn't match "+
-						"any detector (io-boundary, over-coarse, lang-unsupported, contract-ambiguous). "+
-						"Last synth failure on disk: %q. Original confirm failure: %s",
-					payload.FailedObject, clipShort(failureReason, 200), payload.Reason)), nil
+					"object %q hit CANNOT_SYNTHESIZE but the LLM's reason text didn't match any repair "+
+						"detector (io-boundary / over-coarse / lang-unsupported / contract-ambiguous). The "+
+						"reason vocabulary may need extension — recurring misses on similar wording is a "+
+						"signal to add coverage OR escalate to LLM-driven proposal (big-step). LLM reason: %q",
+					payload.FailedObject, clipShort(failureReason, 300))), nil
 			}
 
 			// Snapshot graph object set before repair for post-condition.

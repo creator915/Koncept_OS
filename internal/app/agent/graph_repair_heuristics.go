@@ -97,17 +97,23 @@ func detectIOBoundaryFromReason(objID, reason, signature string) *RepairProposal
 	//   "needs the reference implementation ./probe to drive stdin"
 	//   "reads stdin as a side effect"
 	//   "no way to inject input"
+	// Tokens are intentionally unambiguous multi-char strings or
+	// punctuation-bearing patterns. Avoid short common-English
+	// substrings (audit 2026-05-25): "tty" matches "pretty"/"atty";
+	// "open(" matches "reopen("; "input(" matches "sinput("; "terminal"
+	// matches "terminally". Each removed token's semantic is already
+	// covered by a more specific neighbor (stdin/FILE*/io.Reader/etc.).
 	ioTokens := []string{
-		// IO surface mentions
-		"stdin", "stdout", "stderr", "tty", "terminal",
+		// IO surface mentions — unique multi-char identifiers only
+		"stdin", "stdout", "stderr",
 		"FILE*", "fopen", "fread", "fgets", "fwrite", "scanf",
 		"io.reader", "io.writer", "bufio", "os.stdin", "sys.stdin",
-		// File system surface
-		"reads files", "writes files", "filesystem", "directory walk",
+		// File system surface — phrases, not bare words
+		"reads files", "writes files", "directory walk",
 		"opens a file", "reads a file",
-		// Process / socket surface
-		"socket", "network", "tcp", "udp", "http server", "listens on",
-		// Explicit "needs probe" admissions
+		// Process / socket surface — full phrases
+		"http server", "listens on", "tcp socket", "udp socket",
+		// Explicit "needs probe" admissions (PB-30 observed wording)
 		"needs the reference", "needs ./probe", "needs probe",
 		"requires ./probe", "requires the reference",
 		"can only be exercised by", "must be observed via probe",
@@ -292,10 +298,13 @@ func clipShort(s string, maxLen int) string {
 func ioSignatureHint(sig string) string {
 	low := strings.ToLower(sig)
 	var hits []string
+	// Signature-side tokens — same audit applied: dropped open(/input(
+	// (substring false-positive in reopen()/sinput()) and bare
+	// "readline" (matches "preadline"). Kept the unique fully-qualified
+	// forms (sys.stdin, bufio.scanner, etc.).
 	tokens := []string{"stdin", "stdout", "stderr", "fopen", "fread", "fgets", "fwrite", "scanf", "printf",
 		"io.reader", "io.writer", "*os.file", "bufio.scanner", "ioutil.read", "os.open", "sys.stdin",
-		"open(", "input(", "readline",
-		"file*", "file *", "char**"}
+		"readline(", "file*", "file *", "char**"}
 	for _, t := range tokens {
 		if strings.Contains(low, t) {
 			hits = append(hits, t)

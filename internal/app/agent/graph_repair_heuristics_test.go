@@ -112,6 +112,28 @@ func TestReasonContainsAny_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestDetectIOBoundaryFromReason_NoSubstringFalsePositive (audit #1+#4
+// fix) — the previous token list had "tty"/"open("/"input(" which
+// matched "pretty"/"reopen("/"sinput(". A reason mentioning the task
+// name "tty-clock" or a benign "reopen file context" must NOT trigger
+// io-boundary.
+func TestDetectIOBoundaryFromReason_NoSubstringFalsePositive(t *testing.T) {
+	cases := []string{
+		"CANNOT_SYNTHESIZE: the tty-clock object's contract is too vague to derive tests",
+		"CANNOT_SYNTHESIZE: function reopens a connection that was closed in a previous call",
+		"CANNOT_SYNTHESIZE: validator handles pretty-printed JSON differently from minified",
+		"CANNOT_SYNTHESIZE: the terminally underspecified contract has no concrete examples",
+	}
+	for _, reason := range cases {
+		t.Run(reason[:min(40, len(reason))], func(t *testing.T) {
+			p := detectRepairProposal("X", reason, "")
+			if p != nil && p.Kind == "io-boundary" {
+				t.Errorf("substring false-positive on %q → fired io-boundary; reason should NOT trigger IO category", reason)
+			}
+		})
+	}
+}
+
 // TestIOSignatureHint_SecondaryOnly — signature hint augments the
 // diagnosis but never triggers detection on its own (a pure-data
 // function with no IO reason MUST NOT get classified as IO-boundary
