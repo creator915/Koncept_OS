@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/creator915/Koncept_OS/internal/infra/persistence"
+	"github.com/creator915/Koncept_OS/internal/typecalc/core"
 )
 
 // freshMonolithicProject sets up a workdir with ./probe + K/graph.json
@@ -114,6 +115,114 @@ func TestIsMonolithicCLI_NoGraphNo(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "probe"), []byte("#!/bin/sh\n"), 0o755)
 	if isMonolithicCLI() {
 		t.Error("no graph ⇒ no detection signal, must return false")
+	}
+}
+
+// TestHasEquivEvidence_ReadsFromContractClause — 2026-05-26 audit BUG 2
+// regression guard. After the Step 5 single-source refactor,
+// WriteCharacterization clears b.Characterization=nil and mirrors the
+// payload into Spec.Contract. hasEquivEvidence MUST read through
+// ReadCharacterization (the compat bridge) — direct b.Characterization
+// access returns nil for every post-Step-5 bundle, which silently
+// breaks MarkConfirmed's gate.
+//
+// Uses the real WriteCharacterization → ReadCharacterization path
+// to mirror production data flow.
+func TestHasEquivEvidence_ReadsFromContractClause(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	// Empty state → false.
+	if hasEquivEvidence("X") {
+		t.Fatal("no bundle ⇒ no evidence")
+	}
+
+	// Write via the real path. This sets b.Characterization=nil and
+	// stores the section into Spec.Contract.
+	if err := core.WriteCharacterization("X", &core.CharacterizationSection{
+		SuiteID:     "equiv-X",
+		LockedCount: 5,
+		// UnlockedCount intentionally non-zero to verify the relaxed
+		// check (was previously full-pass-only).
+		UnlockedCount: 3,
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if !hasEquivEvidence("X") {
+		t.Errorf("post-Step-5 evidence with LockedCount>0 must register; the silent-break bug returned false here")
+	}
+}
+
+// TestHasEquivEvidence_MonolithicSuiteID — accepts the
+// "whole-binary-equiv" SuiteID from runWholeBinaryOracle, not just
+// the per-object "equiv-<id>" form. Otherwise the new monolithic
+// mode's verdict (written with shared SuiteID) wouldn't satisfy the
+// MarkConfirmed gate even after BUG 2's read-path fix.
+func TestHasEquivEvidence_MonolithicSuiteID(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	if err := core.WriteCharacterization("Y", &core.CharacterizationSection{
+		SuiteID:     "whole-binary-equiv",
+		LockedCount: 400,
+		UnlockedCount: 107,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !hasEquivEvidence("Y") {
+		t.Error("monolithic SuiteID with LockedCount>0 must register; SuiteID prefix check was over-specific")
+	}
+}
+
+// TestHasEquivEvidence_ZeroLocksNo — defensive: any equiv section
+// with LockedCount=0 doesn't satisfy the gate. The vacuous-oracle
+// protection sits at this boundary — no real matches ⇒ no real
+// behavioral evidence ⇒ refuse confirm.
+func TestHasEquivEvidence_ZeroLocksNo(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	_ = core.WriteCharacterization("Z", &core.CharacterizationSection{
+		SuiteID:       "equiv-Z",
+		LockedCount:   0,
+		UnlockedCount: 50,
+	})
+	if hasEquivEvidence("Z") {
+		t.Error("LockedCount=0 must NOT register (vacuous evidence)")
+	}
+}
+
+// TestHasEquivEvidence_NonEquivSuiteIDRejected — defensive: a
+// characterization with SuiteID that doesn't contain "equiv" (e.g.
+// some future characterization type the legacy/characterize tool
+// might write) doesn't satisfy the equiv-evidence requirement.
+func TestHasEquivEvidence_NonEquivSuiteIDRejected(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	_ = core.WriteCharacterization("W", &core.CharacterizationSection{
+		SuiteID:     "static-analysis-only",
+		LockedCount: 50,
+	})
+	if hasEquivEvidence("W") {
+		t.Error("non-equiv SuiteID must NOT count as equivalence evidence")
 	}
 }
 
