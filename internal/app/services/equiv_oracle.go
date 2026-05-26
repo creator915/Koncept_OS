@@ -64,6 +64,27 @@ type wholeBinaryVerdict struct {
 	Timestamp                     time.Time
 }
 
+// hashExecutableForKey returns a stable identity for the agent's
+// ./executable. Used to key the whole-binary oracle cache so:
+//   - recompiles → new hash → cache miss → fresh battery run
+//   - Phase 7 rollback restores prior on-disk impls + binary → hash
+//     changes → cache miss
+//   - missing executable → "missing" sentinel string (matches across
+//     calls in the same missing-state; first oracle invocation will
+//     fail vacuousOracleCheck anyway so cache content doesn't matter)
+//
+// Returns the sha256 of the file content; on read error returns the
+// literal string "missing" so the cache key remains stable rather
+// than re-running an infinite stream of fresh batteries on a broken
+// workdir.
+func hashExecutableForKey() string {
+	body, err := os.ReadFile("executable")
+	if err != nil {
+		return "missing"
+	}
+	return core.HashSource(string(body))
+}
+
 // isMonolithicCLI reports whether the current graph + workdir shape
 // matches the "monolithic CLI binary" case: ./probe exists (recon
 // mode) AND the graph has ≥2 declared objects. The per-object
@@ -374,8 +395,22 @@ func runEquivalenceOracle(ctx context.Context, objectID string) (passed bool, su
 // is identical for any caller asking about any object in the same graph.
 func runWholeBinaryOracle(ctx context.Context, objectID string) (passed bool, summary string, err error) {
 	cwd, _ := os.Getwd()
+	// Cache key includes the agent's ./executable hash (2026-05-26 audit S2/S4/S5):
+	// previously the cache was keyed by cwd only, which made
+	//   - recompiles (agent fixes impl, re-runs compile) reuse stale verdicts
+	//     → vacuous-pass: kcpos says locked, binary has changed since the test
+	//   - Phase 7 rollbacks (which restore prior on-disk impls) reuse pre-rollback
+	//     verdicts → same shape, even worse since the binary literally vanished
+	//     and was rebuilt from older source
+	//   - whichever object's confirm fires first determined the recorded codeHash
+	//     (Go map iteration is random) → nondeterministic recorded state
+	// Binding the cache to the actual binary state collapses all three:
+	// any change to ./executable (recompile / rollback / external touch) produces
+	// a different hash → automatic cache miss → fresh verdict.
+	execHash := hashExecutableForKey()
+	key := cwd + ":" + execHash
 	wholeBinaryOracleMu.Lock()
-	cached := wholeBinaryOracleCache[cwd]
+	cached := wholeBinaryOracleCache[key]
 	wholeBinaryOracleMu.Unlock()
 
 	if cached == nil {
@@ -420,32 +455,30 @@ func runWholeBinaryOracle(ctx context.Context, objectID string) (passed bool, su
 			}
 			results = append(results, res)
 		}
-		// CodeHash + Lang resolved from the FIRST asking object (their
-		// values don't differ — single binary, single source set).
-		codeHash := ""
+		// CodeHash records the BINARY hash (2026-05-26 audit S1 fix), not any
+		// per-object source file. In monolithic-CLI mode the "thing being
+		// characterized" is the whole ./executable; recording one object's
+		// source hash there caused the gate's [method-use-rule] to compare
+		// across mismatched semantics (current per-object source hash vs.
+		// recorded other-object's source hash) and falsely fire "artifact
+		// changed since characterization" on objects whose source was never
+		// touched. Binary-hash is consistent for every per-object call within
+		// the same verdict (the binary IS the artifact being tested).
+		//
+		// Lang is still resolved from the asking object's compile section
+		// for diagnostic continuity; it doesn't affect gate decisions.
 		lang := ""
 		if b, hasB := core.ReadBundle(objectID); hasB && b.Compile != nil {
 			lang = b.Compile.Lang
 		}
-		if g, gerr := persistence.LoadGraph(persistence.GraphDefaultPath); gerr == nil && g != nil {
-			if obj, ok := g.Objects[objectID]; ok && obj.Impl != nil && *obj.Impl != "" {
-				implPath := *obj.Impl
-				if !filepath.IsAbs(implPath) {
-					implPath = filepath.Join(cwd, implPath)
-				}
-				if body, rerr := os.ReadFile(implPath); rerr == nil {
-					codeHash = core.HashSource(string(body))
-				}
-			}
-		}
 		cached = &wholeBinaryVerdict{
 			Matched: matched, Mismatched: mismatched, BatteryN: len(battery),
 			Unlocked: unlocked, Results: results,
-			CodeHash: codeHash, Lang: lang,
+			CodeHash: execHash, Lang: lang,
 			Timestamp: time.Now().UTC(),
 		}
 		wholeBinaryOracleMu.Lock()
-		wholeBinaryOracleCache[cwd] = cached
+		wholeBinaryOracleCache[key] = cached
 		wholeBinaryOracleMu.Unlock()
 	}
 

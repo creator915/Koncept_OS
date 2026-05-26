@@ -117,6 +117,72 @@ func TestIsMonolithicCLI_NoGraphNo(t *testing.T) {
 	}
 }
 
+// TestHashExecutableForKey_MissingReturnsStableSentinel — when
+// ./executable doesn't exist, the helper returns "missing" not an
+// error. This keeps the cache key stable across multiple oracle
+// invocations during a broken workdir state (vacuousOracleCheck will
+// reject the oracle anyway, but the cache entry itself shouldn't
+// thrash on each call).
+func TestHashExecutableForKey_MissingReturnsStableSentinel(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	got1 := hashExecutableForKey()
+	got2 := hashExecutableForKey()
+	if got1 != "missing" {
+		t.Errorf("missing executable should return 'missing' sentinel, got %q", got1)
+	}
+	if got1 != got2 {
+		t.Errorf("two calls on same missing state must return same key: %q vs %q", got1, got2)
+	}
+}
+
+// TestHashExecutableForKey_ContentChangeBustsKey — different binary
+// content yields different hash. This is the load-bearing property
+// for cache invalidation on recompile / Phase 7 rollback.
+func TestHashExecutableForKey_ContentChangeBustsKey(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	_ = os.WriteFile(filepath.Join(dir, "executable"), []byte("v1-binary-content"), 0o755)
+	h1 := hashExecutableForKey()
+	if h1 == "missing" || h1 == "" {
+		t.Fatalf("hashing real binary failed: %q", h1)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "executable"), []byte("v2-recompiled-content"), 0o755)
+	h2 := hashExecutableForKey()
+	if h1 == h2 {
+		t.Errorf("different binary content must yield different hash; got identical %q", h1)
+	}
+}
+
+// TestHashExecutableForKey_SameContentDeterministic — same binary
+// content yields same hash across calls. Fixes the audit S4
+// nondeterminism (binary hash is content-derived, not call-order
+// derived).
+func TestHashExecutableForKey_SameContentDeterministic(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	_ = os.WriteFile(filepath.Join(dir, "executable"), []byte("stable-binary"), 0o755)
+	h1 := hashExecutableForKey()
+	h2 := hashExecutableForKey()
+	if h1 != h2 || h1 == "" || h1 == "missing" {
+		t.Errorf("hash must be deterministic for stable content, got %q vs %q", h1, h2)
+	}
+}
+
 // TestWholeBinaryOracleCache_KeyedByCwd — two different workdirs (e.g.
 // concurrent PB tasks) must NOT share oracle verdicts; each cwd has
 // its own cache slot.
